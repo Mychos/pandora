@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Pandora
+Comment=Offline secrets vault, one portable encrypted file
+Exec=pandora
+Icon=pandora
+Terminal=false
+Categories=Utility;Security;
+StartupWMClass=pandora

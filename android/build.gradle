@@ -1,0 +1,5 @@
+// The app is Gradle's; the Rust half is built by `cargo ndk` and lands in
+// `app/src/main/jniLibs` (see android/README.md). Nothing else is compiled here.
+plugins {
+    id 'com.android.application' version '9.1.0' apply false
+}

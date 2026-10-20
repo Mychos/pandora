@@ -1,0 +1,339 @@
+# Build every shipped platform from one tag, or from a manual dispatch that
+# selects the jobs it wants. Tests and lints stay in `check.yml`.
+#
+#   push v*                    all jobs, then publish the release
+#   workflow_dispatch          build the selected jobs; publish only when a
+#                              tag_name is given
+#
+# Linux is built on 22.04 rather than `ubuntu-latest` on purpose: the AppImage
+# inherits the runner's glibc floor, and 2.35 still opens on Debian 12 and
+# Ubuntu 22.04. Windows is a portable zip, macOS a universal unsigned .dmg and
+# .zip, Android an arm64 release APK signed with the debug key (see
+# android/app/build.gradle).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Jobs to run (comma-separated: linux,windows,macos,android). Defaults to all."
+        required: false
+        default: all
+      tag_name:
+        description: "Release tag to publish for manual runs. Leave empty to build artifacts only."
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # The tag being released, empty on a build-only manual run.
+  RELEASE_TAG: ${{ github.event.inputs.tag_name || (github.ref_type == 'tag' && github.ref_name) || '' }}
+
+jobs:
+  meta:
+    name: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: read and verify version
+        id: version
+        env:
+          REQUESTED_TAG: ${{ github.event.inputs.tag_name || (github.ref_type == 'tag' && github.ref_name) || '' }}
+        run: |
+          set -euo pipefail
+
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test -n "$version"
+
+          # Gradle carries its own versionName; a release where the APK and the
+          # desktop binaries disagree is a release nobody can describe.
+          android_version=$(sed -n 's/.*versionName "\(.*\)"/\1/p' android/app/build.gradle | head -1)
+          if [ "$android_version" != "$version" ]; then
+            echo "android versionName $android_version does not match Cargo.toml $version" >&2
+            exit 1
+          fi
+
+          if [ -n "$REQUESTED_TAG" ] && [ "$REQUESTED_TAG" != "v$version" ]; then
+            echo "requested tag $REQUESTED_TAG does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux AppImage
+    needs: meta
+    if: ${{ !github.event.inputs.jobs || github.event.inputs.jobs == 'all' || contains(github.event.inputs.jobs, 'linux') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The audio preview links against ALSA, the windowing backends look their
+      # libraries up through pkg-config, and the verification validates the
+      # desktop entry.
+      - name: system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            pkg-config \
+            libxkbcommon-dev \
+            desktop-file-utils
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: pin build timestamp
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: package
+        env:
+          # Public OAuth client id, not a secret. Keep the build unconfigured
+          # when the repository variable is absent instead of compiling in an
+          # empty id, which would turn sign-in into a broken request.
+          PANDORA_GITHUB_CLIENT_ID: ${{ vars.PANDORA_GITHUB_CLIENT_ID }}
+        run: |
+          if [ -z "${PANDORA_GITHUB_CLIENT_ID:-}" ]; then
+            unset PANDORA_GITHUB_CLIENT_ID
+            echo "::warning::PANDORA_GITHUB_CLIENT_ID is not set; this build refuses GitHub sign-in"
+          fi
+          scripts/appimage.sh
+
+      - name: verify
+        run: |
+          set -euo pipefail
+
+          mapfile -t images < <(find target/appimage -maxdepth 1 -type f -name 'Pandora-*.AppImage')
+          if [ "${#images[@]}" -ne 1 ]; then
+            echo "expected one AppImage, found ${#images[@]}" >&2
+            exit 1
+          fi
+          image=${images[0]}
+
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          (
+            cd "$work"
+            "$GITHUB_WORKSPACE/$image" --appimage-extract >/dev/null
+          )
+
+          test -x "$work/squashfs-root/AppRun"
+          test -L "$work/squashfs-root/.DirIcon"
+          test -f "$work/squashfs-root/pandora.desktop"
+          test -f "$work/squashfs-root/usr/share/applications/pandora.desktop"
+          desktop-file-validate "$work/squashfs-root/pandora.desktop"
+
+          # The one dynamic library outside glibc has to come from the bundle,
+          # not from whatever the runner happens to have installed.
+          LD_LIBRARY_PATH="$work/squashfs-root/usr/lib" \
+            ldd "$work/squashfs-root/usr/bin/pandora" \
+            | grep -F "$work/squashfs-root/usr/lib/libasound.so.2"
+
+          (cd target/appimage && sha256sum "$(basename "$image")" > SHA256SUMS)
+          cat target/appimage/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: |
+            target/appimage/Pandora-*.AppImage
+            target/appimage/SHA256SUMS
+          if-no-files-found: error
+
+  windows:
+    name: Windows portable
+    needs: meta
+    if: ${{ !github.event.inputs.jobs || github.event.inputs.jobs == 'all' || contains(github.event.inputs.jobs, 'windows') }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: package
+        shell: pwsh
+        env:
+          PANDORA_GITHUB_CLIENT_ID: ${{ vars.PANDORA_GITHUB_CLIENT_ID }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:PANDORA_GITHUB_CLIENT_ID)) {
+            Remove-Item Env:PANDORA_GITHUB_CLIENT_ID -ErrorAction SilentlyContinue
+            Write-Host "::warning::PANDORA_GITHUB_CLIENT_ID is not set; this build refuses GitHub sign-in"
+          }
+
+          cargo build --release --locked
+
+          $name = "Pandora-$env:VERSION-windows-x86_64"
+          $dir = "dist/$name"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "target/release/pandora.exe" "$dir/pandora.exe"
+          Copy-Item -Path "LICENSE", "README.md" -Destination $dir
+          Compress-Archive -Path "$dir/*" -DestinationPath "dist/$name.zip" -Force
+          Get-FileHash "dist/$name.zip" -Algorithm SHA256 | Format-List
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: dist/*.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal
+    needs: meta
+    if: ${{ !github.event.inputs.jobs || github.event.inputs.jobs == 'all' || contains(github.event.inputs.jobs, 'macos') }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: package
+        env:
+          PANDORA_GITHUB_CLIENT_ID: ${{ vars.PANDORA_GITHUB_CLIENT_ID }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          if [ -z "${PANDORA_GITHUB_CLIENT_ID:-}" ]; then
+            unset PANDORA_GITHUB_CLIENT_ID
+            echo "::warning::PANDORA_GITHUB_CLIENT_ID is not set; this build refuses GitHub sign-in"
+          fi
+          scripts/package-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: |
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: error
+
+  android:
+    name: Android APK
+    needs: meta
+    if: ${{ !github.event.inputs.jobs || github.event.inputs.jobs == 'all' || contains(github.event.inputs.jobs, 'android') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: install SDK and NDK
+        run: |
+          sdkmanager \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;26.3.11579264"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
+
+      - name: package
+        env:
+          PANDORA_GITHUB_CLIENT_ID: ${{ vars.PANDORA_GITHUB_CLIENT_ID }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          if [ -z "${PANDORA_GITHUB_CLIENT_ID:-}" ]; then
+            unset PANDORA_GITHUB_CLIENT_ID
+            echo "::warning::PANDORA_GITHUB_CLIENT_ID is not set; this build refuses GitHub sign-in"
+          fi
+
+          scripts/android-apk.sh
+
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk \
+            "dist/Pandora-$VERSION-android-arm64.apk"
+          sha256sum dist/*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/*.apk
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [meta, linux, windows, macos, android]
+    # Runs after a tag, or after a manual run that named one. `!failure()` keeps
+    # a broken platform from publishing a partial release; skipped jobs (a
+    # manual linux-only run) do not count as failures.
+    if: ${{ !cancelled() && !failure() && (github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name != '')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: checksums
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 -r sha256sum \
+            | sed 's#  \./#  #' > SHA256SUMS
+          cat SHA256SUMS
+
+      # `gh` is already on the runner, so publishing needs no third-party
+      # action and no credential beyond the workflow's own token.
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+              gh release create "$RELEASE_TAG" \
+                --verify-tag \
+                --title "$RELEASE_TAG" \
+                --generate-notes
+            else
+              # A manual run may name a tag that does not exist yet; create it
+              # at the commit the workflow was dispatched from.
+              gh release create "$RELEASE_TAG" \
+                --target "$GITHUB_SHA" \
+                --title "$RELEASE_TAG" \
+                --generate-notes
+            fi
+          fi
+
+          gh release upload "$RELEASE_TAG" dist/* --clobber

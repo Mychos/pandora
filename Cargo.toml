@@ -1,0 +1,205 @@
+[package]
+name = "pandora"
+version = "0.1.0"
+edition = "2021"
+description = "Pandora — offline secrets vault, one portable encrypted file"
+license = "MIT"
+default-run = "pandora"
+
+# Desktop runs the binary on top of this library; Android loads the `cdylib`
+# (see `android_main`) — so the same crate is both.
+[lib]
+name = "pandora"
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+# GUI. `default-features = false` here and the rest per target, because a phone
+# and a desktop do not draw the same way: the desktop keeps eframe's whole
+# default set (wgpu, the windowing backends, egui's bundled fonts), the phone
+# takes `glow`/EGL and reads its fonts out of `/system/fonts` instead of paying
+# for egui's ~1 MB of `.rodata`. A target only sees the tables it matches, so
+# what both want lives here and nothing else.
+eframe = { version = "0.36", default-features = false }
+egui = { version = "0.36", default-features = false }
+# Crypto core (no egui — shared by every platform)
+argon2 = "0.6"
+chacha20poly1305 = "0.11"
+# Keyfile digest (already in the tree as an argon2 dependency)
+blake2 = "0.11"
+hmac = "0.13"
+sha1 = "0.11"
+sha2 = "0.11"
+# GitHub mirror: blocking HTTP with rustls+ring by default, so no OpenSSL to
+# cross-compile for Android/iOS. Only the Contents API and the device flow.
+ureq = { version = "3", features = ["json"] }
+zeroize = { version = "1.9", features = ["derive", "std"] }
+getrandom = "0.3"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+dirs = "7"
+# What the app says when something goes wrong. A phone is the reason it exists —
+# with no logger initialized `log` drops everything, and there is no console to
+# fall back on there (`android_logger`, `adb logcat -s pandora`) — but the shared
+# side needs the macros to say anything at all.
+log = "0.4"
+# Icon sprites (lucide) rasterized to PNG; same image crate version eframe already pulls.
+# `png`/`jpeg`/`webp` only: a `.gif` or `.bmp` in the drive gets the generic
+# card instead of a preview, and `preview::is_image` lists the same three.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+] }
+# A URI calls an account `ACME%20Co`: the escape has to come off before it
+# names a row. Already in the tree inside `url`.
+percent-encoding = "2"
+url = "2.5.8"
+psl2 = "0.1.32"
+# Reading a one-time seed out of a QR image: pure Rust, no image backend of its
+# own — the bytes are already decoded by the `image` crate above.
+# The QR reader: ZXing's, which is the one that reads a photograph of a screen.
+# `rqrr` finds the three corners of a clean render and gives up on a real frame.
+#
+# No `image` feature: it would drag `imageproc` in, whose own default features
+# switch on every format the `image` crate knows (exr, tiff, dds, hdr, qoi,
+# pnm, tga, ico, avif) — megabytes for formats a vault never reads. The pixels
+# reach the reader through `Luma8LuminanceSource` instead (see `codes::text_in`).
+# `encoding_rs` stays: the byte-mode decoder asks for the character set on every
+# read, and `no_character_set_support` answers with an `unimplemented!()`.
+rxing = { version = "0.9", default-features = false, features = [
+    "decoders",
+    "qrcode",
+    "encoding_rs",
+] }
+# A document's preview is read from its own bytes: a PDF page rasterized in pure
+# Rust (no PDFium/native library to cross-compile), and an audio file decoded by
+# Symphonia and played through CPAL. No `mp4`: the AAC decoder inside it costs
+# 76 KB of APK (its `POW43` tables and a 64 K FFT), and a phone plays `.m4a`
+# elsewhere. `preview::is_audio` lists exactly these codecs.
+hayro = "0.8"
+rodio = { version = "0.23", default-features = false, features = [
+    "playback",
+    "mp3",
+    "flac",
+    "vorbis",
+    "wav",
+] }
+
+# Desktop only: the native file picker (xdg-desktop-portal on Linux, so no GTK)
+# and the clipboard egui copies through — the app reads it back so the countdown
+# can tell its own password from whatever the user copied afterwards, and so a
+# screenshot's QR can be read. `image-data` is what makes an image readable;
+# Android reaches both through the platform itself (see `shared/android.rs`).
+#
+# `eframe` with its defaults back: wgpu as the renderer, the windowing backends,
+# and egui's own fonts.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = "0.36"
+rfd = "0.17.2"
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# The GitHub token, when the user asks to keep it, goes to the platform's own
+# credential store — Keychain, Credential Manager, Secret Service. A phone is
+# not here: it keeps the token in the keystore through `shared/android.rs`, so
+# compiling this crate for Android would build a store nobody calls (and the
+# linker would drop it again).
+keyring = "4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# X11 needs nothing extra; Wayland needs the data-control protocol to read the
+# clipboard back for the countdown. `smithay-clipboard` inside egui covers the
+# app's own copy, but `Shell::sweep_clip` reads through arboard.
+arboard = { version = "3.6", default-features = false, features = [
+    "image-data",
+    "wayland-data-control",
+] }
+system-idle-time = "1.0.4"
+libc = "0.2"
+zbus = "5.19"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+system-idle-time = { version = "1.0.4", default-features = false }
+# The idle clock, and the named pipe the browser bridge listens on: `std` has no
+# pipe API, so `Win32_System_Pipes`, `Win32_Storage_FileSystem` and the overlapped
+# I/O that gives a read a deadline are all reached through here.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+system-idle-time = { version = "1.0.4", default-features = false }
+
+# The activity, its JVM handle and the keystore. `game-activity` is the same
+# backend `eframe` asks winit for. glow and not wgpu: measured on the Mi 9T the
+# APK goes from 7.58 MB to 6.39 MB, and every case wgpu was kept for was run
+# again on glow and paints — cold start, background and back, a rotation, and
+# the locked phone that had never been reproducible from `adb`. `android/README.md`
+# has the numbers and the way back (`wgpu` plus the swapchain knob in `App::ui`).
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.36", default-features = false, features = [
+    "glow",
+    "android-game-activity",
+] }
+android-activity = { version = "0.6", default-features = false, features = [
+    "game-activity",
+] }
+jni = "0.22"
+# Without a logger everything the app and eframe say is dropped, and a phone has
+# no console to fall back on: `adb logcat -s pandora`.
+android_logger = "0.15"
+
+[dev-dependencies]
+# The other half of the QR test: one crate encodes, the other reads, so a round
+# trip proves the reader rather than a checked-in fixture nobody can inspect.
+qrcode = "0.14"
+
+# egui, winit and wgpu are heavy enough that unoptimized they make every frame of
+# `cargo run` — the resize gesture above all — visibly slower than the release
+# build. The app's own crate stays unoptimized, so it keeps its debug info.
+[profile.dev.package."*"]
+opt-level = 2
+
+# The app's own crate carries the whole UI: layout, theme, lists. Leaving it at
+# `opt-level = 0` made the resize gesture the slowest thing in a debug run —
+# visible even on a small vault. Optimizing it too keeps `cargo run` usable and
+# keeps full debug info (`debug = true` is still the default).
+[profile.dev.package.pandora]
+opt-level = 2
+
+[profile.release]
+# `s`, and not the default `3` or `z`, is what the phone weighs: measured on the
+# Android `.so` (`target/apk-size/measure.sh`), `s` takes the APK from 9.28 MB
+# to 8.21 MB, while `z` shrinks `.text` further (11.27 to 7.66 MB) yet grows
+# `.eh_frame` enough (1.07 to 2.11 MB) to end up 167 KB *larger* than `s`
+# (8.38 MB). Optimization for size costs the resize gesture and the QR decode
+# some speed, which is the trade this profile takes.
+opt-level = "s"
+# The phone is the reason this is not eframe's own advice: one artifact, no
+# debugger, and a `.so` whose `.eh_frame` (1.75 MB) and `.gcc_except_table`
+# (0.93 MB) exist only so a panic can be caught somewhere it never is. `set_hook`
+# in `lib.rs` still logs before the abort, which is the whole diagnosis a phone
+# gets. The desktop reaps the same numbers.
+panic = "abort"
+# `thin` y no `fat`: con `codegen-units = 1` los dos hacen la misma
+# optimización entre crates, y `fat` sale 3,5 KB *más grande* en el APK
+# (8.211.624 contra 8.208.068). El viejo temor — que contra el clang del NDK
+# `fat` dejara el `.symtab` puesto — no se reproduce: con `strip = true`,
+# `llvm-nm` responde "no symbols" y pasarle un `llvm-strip --strip-unneeded`
+# después no cambia un byte. `thin` se queda por peso, no por miedo.
+lto = "thin"
+codegen-units = 1
+# Worth 4.7 MB of `.symtab` and `.strtab` on the phone. It has to stay a
+# top-level setting: a `[profile.release.package.pandora]` override — even one
+# that only touches `opt-level` — makes cargo drop `-C strip=symbols` for that
+# package and quietly ship the symbols. The app's own crate is a rounding error
+# next to that, so it takes the same level as everything else.
+strip = true

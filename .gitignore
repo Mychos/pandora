@@ -1,0 +1,14 @@
+/target
+/.cargo/config.toml
+
+# The JVM behind the Android build leaves these two in the working directory
+# when it dies: its own state and a replay of it, megabytes each.
+hs_err_pid*.log
+replay_pid*.log
+
+# Android: the cdylib is built by `cargo ndk`, the rest by Gradle.
+/android/app/src/main/jniLibs
+/android/app/build
+/android/build
+/android/.gradle
+/android/local.properties

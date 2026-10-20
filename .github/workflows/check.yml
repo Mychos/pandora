@@ -1,0 +1,64 @@
+# The crate is the only thing this repository holds; the browser extension lives
+# beside it and carries its own release steps.
+#
+# Three runners on purpose. Linux is where the suite and the lints run. Windows
+# is the only place the named-pipe bridge in `src/bridge/socket.rs` is ever
+# executed — it cannot be cross-compiled here (the C dependencies want a mingw
+# toolchain), so without this job the Windows half rots. macOS only typechecks:
+# the suite stays on Linux, but its target-specific windowing and idle branches
+# still have to be seen by rustc.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # The audio preview links against ALSA, and the windowing backends look
+      # their libraries up through pkg-config.
+      - name: system libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libxkbcommon-dev
+      - name: format
+        run: cargo fmt --check
+      - name: lints
+        run: cargo clippy --all-targets -- -D warnings
+      # `probe_rows` is a debug probe and is `#[ignore]`d, so this is the whole
+      # suite and nothing has to be skipped.
+      - name: tests
+        run: cargo test
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: typecheck every target
+        run: cargo check --all-targets
+      # The pipe tests: bind, a second listener declining, a message both ways,
+      # and a read that has to time out instead of parking the app.
+      - name: bridge over a named pipe
+        run: cargo test --lib bridge
+
+  # macOS only compiles here: the suite and the lints run on Linux, but this
+  # is where the target-specific windowing and idle branches are seen by rustc.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: typecheck every target
+        run: cargo check --all-targets

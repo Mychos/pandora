@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The fingerprint prompt. The vault itself needs no permission at all. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- The GitHub mirror on the sources screen. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Reading a QR from inside the app. Asked for only when a scan starts. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
+    <application
+        android:allowBackup="false"
+        android:enableOnBackInvokedCallback="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Pandora"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/ActivityTheme">
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- The cdylib `cargo ndk` writes into `jniLibs`. -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="pandora" />
+        </activity>
+
+    </application>
+</manifest>
