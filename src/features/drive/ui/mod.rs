@@ -889,7 +889,7 @@ fn grid(ui: &mut Ui, app: &mut App) {
                 // The icon already carries the kind, so only a document's own size
                 // is worth a subtitle: a note has nothing else to say.
                 let sub = match i {
-                    Entry::File(f) => crate::vault::store::human_size(f.bytes()),
+                    Entry::File(f) => crate::shared::ui::size::human(f.bytes()),
                     Entry::Note(_) => String::new(),
                 };
                 let icon = match &i {

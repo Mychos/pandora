@@ -89,7 +89,7 @@ fn detail<'a>(it: &Any<'a>) -> Cow<'a, str> {
     match it {
         Any::Login(it) if !it.username.is_empty() => Cow::Borrowed(it.username.as_str()),
         Any::Login(it) => Cow::Borrowed(it.url.as_str()),
-        Any::Drive(Entry::File(it)) => Cow::Owned(crate::vault::store::human_size(it.bytes())),
+        Any::Drive(Entry::File(it)) => Cow::Owned(crate::shared::ui::size::human(it.bytes())),
         Any::Drive(Entry::Note(_)) | Any::Otp(_) => Cow::Borrowed(""),
     }
 }

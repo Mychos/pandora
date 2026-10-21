@@ -7,9 +7,9 @@ use crate::features::drive::preview;
 use crate::shared::theme;
 use crate::shared::ui::entry as record;
 use crate::shared::ui::responsive;
+use crate::shared::ui::size;
 
 use crate::vault::model::{now_secs, Entry, Kind};
-use crate::vault::store;
 use egui::{Layout, TextEdit, Ui};
 
 /// The gap the entry keeps above the button that deletes it; with `responsive::target`
@@ -337,7 +337,7 @@ fn body_file(ui: &mut Ui, app: &mut App, sel: &str) {
             {
                 export_this = true;
             }
-            theme::hint(ui, &store::human_size(file.bytes()));
+            theme::hint(ui, &size::human(file.bytes()));
         });
     });
     ui.add_space(4.0);

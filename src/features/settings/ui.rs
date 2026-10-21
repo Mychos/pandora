@@ -7,6 +7,7 @@ use crate::features::settings::model as prefs;
 use crate::shared::i18n::{self, t, tf, Lang};
 use crate::shared::theme;
 use crate::shared::ui::balance;
+use crate::shared::ui::size;
 use crate::vault::model::Kind;
 use crate::vault::store;
 use egui::{Label, RichText, TextEdit};
@@ -95,7 +96,7 @@ fn facts(app: &App) -> Facts {
     let count = |kind| s.vault.drive.iter().filter(|e| e.kind() == kind).count();
     Facts {
         path: s.path.display().to_string(),
-        size: store::human_size(len as usize),
+        size: size::human(len as usize),
         total: s.vault.records().count(),
         pw: s.vault.logins.len(),
         notes: count(Kind::Note),

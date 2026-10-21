@@ -6,6 +6,7 @@ use crate::features::settings::model::{self as prefs, Remote, Source, GITHUB};
 use crate::features::sync::github::{self as sync, Fingerprint};
 use crate::features::sync::remember;
 use crate::shared::i18n::tf;
+use crate::shared::ui::size;
 use crate::vault::store;
 use crate::vault::Failure;
 use std::fs;
@@ -660,8 +661,8 @@ impl App {
                 self.shell.fail(tf(
                     "this box is {size} — a repo file holds at most {max}",
                     &[
-                        ("size", &store::human_size(size as usize)),
-                        ("max", &store::human_size(sync::MAX_FILE)),
+                        ("size", &size::human(size as usize)),
+                        ("max", &size::human(sync::MAX_FILE)),
                     ],
                 ));
             }
@@ -679,8 +680,8 @@ impl App {
                 self.shell.fail(tf(
                     "this box is {size} — a repo file holds at most {max}",
                     &[
-                        ("size", &store::human_size(bytes.len())),
-                        ("max", &store::human_size(sync::MAX_FILE)),
+                        ("size", &size::human(bytes.len())),
+                        ("max", &size::human(sync::MAX_FILE)),
                     ],
                 ));
             }
