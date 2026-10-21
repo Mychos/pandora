@@ -1,16 +1,7 @@
-//! The local channel the app listens on and the host relays through.
-//!
-//! A Unix domain socket on unix and a named pipe on Windows, never a TCP port —
-//! nothing here is reachable off the machine. On unix it lives in the session's
-//! runtime dir: per-user, off the disk, and cleared by the system at logout, with
-//! the app's data dir as the fallback on a system without one. On Windows it is
-//! `\\.\pipe\pandora-bridge-<digest>`, created with `PIPE_REJECT_REMOTE_CLIENTS`
-//! and the creator's own DACL, so the same-user rule holds there too: a crashed
-//! process takes its pipe with it, which is why only unix has to sweep a leftover.
-//!
-//! Both ends of both platforms are named by one path — [`path`] — and each platform
-//! turns that path into whatever it actually listens on. That is what lets a test
-//! point both peers at a channel of its own with `PANDORA_BRIDGE_SOCKET`.
+//! The local channel: a Unix socket or a Windows named pipe, never a TCP port.
+//! `PANDORA_BRIDGE_SOCKET` names it; tests use it to get a private channel.
+//! Both platforms are user-private: socket mode 0600, pipe DACL and
+//! `PIPE_REJECT_REMOTE_CLIENTS`.
 
 use std::io;
 use std::path::PathBuf;
@@ -23,12 +14,8 @@ pub use windows::{connect_at, Listener, Stream};
 #[cfg(not(any(unix, windows)))]
 pub use other::{connect_at, Listener, Stream};
 
-/// Where the app listens. `PANDORA_BRIDGE_SOCKET` names it outright, which is how a
-/// test — or a second install — points both peers at a channel of its own instead of
-/// the session's.
-///
-/// Otherwise the session's runtime dir: per-user, off the disk, and cleared by the
-/// system at logout. The app's data dir is the fallback on a system without one.
+/// `PANDORA_BRIDGE_SOCKET` wins; otherwise `XDG_RUNTIME_DIR` (per-user, off disk,
+/// cleared at logout), else the app's data dir.
 pub fn path() -> PathBuf {
     if let Some(path) = std::env::var_os("PANDORA_BRIDGE_SOCKET").filter(|p| !p.is_empty()) {
         return PathBuf::from(path);
@@ -39,8 +26,7 @@ pub fn path() -> PathBuf {
     base.join("pandora-bridge.sock")
 }
 
-/// Reach the app on the default channel. Fails when nothing is listening, which
-/// every caller reads as "no bridge here, answer it yourself".
+/// Fails when nothing is listening, which callers read as "no bridge, answer it yourself".
 pub fn connect() -> io::Result<Stream> {
     connect_at(&path())
 }
@@ -58,27 +44,23 @@ mod unix {
     pub struct Listener(UnixListener);
 
     impl Listener {
-        /// Bind at one named socket. Two apps on one vault would race for every
-        /// request, so the second one gets `None` and does not listen at all.
+        /// A second app gets `None` and does not listen: two would race for every request.
         pub fn bind_at(path: &Path) -> io::Result<Option<Self>> {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            // Something already listening is a live instance; anything else at that
-            // path is a leftover from a crash, and bind would refuse it.
+            // A path that connects is live; anything else is a crash leftover that bind refuses.
             if UnixStream::connect(path).is_ok() {
                 return Ok(None);
             }
             let _ = std::fs::remove_file(path);
             let listener = UnixListener::bind(path)?;
-            // The directory already keeps other users out; this keeps it honest if
-            // the socket ever lands somewhere shareable.
+            // The directory keeps others out; the mode keeps it honest if the socket lands elsewhere.
             std::fs::set_permissions(path, Permissions::from_mode(0o600))?;
             Ok(Some(Self(listener)))
         }
 
-        /// The next connection. Blocks until one arrives: the app keeps a thread
-        /// parked here, so a browser is answered even when nothing is drawing.
+        /// Blocks until one arrives, so a browser is answered even when nothing draws.
         pub fn accept(&self) -> io::Result<Stream> {
             self.0.accept().map(|(stream, _)| stream)
         }
@@ -89,10 +71,8 @@ mod unix {
     }
 }
 
-/// Windows has no socket in `std`, so the channel is a named pipe driven through
-/// `windows-sys`. The pipe name is derived from [`super::path`], never from the
-/// user name, so `PANDORA_BRIDGE_SOCKET` isolates one test or one install exactly
-/// as it does on unix.
+/// Windows has no socket in `std`: the channel is a pipe via `windows-sys`, named by
+/// [`super::path`] so `PANDORA_BRIDGE_SOCKET` isolates one test or install.
 #[cfg(windows)]
 mod windows {
     use std::io::{self, Read, Write};
@@ -115,8 +95,7 @@ mod windows {
     use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
     use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
-    /// Room on each side of one message. The protocol caps a message at 1 MiB, and
-    /// the buffer only has to hold what is in flight, not the whole of one.
+    /// The protocol caps a message at 1 MiB; the buffer only holds what is in flight.
     const BUFFER: u32 = 64 * 1024;
 
     pub struct Listener {
@@ -129,13 +108,10 @@ mod windows {
     }
 
     impl Listener {
-        /// Bind one named pipe. A second app finds the first one's instance waiting
-        /// and gets `None`, so only one of them ever answers.
+        /// A second app finds the first one waiting and gets `None`, so only one answers.
         pub fn bind_at(path: &Path) -> io::Result<Option<Self>> {
             let name = name(path)?;
-            // An instance that nobody has connected to yet is a live app waiting for
-            // a browser; every instance busy is one with a request in flight. Either
-            // way the name is taken.
+            // A free instance is a live app; a busy one has a request in flight. Either way, taken.
             if unsafe { WaitNamedPipeW(name.as_ptr(), 0) } != 0 {
                 return Ok(None);
             }
@@ -149,8 +125,7 @@ mod windows {
             }))
         }
 
-        /// The next connection. Blocks until one arrives, exactly as unix does, and
-        /// leaves a fresh instance behind so the app goes on answering.
+        /// Blocks as unix does, and leaves a fresh instance behind.
         pub fn accept(&self) -> io::Result<Stream> {
             let Some(handle) = self.next.lock().expect("pipe lock").take() else {
                 return Err(io::Error::new(
@@ -161,8 +136,7 @@ mod windows {
 
             let mut wait = Wait::new()?;
             let started = unsafe { ConnectNamedPipe(handle, wait.overlapped()) };
-            // A caller that arrived between the two calls connected already: the API
-            // reports that as a failure, and it is the outcome we wanted.
+            // A caller that connected between the two calls is the outcome we wanted.
             if started == 0 && unsafe { GetLastError() } == ERROR_PIPE_CONNECTED {
                 self.renew();
                 return Ok(Stream::new(handle));
@@ -176,8 +150,7 @@ mod windows {
             Ok(Stream::new(handle))
         }
 
-        /// The instance the next `accept` takes. A failure here is not fatal to the
-        /// connection already accepted: the listener simply stops answering after it.
+        /// A failure here only stops answering after the connection already accepted.
         fn renew(&self) {
             if let Some(mut slot) = self.next.lock().ok() {
                 if slot.is_none() {
@@ -200,9 +173,8 @@ mod windows {
             }
         }
 
-        /// One overlapped read or write, waiting at most `timeout` for it. A read
-        /// that runs out of time is cancelled, not abandoned, so the handle is not
-        /// left with an operation still pointing at a buffer we are about to drop.
+        /// One overlapped read or write, waiting at most `timeout`. A timed-out read is
+        /// cancelled, so no operation is left pointing at a buffer about to drop.
         fn begin(
             &self,
             buf: *mut u8,
@@ -244,8 +216,7 @@ mod windows {
             let timeout = *self.timeout.lock().expect("timeout lock");
             match self.begin(buf.as_mut_ptr(), buf.len(), false, timeout) {
                 Ok(n) => Ok(n),
-                // The other end hung up, or the pipe was closed under us. `read_exact`
-                // turns this into the UnexpectedEof that ends the protocol cleanly.
+                // The other end hung up: `read_exact` turns this into the UnexpectedEof.
                 Err(e) if matches!(e.raw_os_error(), Some(code) if code == ERROR_BROKEN_PIPE as i32 || code == ERROR_NO_DATA as i32) => {
                     Ok(0)
                 }
@@ -277,8 +248,7 @@ mod windows {
         }
     }
 
-    // The handle is owned by exactly one `Stream`, which moves between threads and is
-    // never shared: `&Stream` is not usable for I/O on its own, so moving it is safe.
+    // One `Stream` owns the handle, moves between threads and is never shared.
     unsafe impl Send for Stream {}
 
     pub fn connect_at(path: &Path) -> io::Result<Stream> {
@@ -320,17 +290,16 @@ mod windows {
         Ok(handle)
     }
 
-    /// The pipe name that stands for one path. A digest rather than the path itself:
-    /// a pipe name is machine-global, and two users with a data dir each must never
-    /// land on each other's pipe.
+    /// A digest, not the path: a pipe name is machine-global, and two users with a
+    /// data dir each must never land on the same pipe.
     fn name(path: &Path) -> io::Result<Vec<u16>> {
         let key = crate::vault::crypto::digest(path.to_string_lossy().as_bytes());
         let full = format!("\\\\.\\pipe\\pandora-bridge-{key}");
         Ok(full.encode_utf16().chain(std::iter::once(0)).collect())
     }
 
-    /// One overlapped operation: the structure the API fills in, and the event that
-    /// says it finished. Owned per call so a timed-out one cannot outlive its buffer.
+    /// One overlapped operation: the structure the API fills in and its event, owned
+    /// per call so a timed-out one cannot outlive its buffer.
     struct Wait {
         ov: OVERLAPPED,
         event: HANDLE,
@@ -352,8 +321,7 @@ mod windows {
             &mut self.ov
         }
 
-        /// Wait for `started`'s operation and hand back how many bytes it moved.
-        /// `None` waits for as long as the other end takes.
+        /// Wait for `started` and return the bytes moved; `None` waits as long as needed.
         fn finish(
             &mut self,
             handle: HANDLE,
@@ -372,8 +340,7 @@ mod windows {
                 match unsafe { WaitForSingleObject(self.event, millis) } {
                     WAIT_OBJECT_0 => {}
                     WAIT_TIMEOUT => {
-                        // Cancel and let the cancellation land: the OVERLAPPED cannot
-                        // be dropped while the kernel may still write to it.
+                        // Let the cancellation land: the OVERLAPPED cannot drop while the kernel may write.
                         unsafe {
                             CancelIoEx(handle, &self.ov);
                             WaitForSingleObject(self.event, u32::MAX);
@@ -405,8 +372,7 @@ mod windows {
         use super::*;
         use std::io::{Read, Write};
 
-        /// The whole channel, both ends, over the real kernel object: what the unix
-        /// side gets from `UnixStream` and this side has to build.
+        /// The whole channel over the real kernel object, which unix gets from `UnixStream`.
         #[test]
         fn a_pipe_carries_a_message_both_ways_and_hangs_up_cleanly() {
             let dir = std::env::temp_dir().join(format!("pandora-pipe-{}", std::process::id()));
@@ -429,7 +395,7 @@ mod windows {
             stream.read_exact(&mut got).unwrap();
             assert_eq!(&got, b"ping");
             stream.write_all(b"pong").unwrap();
-            // The other end hangs up: this must read as a clean end, not an error.
+            // The other end hangs up: this must read as a clean end.
             drop(stream);
             peer.join().unwrap();
         }
@@ -446,8 +412,8 @@ mod windows {
             );
         }
 
-        /// A read that nobody answers gives up on its own, and the connection can
-        /// still be dropped without leaving an operation pointing at a dead buffer.
+        /// A read nobody answers gives up on its own, and the connection drops without
+        /// an operation on a dead buffer.
         #[test]
         fn a_silent_caller_times_out() {
             let dir = std::env::temp_dir().join(format!("pandora-pipe-3-{}", std::process::id()));
@@ -478,9 +444,8 @@ mod other {
     use std::io::{self, Read, Write};
     use std::path::Path;
 
-    /// Never constructed: this platform has no channel yet, so `connect_at` always
-    /// fails and `bind_at` always says no. It exists so the relay's code type-checks
-    /// where there is nothing to listen on.
+    /// Never constructed: this platform has no channel, so `connect_at` fails and
+    /// `bind_at` says no; it exists so the relay type-checks.
     pub struct Stream;
 
     impl Stream {

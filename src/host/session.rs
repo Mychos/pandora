@@ -1,6 +1,5 @@
-//! The unlocked box the host holds in memory: a derived key, the vault behind it,
-//! and the read-only reads the extension asks for. It reuses `vault::store`
-//! exactly as the app does — no second implementation of the format or the crypto.
+//! The unlocked box the host holds: derived key, vault, and the reads the extension
+//! asks for, through the same `vault::store` as the app.
 
 use crate::bridge::protocol::Candidate;
 use crate::bridge::serve;
@@ -15,8 +14,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// Decrypt once with the master password; the derived key stays here for the
-    /// life of the process and never crosses back to the browser.
+    /// The derived key lives for the process and never crosses back to the browser.
     pub fn unlock(path: PathBuf, password: &str) -> Result<Self, String> {
         let (creds, vault) = store::open(&path, password, None)?;
         Ok(Self { path, creds, vault })
@@ -30,21 +28,18 @@ impl Session {
         self.vault.logins.len()
     }
 
-    /// Re-read the file and decrypt with the cached key: the app may have written
-    /// since the last read, and only the KDF is expensive, not the decryption.
+    /// Re-read and decrypt with the cached key: the app may have written since.
     pub fn refresh(&mut self) -> Result<(), String> {
         self.vault = store::load(&self.path, &self.creds)?;
         Ok(())
     }
 
-    /// The box itself, for whoever needs to read it — the bridge's shared reader,
-    /// which both peers answer from.
+    /// The box itself, for the shared reader both peers answer from.
     pub fn vault(&self) -> &Vault {
         &self.vault
     }
 
-    /// Add a login the user saved from the panel. The file is re-read first, so
-    /// an edit made in the app while the panel was open is not lost.
+    /// Re-read first, so an edit made in the app while the panel was open is not lost.
     pub fn create(
         &mut self,
         name: String,
@@ -58,7 +53,6 @@ impl Session {
         Ok(entry)
     }
 
-    /// Change the fields the panel sent; anything it left out keeps what it had.
     /// Same re-read first, so the app's other edits survive.
     pub fn update(
         &mut self,
@@ -171,8 +165,7 @@ mod tests {
         store::save(&path, &mut vault, &creds).unwrap();
         let mut session = Session::unlock(path.clone(), "pw").unwrap();
 
-        // The app adds an entry while the panel is open. The write must re-read
-        // first, or this one is lost.
+        // The write must re-read first, or the app's entry is lost.
         vault.logins.push(Login::new(2));
         store::save(&path, &mut vault, &creds).unwrap();
 

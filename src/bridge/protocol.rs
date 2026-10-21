@@ -1,28 +1,16 @@
-//! What the two peers say to each other: the browser's native-messaging framing —
-//! a 4-byte length prefix in native byte order, then that many UTF-8 bytes of JSON,
-//! as Chrome and Firefox document it — and the messages themselves.
-//!
-//! Both hops speak the same messages: the browser to `pandora-native-host`, and the
-//! host to the app over a local socket. One set of types, written and read at both
-//! ends, so the two cannot drift apart.
-//!
-//! One field rides only on the second hop: `caller`. The host reads it from its own
-//! argv — the browser passes the caller's origin (Chromium) or the add-on id
-//! (Firefox) — and adds it when it relays, because the app cannot see the browser's
-//! process table. It is an envelope field, not part of a `Request`, so a request means
-//! the same thing wherever it arrives.
-//!
+//! The browser's framing — a 4-byte native-order length prefix, then UTF-8 JSON, as
+//! Chrome and Firefox document it — and the messages both hops share.
+//! `caller` rides only on the host-to-app hop, read from argv.
 //! stdout carries the protocol and nothing else; logs go to stderr.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, Read, Write};
 
-/// A length prefix is an allocation size taken from a stream, so it is capped
-/// rather than trusted — on either hop.
+/// An allocation size read from a stream, so capped rather than trusted, on either hop.
 const MAX: usize = 1024 * 1024;
 
-/// One message, or `None` at a clean end of input (the peer closed the port).
+/// One message, or `None` at a clean end of input.
 pub fn read<R: Read>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
     let mut len = [0u8; 4];
     match reader.read_exact(&mut len) {
@@ -50,8 +38,7 @@ pub fn write<W: Write>(writer: &mut W, msg: &[u8]) -> io::Result<()> {
     writer.flush()
 }
 
-/// Write one answer, carrying back the pairing id the caller put on its request, so
-/// both peers answer the same way and neither has to remember the convention.
+/// Write one answer, carrying the request's pairing id back, so both peers agree.
 pub fn reply<W: Write>(writer: &mut W, id: Option<u64>, response: &Response) -> io::Result<()> {
     let mut body = serde_json::to_value(response)
         .unwrap_or_else(|_| serde_json::json!({ "type": "error", "message": "serialize" }));
@@ -63,12 +50,8 @@ pub fn reply<W: Write>(writer: &mut W, id: Option<u64>, response: &Response) -> 
     write(writer, &json)
 }
 
-/// Split the pairing id off a request, plus who the browser said was calling.
-///
-/// `id` rides back on the reply so the extension can pair it with its call: a
-/// native-messaging port is one stream with no request/response framing of its own.
-/// `caller` only appears on the hop the host makes to the app, which cannot see the
-/// browser's process table; the host reads it from its own argv and adds it.
+/// Split the pairing id and the caller off a request: a native-messaging port has no
+/// framing of its own, and `caller` only exists on the host-to-app hop.
 #[derive(Debug)]
 pub struct Envelope {
     pub id: Option<u64>,
@@ -108,15 +91,14 @@ pub enum Request {
     Lock,
     Status,
     Entries,
-    /// The page the user is on. `url` is the whole address and wins when both
-    /// arrive; `host` is what the first version of the extension sent.
+    /// `url` wins when both arrive; `host` is what the first extension version sent.
     Match {
         #[serde(default)]
         host: Option<String>,
         #[serde(default)]
         url: Option<String>,
     },
-    /// A login the user saved from the panel. Goes into the open box only.
+    /// A login saved from the panel; goes into the open box only.
     Create {
         name: String,
         username: String,
@@ -131,8 +113,7 @@ pub enum Request {
         #[serde(default)]
         password: Option<String>,
     },
-    /// A password for a signup form. Never stored here — it rides back to the
-    /// page the user asked from.
+    /// A password for a signup form: never stored, it rides back to the page.
     Generate {
         #[serde(default)]
         length: Option<usize>,
@@ -140,11 +121,9 @@ pub enum Request {
     Reveal {
         id: String,
     },
-    /// The one-time seeds in the box, by name. No seed and no code: a listing never
-    /// carries a secret.
+    /// The seeds in the box, by name: a listing never carries a secret.
     Codes,
-    /// The code one seed is holding right now — derived, and about to expire. The
-    /// seed itself never leaves the box.
+    /// The code one seed holds now, derived and about to expire; the seed stays put.
     Code {
         id: String,
     },
@@ -157,10 +136,8 @@ pub struct BoxInfo {
     pub name: String,
 }
 
-/// An entry as the extension is allowed to see it: no password field exists here,
-/// so none can leak through a listing or a match. `uri` is the stored URL that
-/// claimed the page — the extension shows it so the user can see *why* an entry
-/// offered itself.
+/// An entry as the extension may see it: no password field exists here, and `uri` is
+/// the stored URL that claimed the page, so the user sees why it was offered.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Candidate {
     pub id: String,
@@ -170,16 +147,15 @@ pub struct Candidate {
     pub uri: Option<String>,
 }
 
-/// A one-time seed as the extension is allowed to see it: an id and a name. The
-/// seed stays in the box; [`Request::Code`] derives the value for one id at a time,
-/// after the user picks it — the same shape as `Candidate` and `Reveal`.
+/// A seed as the extension may see it: id and name. [`Request::Code`] derives the
+/// value for one id after the user picks it.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CodeInfo {
     pub id: String,
     pub name: String,
 }
 
-/// Both peers send this one, so it is written and read on either hop.
+/// Both peers send this one, on either hop.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
@@ -193,8 +169,7 @@ pub enum Response {
     Ok,
     Status {
         unlocked: bool,
-        /// Whether this peer could open a box if asked — the host says yes only when
-        /// the user has allowed unlocking from the browser, which is off by default.
+        /// The host says yes only when the user allowed browser unlocks (off by default).
         unlockable: bool,
         name: Option<String>,
         count: usize,

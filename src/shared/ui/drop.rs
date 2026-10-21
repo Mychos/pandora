@@ -1,24 +1,20 @@
-//! Where a dragged row or card would land, and the line that says so. The drive
-//! grid, the folder tree and the lists all resolve their drops the same way, so
-//! the rule lives here once and every list keeps the same feel.
+//! Where a drop lands and the line that marks it, shared by the drive, the tree
+//! and the lists so every drop feels the same.
 
 use crate::app::Drag;
 use crate::shared::theme;
 use egui::{Rect, Ui};
 
-/// Where a dragged card or row would land: next to the target (`Side`) or inside
-/// it (`Into`, folders only).
+/// Next to the target (`Side`) or inside it (`Into`, folders only).
 #[derive(Clone, Copy)]
 pub enum Landing {
     Into,
     Side { after: bool },
 }
 
-/// Resolve a drop over `rect`. `horizontal` is the target's own axis: grid cards
-/// lay out left to right, tree rows and list rows top to bottom. A folder takes a
-/// drop into its centre and a reorder on its edge; an entry only reorders (by
-/// half). An entry over a folder is always a move into it; a folder over an entry
-/// is a no-op.
+/// Resolve a drop over `rect`; `horizontal` is the target's axis. A folder takes a
+/// drop into its centre and a reorder on its edge, an entry only reorders; an entry
+/// over a folder always moves into it, a folder over an entry does nothing.
 pub fn landing(ui: &Ui, rect: Rect, horizontal: bool, target_folder: bool) -> Option<Landing> {
     let carried = egui::DragAndDrop::payload::<Drag>(ui.ctx())?;
     let p = ui.ctx().pointer_interact_pos()?;
@@ -52,8 +48,8 @@ pub fn landing(ui: &Ui, rect: Rect, horizontal: bool, target_folder: bool) -> Op
     }
 }
 
-/// The insertion line for a `Side` landing: a vertical rule for a grid card, a
-/// horizontal one for a tree row or a list row.
+/// The insertion line for a `Side` landing: vertical for a grid card, horizontal
+/// for a row.
 pub fn mark(ui: &Ui, rect: Rect, after: bool, horizontal: bool) {
     let (a, b) = if horizontal {
         let x = if after { rect.max.x } else { rect.min.x };

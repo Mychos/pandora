@@ -1,7 +1,5 @@
-//! Android's own side: the activity handle, and the JNI plumbing into the one
-//! Kotlin class that owns what no crate covers — the keystore prompt, the file
-//! picker, the clipboard, the browser and the GitHub token. Everything here is
-//! `cfg(target_os = "android")`, so a desktop build has none of it.
+//! JNI plumbing into the one Kotlin class that owns the keystore prompt, the picker,
+//! the clipboard, the browser and the token; `cfg(target_os = "android")` only.
 
 use android_activity::AndroidApp;
 use jni::objects::{JByteArray, JClass, JObject, JString, JValue, JValueOwned};
@@ -17,8 +15,7 @@ pub fn init(app: &AndroidApp) {
     let _ = ACTIVITY.set(app.clone());
 }
 
-/// Attach this thread to the JVM and run `job`. Both the frame and the unlock
-/// worker come through here, so neither has to know about attaching.
+/// Attach this thread to the JVM and run `job`; frame and unlock worker both come here.
 fn call<T>(job: impl FnOnce(&mut Env) -> jni::errors::Result<T>) -> Result<T, String> {
     let Some(app) = ACTIVITY.get() else {
         return Err("the app has no activity".to_owned());
@@ -29,13 +26,8 @@ fn call<T>(job: impl FnOnce(&mut Env) -> jni::errors::Result<T>) -> Result<T, St
         .map_err(|e| format!("android: {e}"))
 }
 
-/// `dev.pandora.Pandora`.
-///
-/// `FindClass` alone is not enough here: this runs on the native thread
-/// `android_main` was handed, which has no Java frame to inherit a class loader
-/// from, and app classes are then not found at all. The activity does carry that
-/// loader, so the lookup goes through the object — worth the extra hop, because
-/// without it every call across this bridge fails.
+/// `FindClass` fails on the native thread (no Java frame, no class loader), so the
+/// lookup goes through the activity object, which carries one.
 fn class<'local>(env: &mut Env<'local>) -> jni::errors::Result<JClass<'local>> {
     let Some(app) = ACTIVITY.get() else {
         return Err(jni::errors::Error::NullPtr("the app has no activity"));
@@ -95,9 +87,8 @@ fn number(name: &str) -> f32 {
     .unwrap_or(0.0)
 }
 
-/// The phone's own navigation bar at the bottom, in points: the app draws edge to
-/// edge behind the system bars, so keeping clear of that one is its own job. Asked
-/// again each frame — the bar moves with the phone, and it is never hidden.
+/// The phone's navigation bar height in points: the app draws behind the system bars,
+/// so keeping clear of it is its own job; asked each frame because it moves.
 pub fn footer() -> f32 {
     number("footer")
 }
@@ -189,20 +180,11 @@ static KEYBOARD: Mutex<Keyboard> = Mutex::new(Keyboard {
     field: None,
 });
 
-/// Hand whatever is on the soft keyboard to the field that has focus.
-///
-/// Neither `winit` nor `eframe` delivers a character typed on Android's keyboard:
-/// winit's backend opens and closes the keyboard (`set_ime_allowed`) and stops
-/// there, and no `WindowEvent::Ime` ever comes out of it. What `android-activity`
-/// does publish is the keyboard's own editor state, so the app reads it here — once
-/// a frame, before anything draws, so the events land on the widget that has focus.
-///
-/// The keyboard keeps one buffer for every field. A move to another field empties
-/// it, and so does Enter, because the forms here submit on Enter and clear their
-/// password right after.
-// ponytail: appends and backspaces are followed, not the cursor, and text already
-// in a field is not editable from the keyboard. Enough for an empty password field;
-// a full IME bridge belongs upstream in winit.
+/// winit and eframe deliver no IME characters on Android; `android-activity` publishes
+/// the keyboard's editor state, read once a frame before drawing so events reach the focus.
+/// One buffer serves every field: a field move or Enter empties it.
+// ponytail: appends and backspaces are followed, not the cursor, and text already in a
+// field is not editable; a full IME bridge belongs upstream in winit.
 pub fn feed_keyboard(ctx: &egui::Context) {
     let Some(app) = ACTIVITY.get() else {
         return;
@@ -244,8 +226,7 @@ fn feed(ctx: &egui::Context, before: &str, now: &str) {
                 press(input, egui::Key::Backspace);
             }
         } else {
-            // A suggestion or an autocorrect replaced the lot, so the field starts
-            // over: select it all and type the new text on top.
+            // A suggestion replaced the lot: select all and type over it.
             input.events.push(egui::Event::Key {
                 key: egui::Key::A,
                 physical_key: None,

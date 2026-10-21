@@ -1,14 +1,6 @@
-//! GitHub as a plain encrypted-blob mirror: the device flow mints a token and
-//! the Contents API moves one file. No git — Android and iOS ship no git binary,
-//! and a single opaque box has nothing to merge anyway.
-//!
-//! The session renews itself: `offline_access` asks for an access token with a
-//! life, and for the refresh token that trades for the next one. The token is
-//! spent before it runs out rather than after. An app that issues neither is
-//! used exactly as before — one token, and it does not run out.
-//!
-//! Every call here blocks, so it runs on a worker thread and lands in
-//! `App::pump_sync`; the UI thread never waits on the network.
+//! GitHub as an encrypted-blob mirror: the device flow mints a token and the Contents
+//! API moves one file; no git, and every call blocks on a worker thread.
+//! `offline_access` renews the session before the access token runs out.
 
 use crate::shared::i18n::{t, tf};
 use crate::vault::codec;
@@ -18,43 +10,28 @@ use std::thread;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-/// The OAuth App this build signs in as. Public on purpose: the device flow
-/// sends no client secret, so this is not a secret either. Register an app with
-/// device flow enabled ("Enable Device Flow") and put its client id in
-/// `PANDORA_GITHUB_CLIENT_ID` (`.cargo/config.toml`, out of the repo).
+/// Public on purpose: the device flow sends no client secret. Set the app's client id
+/// in `PANDORA_GITHUB_CLIENT_ID` (`.cargo/config.toml`, out of the repo).
 const CLIENT_ID: &str = match option_env!("PANDORA_GITHUB_CLIENT_ID") {
     Some(id) => id,
     None => "REPLACE_WITH_YOUR_OAUTH_APP_CLIENT_ID",
 };
 
-/// Enough to read and write the private repo holding the boxes, and to resolve
-/// the organisations the account belongs to. Without `read:org` GitHub knows of
-/// no organisation, and `/user/repos` answers with the personal repos alone —
-/// however `affiliation` is spelled.
-///
-/// `offline_access` asks for an expiring session and the refresh token that
-/// renews it, whatever the app's own setting says. It is not a permission and
-/// GitHub files it nowhere the user sees; an instance that does not know it
-/// answers a session with no refresh token and no expiry, and everything here
-/// works without one.
+/// `repo` to read and write the private repo, `read:org` or `/user/repos` answers only
+/// personal repos, `offline_access` for a refresh token — an app that omits it still works.
 const SCOPE: &str = "repo read:org offline_access";
 
-/// What GitHub puts in front of a refresh token. The remembered half of a
-/// session is told apart by it, so the credential store needs no format of its
-/// own.
+/// GitHub's prefix for a refresh token, so the credential store needs no format of its own.
 pub const REFRESH_PREFIX: &str = "ghr_";
 
-/// How long before it runs out an access token is traded in. Nothing goes out
-/// carrying a token that would die mid-flight.
+/// How long before it expires an access token is traded in.
 pub const RENEW_WINDOW: Duration = Duration::from_secs(300);
 
-/// How long a renewal that never reached GitHub waits before the next try. A
-/// transport error is not an answer about the session, so nothing may be decided
-/// from it — and without a wait a frame loop becomes a request storm.
+/// Wait after a renewal that never reached GitHub: a transport error says nothing
+/// about the session, and without a wait a frame loop becomes a request storm.
 pub const RENEW_RETRY: Duration = Duration::from_secs(60);
 
-/// What GitHub documents as the life of an access token, used only for one that
-/// says it can be renewed and forgets to say when.
+/// GitHub's documented life of an access token, used when a renewable one omits it.
 const ACCESS_TTL: u64 = 8 * 3600;
 
 const GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -62,18 +39,14 @@ const GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const OAUTH: &str = "https://github.com";
 const API: &str = "https://api.github.com";
 
-/// The largest file this will send or take. GitHub caps a blob at 100 MB, which is
-/// the only ceiling that matters here: the Contents API stops returning `content`
-/// past 1 MB, so a bigger box is read through the Git Blobs API instead of being
-/// refused. A box stays small in practice for another reason — each drive file is
-/// capped at 8 MiB.
+/// GitHub caps a blob at 100 MB; the Contents API omits `content` past 1 MB, so a
+/// bigger box is read through the Git Blobs API instead of being refused.
 pub const MAX_FILE: usize = 100 * 1024 * 1024;
 
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(60)))
-        // `retry-after` on a refusal lives on the response ureq would otherwise
-        // throw away, so the status is read by hand.
+        // `retry-after` lives on the response ureq would otherwise throw away.
         .http_status_as_error(false)
         .user_agent(concat!("pandora/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -84,8 +57,7 @@ fn net(e: impl std::fmt::Display) -> String {
     tf("GitHub could not be reached — {error}", &[("error", &e)])
 }
 
-/// Seconds GitHub asked to be left alone for: `retry-after` when it is sent,
-/// otherwise `x-ratelimit-reset` in epoch seconds, otherwise a minute.
+/// `retry-after`, else `x-ratelimit-reset` in epoch seconds, else a minute.
 fn quiet_for(headers: &ureq::http::HeaderMap) -> u64 {
     let header = |name: &str| {
         headers
@@ -102,9 +74,8 @@ fn quiet_for(headers: &ureq::http::HeaderMap) -> u64 {
         .max(60)
 }
 
-/// Whether a refusal is the hourly budget and not a permission. A secondary
-/// limit sends `retry-after`; the primary one is spent down to zero before it
-/// starts refusing. A 403 without either is GitHub saying no.
+/// Whether a refusal is the hourly budget and not a permission: secondary sends
+/// `retry-after`, primary is spent to zero, a bare 403 is GitHub saying no.
 fn throttled(headers: &ureq::http::HeaderMap) -> bool {
     headers.get("retry-after").is_some()
         || headers
@@ -113,38 +84,29 @@ fn throttled(headers: &ureq::http::HeaderMap) -> bool {
             == Some("0")
 }
 
-/// What GitHub answers a token it will not take. No retry fixes it, so the
-/// caller drops the session instead of asking again. Kept in English: it is the
-/// sentinel [`expired`] matches, and it is translated where it is drawn.
+/// No retry fixes it. English: [`expired`] matches on it and the catalog translates it.
 pub const EXPIRED: &str = "GitHub: your session is no longer valid — sign in again";
 
-/// Whether a refusal is that: the session itself is gone, and not the request.
 pub fn expired(why: &str) -> bool {
     why == EXPIRED
 }
 
-/// What a renewal GitHub refused is worded with. The two ways a renewal fails are
-/// not the same wall: a refusal is the session being gone, a transport error says
-/// nothing about it, and only the first may drop what is in hand. English, like
-/// [`EXPIRED`]: [`dead`] matches on it, and the catalog translates it when drawn.
+/// A refusal is the session gone, a transport error says nothing about it, and only
+/// the first may drop what is in hand; English, like [`EXPIRED`].
 pub const DEAD: &str = "GitHub: the session could not be renewed — sign in again";
 
-/// Whether a failed renewal is that refusal, and not the network.
 pub fn dead(why: &str) -> bool {
     why.starts_with(DEAD)
 }
 
-/// The token another instance left behind while ours was being spent. GitHub
-/// rotates the refresh token on every trade, so a store that no longer holds the
-/// one we just used is not a dead session — it is someone else's live one.
+/// A token another instance left behind: GitHub rotates the refresh token on every
+/// trade, so a store holding a different one is not a dead session but someone else's.
 pub fn takeover(spent: &str, kept: Option<String>) -> Option<String> {
     kept.filter(|token| token != spent)
 }
 
-/// A signed-in session: the access token requests carry, the refresh token that
-/// trades for the next one when GitHub sends one, and when the access token runs
-/// out. No refresh token means the app is not issuing expiring sessions — the
-/// access token is then the session, and it does not run out.
+/// A signed-in session. No refresh token means the access token is the session and
+/// does not run out.
 pub struct Session {
     pub access: Zeroizing<String>,
     pub refresh: Option<Zeroizing<String>>,
@@ -165,7 +127,6 @@ struct Token {
 }
 
 impl Token {
-    /// The session this answer minted. Only called when it carries a token.
     fn into_session(mut self) -> Session {
         let expires_in = self
             .expires_in
@@ -178,29 +139,25 @@ impl Token {
     }
 }
 
-/// A refusal worth explaining: the raw status tells the user nothing. None for
-/// a status that went through.
+/// A refusal worth explaining: the raw status tells the user nothing.
 fn denied(status: u16, headers: &ureq::http::HeaderMap) -> Option<String> {
     match status {
         200..=299 => None,
         401 => Some(EXPIRED.to_owned()),
         403 if throttled(headers) => Some(rate_limited(headers)),
-        // The organisation enabled OAuth App access restrictions and has not
-        // approved this app: no scope this side can ask for gets past it.
+        // The organisation enabled OAuth App access restrictions and has not approved this app.
         403 => Some(t("GitHub refused: an organisation may be blocking this app").to_owned()),
         429 => Some(rate_limited(headers)),
         404 => Some(
             t("GitHub has no such repo or file (a private one needs the repo scope)").to_owned(),
         ),
-        // A create that found an existing file: the mirror has no sha to replace,
-        // so it has to come in before it can go out.
+        // A create that found an existing file: it has to come in before it can go out.
         422 => Some(t("that file is already in the repo — get its copy first").to_owned()),
         c => Some(tf("GitHub refused with HTTP {status}", &[("status", &c)])),
     }
 }
 
-/// How long GitHub asked to be left alone, in a sentence: the one refusal that
-/// carries a number, so it is built here and not looked up.
+/// How long GitHub asked to be left alone, in a sentence.
 fn rate_limited(headers: &ureq::http::HeaderMap) -> String {
     tf(
         "GitHub is rate-limiting — wait {minutes} min",
@@ -223,9 +180,8 @@ pub struct Device {
     handle: String,
     /// Where the user types it; shown next to the code.
     pub verify: String,
-    /// What the browser opens: GitHub's own page with the code already in it when
-    /// it sends one, the code appended otherwise — so nothing is ever typed. The
-    /// code is still drawn on screen, because a browser is not guaranteed.
+    /// The page the browser opens, code already in it; the code is still drawn because a
+    /// browser is not guaranteed.
     pub open: String,
     interval: Duration,
 }
@@ -236,16 +192,12 @@ impl Device {
     }
 }
 
-/// Where the user signs in: `page` with the code already in it, so GitHub's page
-/// comes up with the code typed and signing in is one tap. GitHub reads the code
-/// off `user_code`, which is the contract; the login card's own link opens the
-/// same page the browser was handed.
+/// `page` with the code already in it; GitHub reads it off `user_code`, which is the contract.
 pub fn device_url(page: &str, code: &str) -> String {
     format!("{page}?user_code={code}")
 }
 
-/// The page the browser opens: GitHub's own `verification_uri_complete` when it
-/// sends one, `device_url` otherwise. Either way the code is already there.
+/// `verification_uri_complete` when GitHub sends one, `device_url` otherwise.
 fn open_uri(complete: Option<String>, verify: &str, code: &str) -> String {
     complete
         .filter(|url| !url.is_empty())
@@ -259,8 +211,7 @@ pub fn start() -> Result<Device, String> {
         device_code: String,
         user_code: String,
         verification_uri: String,
-        // Undocumented in the device flow's own table, but GitHub sends it — it
-        // is RFC 8628's own field, and what every other client opens.
+        // Undocumented in the device flow table, but GitHub sends it: RFC 8628's field.
         #[serde(default)]
         verification_uri_complete: Option<String>,
         #[serde(default = "interval")]
@@ -295,9 +246,7 @@ pub fn start() -> Result<Device, String> {
     })
 }
 
-/// Block until the user authorises in the browser, then hand back the session.
-/// `authorization_pending` is the normal answer until they do; `slow_down` asks
-/// for a longer wait; anything else ends the flow.
+/// `authorization_pending` until they do; `slow_down` asks for a longer wait.
 pub fn await_token(mut device: Device) -> Result<Session, String> {
     loop {
         thread::sleep(device.interval);
@@ -311,8 +260,7 @@ pub fn await_token(mut device: Device) -> Result<Session, String> {
                 ("grant_type", GRANT),
             ])
             .map_err(net)?;
-        // This body is where the token first lands, and a buffer that is only
-        // freed keeps it: the reply is read into something that wipes itself.
+        // The reply is read into a buffer that wipes itself.
         let body = Zeroizing::new(res.body_mut().read_to_string().map_err(net)?);
         let reply: Token = serde_json::from_str(&body).map_err(net)?;
 
@@ -330,9 +278,7 @@ pub fn await_token(mut device: Device) -> Result<Session, String> {
     }
 }
 
-/// Trade a refresh token for the next session. GitHub takes the refresh token
-/// out of use the moment this succeeds, and the access token with it, so what
-/// comes back replaces the session and nothing keeps the old one.
+/// GitHub spends the refresh token on success, so the reply replaces the session.
 pub fn refresh(token: &str) -> Result<Session, String> {
     let body = Zeroizing::new(
         agent()
@@ -340,8 +286,7 @@ pub fn refresh(token: &str) -> Result<Session, String> {
             .header("Accept", "application/json")
             .send_form([
                 ("client_id", CLIENT_ID),
-                // The token was minted by the device flow, which sends no
-                // secret, so it is renewed with no secret either.
+                // The device-flow token was minted with no secret, so it renews with none.
                 ("grant_type", "refresh_token"),
                 ("refresh_token", token),
             ])
@@ -359,9 +304,8 @@ pub fn refresh(token: &str) -> Result<Session, String> {
 
 pub struct Blob {
     pub bytes: Vec<u8>,
-    /// The blob sha. The next push names it to prove it is replacing the version
-    /// it read, which is what turns a concurrent edit into a conflict and not a
-    /// silently lost box.
+    /// The next push names it to prove it is replacing the version it read, which
+    /// turns a concurrent edit into a conflict and not a lost box.
     pub sha: String,
 }
 
@@ -372,10 +316,8 @@ struct Content {
     content: String,
 }
 
-/// What a write answers: the file it wrote, under `content`. A read spells that
-/// same key for the base64 of the bytes; a write spells it for the file object,
-/// so the read's type cannot hold this one. The `sha` is the file's own blob,
-/// which is what the next write names to prove it is replacing this version.
+/// A write spells `content` for the file object, a read for its base64, so the read's
+/// type cannot hold this one.
 #[derive(serde::Deserialize)]
 struct Saved {
     content: SavedFile,
@@ -386,8 +328,7 @@ struct SavedFile {
     sha: String,
 }
 
-/// The API wraps the base64 every 60 characters, and the STANDARD engine refuses
-/// whitespace.
+/// The API wraps base64 every 60 characters, and the STANDARD engine refuses whitespace.
 fn payload(wrapped: &str) -> Result<Vec<u8>, String> {
     let flat: String = wrapped.chars().filter(|c| !c.is_whitespace()).collect();
     codec::decode(&flat)
@@ -397,8 +338,7 @@ pub fn get(repo: &str, file: &str, token: &str) -> Result<Blob, String> {
     get_at(API, repo, file, token)
 }
 
-/// [`get`] against one API base, so the read can be tested against a server that is
-/// not GitHub's — the same door `write` and `erase_at` go through.
+/// [`get`] against one API base, so a read can be tested off GitHub.
 pub fn get_at(base: &str, repo: &str, file: &str, token: &str) -> Result<Blob, String> {
     let header = Zeroizing::new(format!("Bearer {token}"));
     let call = agent();
@@ -413,10 +353,7 @@ pub fn get_at(base: &str, repo: &str, file: &str, token: &str) -> Result<Blob, S
     }
     let content: Content = res.body_mut().read_json().map_err(net)?;
 
-    // Past 1 MB the Contents API answers with the file's `sha` and no `content`:
-    // the metadata is there, the bytes are not. The Git Blobs API takes that same
-    // sha and hands back the bytes (up to 100 MB), so the read falls back to it
-    // rather than refusing a box that is perfectly valid.
+    // Past 1 MB there is `sha` and no `content`; the bytes come from the Blobs API.
     let bytes = if content.content.trim().is_empty() {
         blob_at(base, repo, &content.sha, token)?
     } else {
@@ -431,9 +368,7 @@ pub fn get_at(base: &str, repo: &str, file: &str, token: &str) -> Result<Blob, S
     })
 }
 
-/// A blob's bytes by sha, for the file the Contents API would not return. The API
-/// documents base64 up to 100 MB; past that it answers `encoding: "none"` and no
-/// content at all, which is not a box either way.
+/// A blob's bytes by sha. Base64 up to 100 MB; past that `encoding: "none"` and no content.
 pub fn blob_at(base: &str, repo: &str, sha: &str, token: &str) -> Result<Vec<u8>, String> {
     #[derive(serde::Deserialize)]
     struct BlobReply {
@@ -464,8 +399,7 @@ pub fn blob_at(base: &str, repo: &str, sha: &str, token: &str) -> Result<Vec<u8>
 pub struct Repo {
     /// `owner/name`, the only shape the Contents API takes.
     pub full_name: String,
-    /// The account or organisation that owns it: what the picker groups the
-    /// repos by, and the only thing it needs from the API to draw an avatar.
+    /// The account or organisation that owns it, which the picker groups by.
     pub owner: String,
     pub private: bool,
 }
@@ -473,17 +407,14 @@ pub struct Repo {
 /// Each owner's avatar bytes, by login. Only what the picker draws.
 pub type Avatars = HashMap<String, Vec<u8>>;
 
-/// Repos asked for per page, and the most GitHub will answer with: a full page is
-/// the signal that there is another one.
+/// Repos per page, and GitHub's maximum: a full page means there is another.
 const PAGE: usize = 100;
 
-/// The side of the avatar asked for. Big enough for a chip on a HiDPI screen,
-/// small enough that the whole reply is a couple of KB per owner.
+/// Big enough for a HiDPI chip, small enough that a reply stays a couple of KB per owner.
 const AVATAR: u32 = 64;
 
-/// An owner's avatar, straight off the web host. Not the API: it costs no
-/// request of the hourly budget and wants no token. `None` for anything that did
-/// not come back a small image — a missing avatar must never cost a repo.
+/// Straight off the web host: no API request, no token. `None` for anything that is
+/// not a small image, because a missing avatar must never cost a repo.
 fn avatar(call: &ureq::Agent, owner: &str) -> Option<Vec<u8>> {
     let mut res = call
         .get(format!("https://github.com/{owner}.png?size={AVATAR}"))
@@ -499,12 +430,8 @@ fn avatar(call: &ureq::Agent, owner: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// The repos the token can reach, most recently pushed first, every page of
-/// them, with each owner's avatar. Private ones are included: the device flow
-/// already asks for the `repo` scope. `affiliation` is left at GitHub's default
-/// (`owner,collaborator,organization_member`), the only value that covers all
-/// three — but it reaches an organisation's repos only while the token carries
-/// `read:org` and the organisation has not blocked the app.
+/// The repos the token can reach, most recently pushed first, with each owner's avatar;
+/// `affiliation` stays at GitHub's default and orgs need `read:org`.
 pub fn repos(token: &str) -> Result<(Vec<Repo>, Avatars), String> {
     #[derive(serde::Deserialize)]
     struct Raw {
@@ -567,8 +494,7 @@ struct Entry {
     kind: String,
 }
 
-/// The box file names among a repo's contents `entries`, sorted. Flat: a `dir`
-/// entry is skipped, because a repo holds its boxes at the root.
+/// The box file names in a repo's root, sorted; a `dir` entry is skipped.
 fn boxes(entries: Vec<Entry>) -> Vec<String> {
     let ext = format!(".{}", crate::vault::store::EXT);
     let mut names: Vec<String> = entries
@@ -589,10 +515,8 @@ pub fn list(repo: &str, token: &str) -> Result<Vec<String>, String> {
         .header("Accept", "application/vnd.github+json")
         .call()
         .map_err(net)?;
-    // A repo with no commits answers 404 on its contents root. That is an empty
-    // folder, not a missing repo, and it is the state a fresh repo starts in —
-    // but a private repo this token cannot see answers that same 404, so the
-    // empty folder is confirmed against the repo itself before it is believed.
+    // A repo with no commits answers 404, like a private repo this token cannot see,
+    // so the empty folder is confirmed against the repo itself before it is believed.
     if res.status().as_u16() == 404 {
         let repo = call
             .get(format!("{API}/repos/{repo}"))
@@ -628,11 +552,8 @@ pub fn public_refusal() -> String {
     crate::shared::i18n::t("that repo is public — a box needs a private one").to_owned()
 }
 
-/// Is `repo` private? A box only ever goes to a private one: the commit subject
-/// is fixed (see [`Fingerprint`]), but a public repo still lets anyone list the
-/// files in it, their sizes and the dates they changed. Asked of GitHub at the
-/// write and never remembered from when the repo was picked, so a repo made
-/// public afterwards is caught here too.
+/// A box only ever goes to a private repo: a public one lets anyone list the files,
+/// sizes and dates. Asked at every write, so a repo made public later is caught.
 fn private(base: &str, repo: &str, token: &str) -> Result<bool, String> {
     #[derive(serde::Deserialize)]
     struct Meta {
@@ -654,8 +575,7 @@ fn private(base: &str, repo: &str, token: &str) -> Result<bool, String> {
     Ok(meta.private)
 }
 
-/// Write the repo's copy of `file`. `sha` is the version being replaced — `None`
-/// creates the file, `Some` proves nothing moved since it was read.
+/// Write the repo's copy of `file`: `sha` is the version replaced, `None` creates it.
 pub fn put(
     repo: &str,
     file: &str,
@@ -667,8 +587,7 @@ pub fn put(
     write(API, repo, file, token, bytes, sha, message)
 }
 
-/// [`put`] against one API base, so the gate and the write can be tested against
-/// a server that is not GitHub's.
+/// [`put`] against one API base, so the gate and the write can be tested off GitHub.
 fn write(
     base: &str,
     repo: &str,
@@ -678,8 +597,7 @@ fn write(
     sha: Option<&str>,
     message: &str,
 ) -> Result<Written, String> {
-    // Before the write and before `message` is used: a public repo is refused
-    // here, so no bytes of a box ever reach one.
+    // Before the write and before `message` is used: no bytes of a box reach a public repo.
     if !private(base, repo, token)? {
         return Err(public_refusal());
     }
@@ -720,9 +638,8 @@ fn write(
     }
 }
 
-/// Take the repo's copy of `file` out of it. `sha` is the blob the repo holds —
-/// the Contents API wants the delete to name the version it means, so a copy
-/// that moved in the meantime is not what disappears.
+/// Take the repo's copy out; the delete names the version it means, so a copy that
+/// moved in the meantime is not what disappears.
 pub fn erase(repo: &str, file: &str, sha: &str, token: &str) -> Result<(), String> {
     erase_at(API, repo, file, sha, token)
 }
@@ -740,8 +657,7 @@ fn erase_at(base: &str, repo: &str, file: &str, sha: &str, token: &str) -> Resul
         .delete(format!("{base}/repos/{repo}/contents/{file}"))
         .header("Authorization", header.as_str())
         .header("Accept", "application/vnd.github+json")
-        // A DELETE nominally has no body; the Contents API wants these two
-        // fields in one, so the request is built the way ureq documents for it.
+        // A DELETE has no body nominally; the Contents API wants sha and message in one.
         .force_send_body()
         .send_json(&Body {
             message: Fingerprint::SUBJECT,
@@ -750,35 +666,29 @@ fn erase_at(base: &str, repo: &str, file: &str, sha: &str, token: &str) -> Resul
         .map_err(net)?;
     match res.status().as_u16() {
         200..=299 => Ok(()),
-        // Already gone: that is what was asked for, and a box that was never
-        // pushed has no copy to name in the first place.
+        // Already gone is what was asked for; a box never pushed has no copy to name.
         404 => Ok(()),
         status => Err(denied(status, res.headers())
             .unwrap_or_else(|| tf("GitHub refused with HTTP {status}", &[("status", &status)]))),
     }
 }
 
-/// How long a settled box waits before its own push. The file is written after
-/// 900 ms because a crash may not cost the edits; the commit waits 15 s because
-/// GitHub counts commits against an hourly budget, and typing is not a change.
+/// 900 ms because a crash may not cost the edits; 15 s because GitHub counts commits
+/// against an hourly budget and typing is not a change.
 pub const PUSH_QUIET: Duration = Duration::from_secs(15);
 
 pub const PUSH_BACKOFF: Duration = Duration::from_secs(60);
 
-/// How long a repo's own listing is trusted before the view reads it again.
-/// Reads are not commits, so this paces against the API's hourly request limit
-/// (5000) and not the write budget: one request a minute is nothing.
+/// Reads pace against the API's hourly request limit (5000), not the write budget.
 // ponytail: a plain GET every window. `If-None-Match` with a stored ETag would
 // turn the poll into a free 304 if reads ever start to matter.
 pub const STALE: Duration = Duration::from_secs(60);
 
-/// Commits GitHub allows per hour: its documented limit on content-generating
-/// requests. The boundary this app paces against.
+/// GitHub's documented hourly limit on content-generating requests.
 pub const WRITE_LIMIT: usize = 500;
 
-/// This run's spend against that budget. GitHub reports its *primary* limit in
-/// the headers and says the secondary one cannot be checked, so pacing is by our
-/// own push count and a refusal is the only authoritative answer.
+/// This run's spend. GitHub reports the primary limit but not the secondary, so pacing
+/// is our own push count and a refusal is the only authoritative answer.
 #[derive(Default)]
 pub struct Quota {
     sent: Vec<Instant>,
@@ -809,20 +719,15 @@ impl Quota {
     }
 }
 
-/// What a box looked like to a commit: nothing at all.
-///
-/// A commit subject is written to the repo in plaintext, and a repo is read by
-/// whoever holds it — GitHub included. So the subject is one fixed line: not a
-/// name, not a count, not which collection moved. A `Fingerprint` only records
-/// *that* a version went out, which is all the baseline needs to know.
+/// A commit subject is plaintext in the repo, so it is one fixed line and never a name,
+/// count or collection; it records only *that* a version went out.
 pub struct Fingerprint;
 
 impl Fingerprint {
     /// The one subject every push carries.
     pub const SUBJECT: &'static str = "pandora: box synced";
 
-    /// The box is the argument because every caller has one; nothing is read off
-    /// it, and that is the point — nothing of the box may reach the commit log.
+    /// Every caller has a box; nothing is read off it, which is the point.
     pub fn of(_vault: &Vault) -> Self {
         Self
     }
@@ -833,8 +738,7 @@ mod tests {
     use super::*;
     use crate::vault::model::Login;
 
-    /// GitHub reads the code off this parameter, so its name is the contract —
-    /// and GitHub's own complete URI wins when it sends one.
+    /// GitHub reads the code off `user_code`, and its complete URI wins when sent.
     #[test]
     fn the_sign_in_page_carries_the_code() {
         let bare = "https://github.com/login/device";
@@ -874,9 +778,6 @@ mod tests {
         assert!(payload("not base64").is_err());
     }
 
-    /// A read spells `content` for the base64 of the bytes, a write spells it for
-    /// the file object itself, and parsing the write with the read's type is what
-    /// made every push fail. What the next write names is the file's own sha.
     #[test]
     fn a_write_reply_is_not_a_read() {
         let json = r#"{"content":{"name":"personal.pandora","path":"personal.pandora",
@@ -932,8 +833,6 @@ mod tests {
         assert!(denied(403, &spent).unwrap().contains("1 min"));
     }
 
-    /// Another instance's token is not ours: only a different one counts as a
-    /// takeover, so the same spent token is never adopted by mistake.
     #[test]
     fn a_takeover_needs_a_different_token() {
         assert_eq!(
@@ -947,8 +846,6 @@ mod tests {
         assert_eq!(super::takeover("ghr_spent", None), None);
     }
 
-    /// Only a 401 is the session itself being gone; everything else is worth
-    /// another try, so nothing else may drop the token.
     #[test]
     fn only_a_dead_token_counts_as_expired() {
         let bare = ureq::http::HeaderMap::new();
@@ -960,9 +857,6 @@ mod tests {
         assert!(!expired("ghi"));
     }
 
-    /// A renewal GitHub refused is the session being gone; one that never reached
-    /// GitHub is not, and signing the user out over a dropped connection is the
-    /// bug this tells apart.
     #[test]
     fn a_refused_renewal_is_not_a_renewal_that_never_landed() {
         assert!(dead(DEAD));
@@ -973,8 +867,6 @@ mod tests {
         assert!(!expired(DEAD));
     }
 
-    /// Both halves of a session come off the endpoint's own answer, and an
-    /// expiring one is told from one that never runs out.
     #[test]
     fn a_token_answer_becomes_a_session() {
         let expiring: Token = serde_json::from_str(
@@ -1049,9 +941,6 @@ mod tests {
         );
     }
 
-    /// A subject is plaintext in the repo, so it says nothing about the box: not
-    /// a name, not a count, and not which record moved. Whatever the box does,
-    /// the commit log reads the same.
     #[test]
     fn a_commit_message_never_carries_a_name() {
         let mut vault = Vault::new("Personal");
@@ -1127,8 +1016,6 @@ mod tests {
         String::from_utf8_lossy(&request).into_owned()
     }
 
-    /// A box only ever goes to a private repo: the write asks GitHub first, and a
-    /// public answer stops it before a byte of the box is on its way.
     #[test]
     fn a_public_repo_is_never_written_to() {
         use std::net::TcpListener;
@@ -1170,8 +1057,6 @@ mod tests {
         );
     }
 
-    /// A private answer lets the write through — asked again on every push, so a
-    /// repo made public after it was picked is caught on the next one.
     #[test]
     fn a_private_repo_takes_the_write() {
         use std::net::TcpListener;
@@ -1212,8 +1097,6 @@ mod tests {
         }
     }
 
-    /// The repo's copy leaves by a delete that names the version it means, so a
-    /// copy that moved in the meantime is not what disappears.
     #[test]
     fn erasing_the_repo_copy_names_the_version() {
         use std::net::TcpListener;
@@ -1239,8 +1122,6 @@ mod tests {
         );
     }
 
-    /// A box small enough for the JSON reply is read straight out of it: one request,
-    /// and the blob API is never asked.
     #[test]
     fn a_small_box_comes_back_in_the_contents_reply() {
         use std::net::TcpListener;
@@ -1265,10 +1146,6 @@ mod tests {
         );
     }
 
-    /// Past 1 MB the Contents API hands back the sha and no content. The bytes come
-    /// from the Git Blobs API under that same sha, so a box bigger than the JSON
-    /// reply is read instead of being refused — the ceiling was always the reply,
-    /// never the file.
     #[test]
     fn a_box_over_a_megabyte_is_read_through_the_blob_api() {
         use std::net::TcpListener;
@@ -1305,9 +1182,6 @@ mod tests {
         );
     }
 
-    /// A blob the API will not hand back is not a box: `encoding: "none"` past the
-    /// 100 MB it documents, and anything that is not base64 is refused with words a
-    /// user can act on rather than a decode error.
     #[test]
     fn a_blob_the_api_will_not_decode_is_refused() {
         use std::net::TcpListener;

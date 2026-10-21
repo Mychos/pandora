@@ -1,5 +1,4 @@
-//! Headless egui harness for the layout tests: run frames without a window and
-//! read either the painted shapes or the rendered pixels.
+//! Headless egui harness for layout tests: frames without a window, shapes or pixels.
 
 use egui::epaint::{ClippedPrimitive, Primitive};
 use egui::{pos2, Color32, ImageData, Pos2, Rect, TextureId, TexturesDelta};
@@ -26,9 +25,8 @@ pub fn frame(
     out.shapes
 }
 
-/// Run `draw` until egui's fades have settled and write the pixels to
-/// `/tmp/opencode/{name}.png`, so a screen can be eyeballed. `held` drags from one
-/// point to another across the first frames.
+/// Run `draw` until egui's fades settle and write the pixels to
+/// `/tmp/opencode/{name}.png`; `held` drags from one point to another across the first frames.
 pub fn png(
     ctx: &egui::Context,
     name: &str,

@@ -1,27 +1,18 @@
-//! Window chrome geometry: no OS title bar, so the app paints its own strip at the
-//! window's top — where a phone's own navigation is answered by a bar at its
-//! floor — and the body dialogs live in. The bars and the dialog chrome both read
-//! this.
+//! Window chrome geometry: the app paints its own top strip and floor navigation.
 
 use egui::{vec2, Context, Id, Rect};
 
-/// The strip the app paints in place of a title bar under a pointer: the window's
-/// own edge, with Back and the tools on it.
+/// Height of the pointer strip that replaces the title bar.
 pub const HEIGHT: f32 = 30.0;
 
-/// The same strip under a finger, and the app's own navigation at the floor of a
-/// narrow window: Back and the panes have to be a target a thumb can land on, so
-/// the bar grows.
+/// Height under a finger, and of the floor navigation in a narrow window.
 pub const NAV: f32 = 56.0;
 
-/// Whether a finger drives the chrome: a window narrow enough to be a phone, or a
-/// phone itself, which is always narrow enough whatever it reports.
 pub fn touch(ctx: &Context) -> bool {
     crate::shared::ui::responsive::compact(ctx) || cfg!(target_os = "android")
 }
 
-/// The bar's own height on the screen in front of us: it stands on the window's
-/// top, and a thumb gets the taller one.
+/// The bar's height on this screen.
 pub fn strip(ctx: &Context) -> f32 {
     if touch(ctx) {
         NAV
@@ -30,9 +21,7 @@ pub fn strip(ctx: &Context) -> f32 {
     }
 }
 
-/// What the app keeps under the body: the navigation a narrow screen holds at its
-/// floor, plus the phone's own bar it stands on. Nothing on a wide one, where the
-/// bar is the top.
+/// What the floor holds: nothing on a wide window, the navigation (and a phone's own bar) on a narrow one.
 pub fn floor(ctx: &Context) -> f32 {
     if !touch(ctx) {
         return 0.0;
@@ -47,8 +36,7 @@ pub fn floor(ctx: &Context) -> f32 {
     }
 }
 
-/// Where a modal lives: the bar and the floor are the frames the body is not
-/// allowed to touch, so a tall one does not end up flush against either.
+/// The area between the top bar and the floor, where a modal lives.
 pub fn body(ctx: &Context) -> Rect {
     let rect = ctx.content_rect();
     Rect::from_min_max(
@@ -57,11 +45,8 @@ pub fn body(ctx: &Context) -> Rect {
     )
 }
 
-/// The room a dialog keeps from the window's edge: a phone's body is the whole
-/// screen, so without it a modal would sit flush against both sides. It is taken
-/// off the width the card asks for (`theme::width`), never off the area the modal
-/// lives in: that area is what the backdrop is painted through, and a backdrop
-/// with a margin is not a backdrop.
+/// Taken off the width the card asks for, never off the modal's area: that area is
+/// what the backdrop is painted through, and a backdrop with a margin is not one.
 pub const GAP: f32 = 16.0;
 
 pub fn modal(ctx: &Context, id: Id) -> egui::Modal {
@@ -82,8 +67,6 @@ mod tests {
         (ctx, rect)
     }
 
-    /// A wide window keeps the bar on its top: the body starts under it and runs
-    /// to the window's own floor.
     #[test]
     fn the_body_keeps_clear_of_the_top_bar() {
         let (ctx, rect) = room(1000.0, 700.0);
@@ -93,8 +76,6 @@ mod tests {
         assert_eq!(rect.max.y, 700.0, "nothing is reserved at the floor");
     }
 
-    /// A narrow one hands the panes to its floor, so the body gives up both bars:
-    /// the top one and the navigation below.
     #[test]
     fn the_body_keeps_clear_of_both_bars() {
         let (ctx, rect) = room(420.0, 780.0);

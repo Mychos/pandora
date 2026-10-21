@@ -34,7 +34,6 @@ pub enum Brand {
     Stripe,
 }
 
-/// Outcome of the icon picker popup (`vault::picker`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Pick {
     None,
@@ -78,7 +77,6 @@ impl Brand {
         Brand::Stripe,
     ];
 
-    /// The simple-icons slug, persisted as `Item::icon`.
     pub fn slug(self) -> &'static str {
         match self {
             Brand::Github => "github",

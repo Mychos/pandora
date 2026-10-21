@@ -1,7 +1,5 @@
-//! The stdio end of the browser extension's native-messaging host. The browser
-//! launches this binary and speaks the framed protocol on its stdin/stdout; every
-//! secret operation lives in the library (`pandora::host`), so this file only
-//! reports a fatal error and sets the exit code.
+//! The stdio end of the native-messaging host: the framed protocol on stdin/stdout,
+//! while every secret operation lives in `pandora::host`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 

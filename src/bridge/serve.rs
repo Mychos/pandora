@@ -1,12 +1,5 @@
-//! The read side of the protocol, shared by both peers: the host answers it when it
-//! has decrypted the box itself, and the app answers it for the box it has open.
-//!
-//! Everything else — the file, the boxes, the lock, the writes — means something
-//! different on each side, so the caller owns it and [`read`] hands it back. That is
-//! why this module is a function set and not a trait: the two peers agree on what a
-//! *question* means, not on how to change anything. The two writes the panel can ask
-//! for still build the entry here ([`create_login`], [`update_login`]); what each
-//! peer does with the changed vault afterwards is its own.
+//! The read side of the protocol, shared by host and app; each owns what a write does
+//! with the vault afterwards.
 
 use crate::bridge::protocol::{Candidate, CodeInfo, Request, Response};
 use crate::vault::matching;
@@ -14,19 +7,17 @@ use crate::vault::model::{now_secs, Login, Vault};
 use crate::vault::totp;
 use zeroize::Zeroizing;
 
-/// The box behind a request. `Locked` is the absence of one, not an error.
+/// The box behind a request; `Locked` is the absence of one, not an error.
 #[derive(Clone, Copy)]
 pub enum Peer<'a> {
-    /// No box here. `unlockable` says whether this peer could open one if the user
-    /// asked: the host can, the app cannot — opening a box is its window's job.
+    /// The host can open a box, the app cannot: that is its window's job.
     Locked {
         unlockable: bool,
     },
     Open(&'a Vault),
 }
 
-/// Answer a request both peers answer the same way, or `None` when it is the
-/// caller's own — see the module comment for which those are.
+/// Answer a request both peers answer the same way, or `None` for the caller's own.
 pub fn read(request: &Request, peer: Peer<'_>) -> Option<Response> {
     match request {
         Request::Status => Some(match peer {
@@ -95,8 +86,7 @@ pub fn read(request: &Request, peer: Peer<'_>) -> Option<Response> {
     }
 }
 
-/// Add a login the panel saved. The vault is changed here; how the change reaches
-/// the disk is the peer's own (the host saves, the app marks the box dirty).
+/// Add a login the panel saved; how the change reaches disk is the peer's own.
 pub fn create_login(
     vault: &mut Vault,
     name: String,
@@ -114,8 +104,7 @@ pub fn create_login(
     entry
 }
 
-/// Change the fields the panel sent; anything it left out keeps what it had.
-/// `None` when no login carries the id.
+/// Change the sent fields; anything left out keeps what it had. `None` for an unknown id.
 pub fn update_login(
     vault: &mut Vault,
     id: &str,
@@ -136,7 +125,7 @@ pub fn update_login(
     ))
 }
 
-/// Every entry, for the popup's own browsing — never a password.
+/// Every entry, for the popup's browsing; never a password.
 pub fn entries(vault: &Vault) -> Vec<Candidate> {
     vault
         .logins
@@ -145,8 +134,7 @@ pub fn entries(vault: &Vault) -> Vec<Candidate> {
         .collect()
 }
 
-/// Entries that claim the page the user is on, the most specific match first, each
-/// naming the URL that matched it. An entry with no URL never matches.
+/// Entries claiming the page, most specific first, each naming the URL that matched.
 pub fn matches(vault: &Vault, page: &str) -> Vec<Candidate> {
     let Some(page) = matching::parse(page) else {
         return Vec::new();
@@ -156,16 +144,14 @@ pub fn matches(vault: &Vault, page: &str) -> Vec<Candidate> {
         .iter()
         .filter_map(|item| matching::rank(item, &page).map(|(rank, url)| (item, rank, url)))
         .collect();
-    // A more specific rule first, then by name so the order never wobbles between
-    // two calls that saw the same vault and the same page.
+    // More specific first, then by name, so the order never wobbles between calls.
     hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
     hits.into_iter()
         .map(|(item, _, url)| candidate(item, Some(url)))
         .collect()
 }
 
-/// The one place a password is put into a response, and only for the id the user
-/// picked.
+/// The one place a password enters a response, only for the id the user picked.
 pub fn reveal(vault: &Vault, id: &str) -> Option<(String, String)> {
     vault
         .logins
@@ -174,8 +160,7 @@ pub fn reveal(vault: &Vault, id: &str) -> Option<(String, String)> {
         .map(|item| (item.username.clone(), item.password.to_string()))
 }
 
-/// Every seed in the box, by name. The seed never leaves it, and neither does a
-/// code: this is the listing, and what it carries is what a `Candidate` carries.
+/// Every seed by name: the seed never leaves the box, and neither does a code.
 pub fn codes(vault: &Vault) -> Vec<CodeInfo> {
     vault
         .otps
@@ -187,10 +172,8 @@ pub fn codes(vault: &Vault) -> Vec<CodeInfo> {
         .collect()
 }
 
-/// The code a seed is holding at `now`, and how long it has left. Derived on the
-/// spot and for one id only — the same bargain `reveal` makes, because a code is to
-/// a seed what a password is to a login, and a page needs the first, never the
-/// second.
+/// The code a seed holds now, derived on the spot for one id: what a page needs,
+/// never the seed itself.
 pub fn code(vault: &Vault, id: &str, now: u64) -> Option<(Zeroizing<String>, u64)> {
     let otp = vault.otps.iter().find(|otp| otp.id == id)?;
     totp::at(&otp.secret, now).ok()
@@ -205,8 +188,7 @@ pub fn candidate(item: &Login, uri: Option<&str>) -> Candidate {
     }
 }
 
-/// The one error every locked request gets. The extension turns it into "click the
-/// toolbar icon to unlock".
+/// The one error every locked request gets; the extension turns it into "click to unlock".
 pub fn locked() -> Response {
     Response::Error {
         message: "locked".to_owned(),
@@ -244,8 +226,7 @@ mod tests {
         );
     }
 
-    /// What goes back is exactly what the seed derives at that second, and only for
-    /// the id that was asked for.
+    /// What goes back is exactly what the seed derives at that second, for that id.
     #[test]
     fn one_code_is_derived_for_one_id_at_a_time() {
         let vault = boxed();
@@ -254,8 +235,7 @@ mod tests {
         assert_eq!(derived, expected);
         assert_eq!(remaining, left);
 
-        // Through the protocol the clock is the real one, so what is checked there is
-        // the shape of the answer and the one way it fails — never a second guess.
+        // The real clock is used, so only the answer's shape and its one failure are checked.
         let answer = read(
             &Request::Code {
                 id: vault.otps[0].id.clone(),
@@ -272,7 +252,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
 
-        // An id nobody has is an error, not an empty code.
+        // An unknown id is an error, not an empty code.
         let answer = read(
             &Request::Code {
                 id: "no such seed".to_owned(),

@@ -1,8 +1,5 @@
-//! Talking to browsers: the messages the extension and the native host exchange,
-//! and — as the bridge takes shape — the local socket the app listens on so the
-//! host can relay to a vault that is already open and unlocked.
-//!
-//! Platform-agnostic core, like `vault/`: no egui, no knowledge of features.
+//! Browser messaging: the framed messages and the local socket the app listens on
+//! so the host can relay to an already unlocked box. No egui, no features.
 
 pub mod protocol;
 pub mod serve;

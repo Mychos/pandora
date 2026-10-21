@@ -1,10 +1,5 @@
-//! The CSV interchange file: one writer and one reader over the same header, so
-//! what this app exports is exactly what it can read back. It is plaintext, and
-//! it also owns where an export lands (`download_dir`, `safe_name`).
-//!
-//! Both platforms import. A desktop's picker hands back the user's own file; a
-//! phone's picker leaves a copy in the app's own storage, which `import_copy`
-//! reads and removes.
+//! The CSV interchange file: one writer and one reader over the same header, so what
+//! it exports it can read back. Plaintext, and it owns where an export lands.
 
 use crate::app::{App, StatusKind};
 use crate::vault::model::{now_secs, Any, Entry, Folder, Kind, Login, Note, Otp, Vault};
@@ -14,9 +9,8 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-/// Every name here is also an alias the reader accepts, so an exported file
-/// always imports back. `kind` is what tells the four collections apart: the
-/// vault itself writes no tag.
+/// Every name is an alias the reader accepts, so an export always imports back;
+/// `kind` tells the four collections apart.
 pub const HEADER: &str = "name,username,password,url,notes,folder,kind,totp";
 
 /// Anything bigger is not a CSV export, and this file comes from outside.
@@ -25,8 +19,7 @@ const MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// Deepest folder path an import will create — the same ceiling as the drive tree.
 const DEPTH: usize = 32;
 
-/// Downloads when the platform has one, else the data dir the boxes live in — an
-/// export is never silently a no-op.
+/// Downloads when the platform has one, else the data dir, so an export is never a no-op.
 pub fn download_dir() -> Result<PathBuf, String> {
     dirs::download_dir()
         .or_else(dirs::data_local_dir)
@@ -37,9 +30,11 @@ pub fn write(vault: &Vault) -> Zeroizing<String> {
     let mut out = Zeroizing::new(format!("{HEADER}\n"));
     for it in vault.records() {
         let folder = folder_path(vault, it.folder());
-        // Only the columns a record actually carries are filled: a note has a
-        // body and a folder, a login has its credentials, a code has its seed. A
-        // file carries bytes a text file cannot hold, so it is not a row at all.
+        let note_body = match &it {
+            Any::Drive(Entry::Note(note)) => vault.note_text(note).unwrap_or_default(),
+            _ => zeroize::Zeroizing::new(String::new()),
+        };
+        // Only the columns a record carries; a file has bytes a text file cannot hold.
         let (username, password, url, notes, totp) = match it {
             Any::Login(it) => (
                 it.username.as_str(),
@@ -48,7 +43,7 @@ pub fn write(vault: &Vault) -> Zeroizing<String> {
                 it.notes.as_str(),
                 "",
             ),
-            Any::Drive(Entry::Note(it)) => ("", "", "", it.body.as_str(), ""),
+            Any::Drive(Entry::Note(_)) => ("", "", "", note_body.as_str(), ""),
             Any::Drive(Entry::File(_)) => continue,
             Any::Otp(it) => ("", "", "", "", it.secret.as_str()),
         };
@@ -143,8 +138,8 @@ fn parse_delimited(text: &str, delimiter: char) -> Vec<Vec<String>> {
     rows
 }
 
-/// Every column is optional: only `name` or `password` is required for the file
-/// to be recognised at all, and a field it does not carry lands empty.
+/// Every column is optional: `name` or `password` must exist for the file to be
+/// recognised, and a field it does not carry lands empty.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Columns {
     name: Option<usize>,
@@ -159,9 +154,7 @@ struct Columns {
 
 impl Columns {
     /// Match a header row against the aliases this app, KeePassXC, KeePass and
-    /// Bitwarden write. A header is compared with its spaces and underscores
-    /// gone, so `Login Name` and `login_name` are the same column. Columns
-    /// nobody reads are not looked at, so their export imports as it stands.
+    /// Bitwarden write; spaces and underscores are ignored, unknown columns skipped.
     fn detect(header: &[String]) -> Result<Self, String> {
         let find = |aliases: &[&str]| {
             header.iter().position(|h| {
@@ -217,8 +210,7 @@ impl Columns {
         Self::value(row, at).trim()
     }
 
-    /// What the row is: the tag says it, and a row that says nothing is a login,
-    /// which is what every manager's export without a type means.
+    /// The type column: a row that says nothing is a login.
     fn kind(&self, row: &[String]) -> Kind {
         match self.cell(row, self.kind).to_ascii_lowercase().as_str() {
             "note" | "securenote" | "secure note" | "document" | "file" => Kind::Note,
@@ -259,8 +251,7 @@ impl Columns {
     }
 }
 
-/// The `a/b` path a record's folder names, in the terms the file writes it, so a
-/// re-import can tell whether a row is already there.
+/// The `a/b` folder path a record names, as the file writes it.
 fn folder_path(vault: &Vault, folder: Option<&str>) -> String {
     folders::path(vault, folder)
         .iter()
@@ -269,8 +260,7 @@ fn folder_path(vault: &Vault, folder: Option<&str>) -> String {
         .join("/")
 }
 
-/// The folder an `a/b/c` path names, created level by level; None for an empty
-/// path — the drive root. Only a note lives in a folder.
+/// The folder an `a/b/c` path names, created level by level; `None` is the root.
 fn find_or_create_folder(vault: &mut Vault, path: &str) -> Option<String> {
     let mut parent: Option<String> = None;
     for name in path
@@ -296,9 +286,8 @@ fn find_or_create_folder(vault: &mut Vault, path: &str) -> Option<String> {
     parent
 }
 
-/// How an export is named: the box's own name, or one that says nothing at all.
-/// The prompt asks which, because a file called after the box tells whoever reads
-/// the folder what is in it — and the file itself is already in the clear.
+/// A file called after the box says on its own what it holds, and it is already
+/// in the clear; the neutral name says nothing beyond `pandora-export.csv`.
 pub fn export_name(box_name: &str, neutral: bool) -> String {
     match neutral {
         true => "pandora-export.csv".to_owned(),
@@ -341,13 +330,9 @@ impl App {
         }
     }
 
-    /// Read a CSV the user picks into the box on screen. Additive, never
-    /// destructive: nothing already in the box is overwritten.
-    ///
-    /// The phone's picker belongs to the activity and blocks the frame while it
-    /// is up, exactly as the drive's does. `*/*` because a provider can announce
-    /// a CSV as `application/vnd.ms-excel` or `application/octet-stream`; what
-    /// validates it is the size cap and the header, not the MIME.
+    /// Additive, never destructive: nothing already in the box is overwritten. The
+    /// phone's picker blocks the frame, and `*/*` is used because providers mislabel CSV;
+    /// the size cap and the header validate it, not the MIME.
     #[cfg(target_os = "android")]
     pub fn import_csv(&mut self) {
         match crate::shared::android::text_with("pick", "*/*") {
@@ -365,16 +350,13 @@ impl App {
         else {
             return;
         };
-        // Not `import_copy`: a desktop picker hands back the user's own file,
-        // never a copy of it, and the file is theirs to keep.
+        // Not `import_copy`: a desktop picker hands back the user's own file, not a copy.
         let read = self.read_csv(&path);
         self.report(read);
     }
 
-    /// Read the copy a phone's picker made, then drop it whatever happened: the
-    /// file the user picked was never touched, and a plaintext CSV left in the
-    /// clear would outlive the box. Not `cfg`'d, so the round trip is testable
-    /// off the phone.
+    /// Read the copy a phone's picker made and drop it whatever happened: the
+    /// plaintext must not outlive the box; not `cfg`'d so the round trip is testable.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     fn import_copy(&mut self, path: &Path) {
         let read = self.read_csv(path);
@@ -403,8 +385,7 @@ impl App {
         }
     }
 
-    /// The size is checked before the text, so an oversized file is never pulled
-    /// into memory.
+    /// Checked before the text, so an oversized file is never pulled into memory.
     fn read_csv(&mut self, path: &Path) -> Result<(usize, usize), String> {
         let len = std::fs::metadata(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?
@@ -417,8 +398,7 @@ impl App {
         self.absorb(&text)
     }
 
-    /// Every row into the box on screen, header first. Reports how many records
-    /// were added and how many rows only repeated one already there.
+    /// Every row into the box, header first; counts added and skipped.
     fn absorb(&mut self, text: &str) -> Result<(usize, usize), String> {
         let mut best: Option<(usize, usize, Vec<Vec<String>>, Columns)> = None;
         for (priority, delimiter) in [',', ';', '\t'].into_iter().enumerate() {
@@ -485,9 +465,10 @@ impl App {
                     Kind::Note | Kind::File => {
                         let mut it = cols.note(row);
                         let path = cols.cell(row, cols.folder).to_owned();
+                        let digest = it.digest();
                         let found = s.vault.drive.iter().any(|e| {
                             e.name() == it.name
-                                && matches!(e, Entry::Note(n) if n.body == it.body)
+                                && matches!(e, Entry::Note(n) if n.digest() == digest)
                                 && folder_path(&s.vault, e.folder()) == path
                         });
                         if found {
@@ -513,8 +494,7 @@ impl App {
                     }
                 }
             }
-            // A manager that carries its one-time seed on the login's own row
-            // (KeePassXC does) leaves it here as well, so it is not lost.
+            // KeePassXC carries the seed on the login's row; keep it as a code.
             let totp = cols.cell(row, cols.totp);
             if cols.kind(row) == Kind::Login && !totp.is_empty() {
                 let it = cols.otp(row);
@@ -540,9 +520,6 @@ impl App {
 mod tests {
     use super::*;
 
-    /// An export is named after the box unless the user says otherwise: a file
-    /// called `Divorcio.csv` in Downloads says on its own what it holds, and it is
-    /// already unencrypted there.
     #[test]
     fn an_export_is_named_after_the_box_or_after_nothing() {
         assert_eq!(export_name("Work", false), "Work.csv");
@@ -680,6 +657,20 @@ mod tests {
         );
     }
 
+    /// A chunked note has no body in memory: dedup compares its digest, not the empty body.
+    #[test]
+    fn a_saved_note_is_not_duplicated_by_the_same_body() {
+        let mut app = app();
+        let source = "name,kind,notes\nIdeas,note,one two\n";
+        assert_eq!(app.absorb(source).unwrap(), (1, 0));
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            store::save(&s.path, &mut s.vault, &s.creds).unwrap();
+            assert!(matches!(&s.vault.drive[0], Entry::Note(n) if n.record.is_some()));
+        }
+        assert_eq!(app.absorb(source).unwrap(), (0, 1), "the record is known");
+    }
+
     #[test]
     fn a_folder_path_becomes_a_chain_and_is_reused() {
         let mut vault = Vault::new("Box");
@@ -698,7 +689,6 @@ mod tests {
         assert_eq!(vault.folders.len(), 3);
     }
 
-    /// What the writer produces, the reader takes back — folders and all.
     #[test]
     fn a_written_file_imports_back_as_the_same_box() {
         let mut app = app();
@@ -741,7 +731,6 @@ mod tests {
         );
     }
 
-    /// Importing twice changes nothing: the box keeps one copy of each record.
     #[test]
     fn an_entry_already_there_is_skipped_not_duplicated() {
         let mut app = app();
@@ -749,7 +738,6 @@ mod tests {
         assert_eq!(app.absorb(KEEPASSXC).unwrap(), (0, 1));
         assert_eq!(app.boxes.session.as_ref().unwrap().vault.logins.len(), 1);
 
-        // the same name with a new password is a new entry, not a duplicate
         assert_eq!(
             app.absorb(&KEEPASSXC.replace("hunter2", "hunter3"))
                 .unwrap(),
@@ -758,8 +746,6 @@ mod tests {
         assert_eq!(app.boxes.session.as_ref().unwrap().vault.logins.len(), 2);
     }
 
-    /// KeePassXC carries the seed on the login's own row: the login and its code
-    /// both land, as two records, and a re-import adds neither again.
     #[test]
     fn a_keepassxc_row_brings_its_seed_as_a_code() {
         let mut app = app();
@@ -828,8 +814,6 @@ mod tests {
         assert!(!path.exists(), "the copy is gone once it is read");
     }
 
-    /// The copy goes even when the file is refused, and the refusal is what the
-    /// status line says.
     #[test]
     fn a_copy_that_is_too_big_is_removed_too() {
         let path = std::env::temp_dir().join("pandora-import-copy-big.csv");
@@ -852,7 +836,6 @@ mod tests {
         assert_eq!(store::sanitize("work.pandora"), "work.pandora");
     }
 
-    /// Read by other managers: a comma in a name must not shift every column after it.
     #[test]
     fn an_entry_that_leaves_the_drive_keeps_its_folder_path() {
         let mut vault = Vault::new("Box");

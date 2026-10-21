@@ -22,9 +22,8 @@ pub fn at(input: &str, now: u64) -> Result<(Zeroizing<String>, u64), &'static st
     code(parse(input)?, now)
 }
 
-/// What a URI calls itself, for naming a code nobody typed a name for: the
-/// `issuer` it carries, else the label before the `:` — `Vercel:me@x` is Vercel.
-/// A bare seed has no name at all.
+/// What an `otpauth` URI calls itself: `issuer`, else the label before the `:`;
+/// a bare seed names nothing.
 pub fn label(input: &str) -> Option<String> {
     let uri = url::Url::parse(input.trim()).ok()?;
     if uri.scheme() != "otpauth" || uri.host_str() != Some("totp") {
@@ -252,8 +251,6 @@ mod tests {
         assert_eq!(remaining, 1);
     }
 
-    /// A URI names its account: the issuer first, else the label before the `:`.
-    /// A bare seed names nothing, so the pane keeps the placeholder.
     #[test]
     fn a_uri_names_itself() {
         assert_eq!(

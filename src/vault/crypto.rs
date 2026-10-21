@@ -1,10 +1,9 @@
-//! Key derivation (Argon2id), authenticated encryption (XChaCha20-Poly1305) and
-//! the master-password policy. No egui here — this module is shared by every platform.
+//! Key derivation, authenticated encryption and the master-password policy; no egui.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use blake2::{Blake2b512, Digest};
 use chacha20poly1305::{
-    aead::{Aead, KeyInit, Payload},
+    aead::{Aead, AeadInOut, KeyInit, Payload},
     Key as ChaChaKey, XChaCha20Poly1305, XNonce,
 };
 use zeroize::Zeroizing;
@@ -43,8 +42,7 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     b
 }
 
-/// What Argon2 actually consumes: the password, plus a BLAKE2b digest of the
-/// keyfile when one is used. Composite input — the file alone is never a key.
+/// The password plus a BLAKE2b digest of the keyfile: the file alone is never a key.
 pub fn material(password: &str, keyfile: Option<&[u8]>) -> Zeroizing<Vec<u8>> {
     let mut out = Zeroizing::new(password.as_bytes().to_vec());
     if let Some(k) = keyfile {
@@ -64,17 +62,14 @@ pub fn derive_key(secret: &[u8], salt: &[u8], params: &KdfParams) -> Result<Key,
     Ok(Zeroizing::new(key))
 }
 
-/// A stable, short name for something whose real name must not be written down.
-///
-/// A side file — the prefs, a seal, a working copy's folder — has to tell one box
-/// or one source from another without writing down what it is: this is that name.
-/// 128 bits of BLAKE2b in hex: a label, not a key, and nothing that reads back.
+/// 128 bits of BLAKE2b in hex: a label for something whose real name must not be
+/// written down, not a key.
 pub fn digest(bytes: &[u8]) -> String {
     let full = Blake2b512::digest(bytes);
     full[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `aad` is authenticated but not encrypted: the vault binds its header this way.
+/// `aad` is authenticated, not encrypted: the vault binds its header and chunks this way.
 pub fn encrypt(plain: &[u8], key: &Key, aad: &[u8]) -> Result<([u8; NONCE_LEN], Vec<u8>), String> {
     let k: &[u8] = key.as_ref();
     let key = ChaChaKey::try_from(k).map_err(|_| String::from("bad key length"))?;
@@ -87,8 +82,26 @@ pub fn encrypt(plain: &[u8], key: &Key, aad: &[u8]) -> Result<([u8; NONCE_LEN], 
     Ok((nonce.into(), ct))
 }
 
-/// What a failed AEAD open means to the user: the unlock limit matches on this
-/// exact text to tell a wrong password from a box that could not be read at all.
+/// Encrypt in place, appending the tag: a save never holds a second copy of the payload.
+pub fn encrypt_in_place(
+    plain: &mut Vec<u8>,
+    key: &Key,
+    aad: &[u8],
+) -> Result<[u8; NONCE_LEN], String> {
+    let k: &[u8] = key.as_ref();
+    let key = ChaChaKey::try_from(k).map_err(|_| String::from("bad key length"))?;
+    let cipher = XChaCha20Poly1305::new(&key);
+    let nonce = random_bytes::<NONCE_LEN>();
+    let nonce = XNonce::try_from(nonce.as_slice()).map_err(|_| String::from("bad nonce"))?;
+    // Reserve the tag so the buffer does not regrow and copy the payload at the end.
+    plain.reserve(16);
+    cipher
+        .encrypt_in_place(&nonce, aad, plain)
+        .map_err(|e| format!("encrypt failed: {e}"))?;
+    Ok(nonce.into())
+}
+
+/// Exact text the unlock limit matches to tell a wrong password from an unreadable box.
 pub const WRONG: &str = "wrong master password or corrupt box";
 
 pub fn decrypt(nonce: &[u8], ciphertext: &[u8], key: &Key, aad: &[u8]) -> Result<Vec<u8>, String> {
@@ -229,8 +242,6 @@ mod tests {
         assert_ne!(k1.as_ref(), k2.as_ref());
     }
 
-    /// A digest is a name for something whose real name must not be written down:
-    /// the same input always, the input never, and never the same twice for two.
     #[test]
     fn a_digest_names_without_saying() {
         let one = digest(b"/home/ana/Documents/divorce.pandora");
@@ -241,13 +252,12 @@ mod tests {
         assert_ne!(one, digest(b"/home/ana/Documents/work.pandora"));
     }
 
-    /// A header edited on disk no longer decrypts, even though the key is the same.
     #[test]
     fn aad_mismatch_fails() {
         let salt = random_bytes::<SALT_LEN>();
         let k = key("pw", &salt);
-        let (nonce, ct) = encrypt(b"secret", &k, b"v2|argon2id").unwrap();
-        assert!(decrypt(&nonce, &ct, &k, b"v2|argon2i").is_err());
+        let (nonce, ct) = encrypt(b"secret", &k, b"header|argon2id").unwrap();
+        assert!(decrypt(&nonce, &ct, &k, b"header|argon2i").is_err());
     }
 
     #[test]
@@ -261,7 +271,6 @@ mod tests {
         .unwrap();
         let without = key("pw", &salt);
         assert_ne!(with.as_ref(), without.as_ref());
-        // the digest of the keyfile, not the file itself, is what Argon2 sees
         let again = derive_key(
             &material("pw", Some(b"keyfile bytes")),
             &salt,

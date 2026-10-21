@@ -1,13 +1,10 @@
-//! Walking the folder tree of a vault: sub-folders, entries, the root → folder
-//! chain, and the flat depth-first listings the tree views draw.
-//!
-//! Pure functions over [`Vault`]: a hand-edited or merged vault can hold a folder
-//! loop, so every walk is cycle-safe and a listing terminates rather than hangs.
+//! Walks of the folder tree. Every walk is cycle-safe: a hand-edited or merged box
+//! can hold a folder loop, and a listing must terminate.
 
 use crate::vault::model::{Entry, Folder, Vault};
 use std::collections::HashSet;
 
-/// In the vault's own order — the order the user drags into, not alphabetical.
+/// The vault's own order — the order the user dragged, not alphabetical.
 pub fn children<'a>(vault: &'a Vault, parent: Option<&str>) -> Vec<&'a Folder> {
     vault
         .folders
@@ -16,9 +13,7 @@ pub fn children<'a>(vault: &'a Vault, parent: Option<&str>) -> Vec<&'a Folder> {
         .collect()
 }
 
-/// The entries a folder holds — a login never lives in one, and a note and a file
-/// come back in the one order they were dragged into. Kept in that order, so a
-/// drag reorders them.
+/// A folder's drive entries in drag order; a login never lives in one.
 pub fn entries<'a>(vault: &'a Vault, parent: Option<&str>) -> Vec<&'a Entry> {
     vault
         .drive
@@ -190,7 +185,6 @@ mod tests {
         let ids: Vec<(&str, usize)> = tree(&v).iter().map(|(d, f)| (f.id.as_str(), *d)).collect();
         assert_eq!(ids, [("root", 0), ("child", 1)]);
 
-        // cycle hanging off a real root: root ⇄ child, both under "top"
         let mut cyc = vault();
         let mut top = Folder::new("Top", None, 1);
         top.id = "top".to_owned();

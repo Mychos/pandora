@@ -1,13 +1,5 @@
-//! Whether an entry belongs to the page in front of the user.
-//!
-//! One address goes in — what the browser says the page is, or what the user
-//! typed into an entry — and comes out as a [`Site`]: a canonical host and the
-//! registrable domain (eTLD+1) it sits under. A [`Rule`] then compares two of
-//! them.
-//!
-//! The page is attacker-controlled and the stored entry is not, so every rule is
-//! phrased as *does the stored address accept this page*, never the other way
-//! around. Nothing the page says can widen what an entry claims.
+//! Whether a stored address accepts the page in front of the user: the page is
+//! attacker-controlled and never widens what an entry claims.
 
 use crate::vault::model::Login;
 use serde::{Deserialize, Serialize};
@@ -17,31 +9,26 @@ use url::Url;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Rule {
-    /// The registrable domain: `example.com` accepts `www.example.com` and every
-    /// other host under `example.com`. The default, and what a bare URL always
-    /// meant before rules existed.
+    /// The registrable domain; the default a bare URL always meant.
     #[default]
     Domain,
     /// This exact host, and nothing below it.
     Host,
     /// Anything the stored URL starts with, once normalised.
     Prefix,
-    /// Nothing on this exact host: an exclusion. Exact, never a whole domain, so
-    /// it can only ever exclude the page the user said no to.
+    /// Excludes this exact host only, so it drops only the page the user said no to.
     Never,
 }
 
 impl Rule {
-    /// Every rule, in the order the picker offers them.
     pub const ALL: [Rule; 4] = [Rule::Domain, Rule::Host, Rule::Prefix, Rule::Never];
 
-    /// Keeps the default out of a saved vault, so an entry nobody gave an extra
-    /// URL writes the same JSON it always did.
+    /// Keeps the default out of saved JSON, so an entry with no extra URL writes
+    /// what it always did.
     pub fn is_domain(&self) -> bool {
         matches!(self, Rule::Domain)
     }
 
-    /// Short name for the picker — the vault keeps the enum, not the words.
     pub fn label(self) -> &'static str {
         match self {
             Rule::Domain => "domain",
@@ -60,8 +47,7 @@ pub struct Uri {
     pub rule: Rule,
 }
 
-/// How specific a match is. `Ord` orders the least specific first, so the caller
-/// can sort the best to the top.
+/// Least specific first; `rank` keeps the highest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rank {
     Domain,
@@ -69,22 +55,16 @@ pub enum Rank {
     Host,
 }
 
-/// An address reduced to what a rule compares.
 #[derive(Debug, Clone)]
 pub struct Site {
-    /// Lowercase host, no `www.`, no trailing dot. An IPv6 literal keeps its
-    /// brackets, the way the URL parser hands it over.
+    /// Lowercase, no `www.`, no trailing dot; an IPv6 literal keeps its brackets.
     pub host: String,
-    /// eTLD+1, when the host has one. `None` for an IP, a single-label host or a
-    /// bare public suffix (`co.uk`, `github.io`) — those only ever match by
-    /// `Host`.
+    /// eTLD+1, or `None` for an IP, a single-label host or a bare public suffix.
     pub registrable: Option<String>,
-    /// The normalised URL, so `Prefix` compares the same text the browser had.
     pub url: String,
 }
 
-/// Read a host or a URL. `None` when there is no host to speak of: an empty
-/// string, a bare scheme, a `data:` or `javascript:` URL.
+/// `None` when there is no host: empty, a bare scheme, a `data:` or `javascript:` URL.
 pub fn parse(input: &str) -> Option<Site> {
     let input = input.trim();
     if input.is_empty() || is_other_scheme(input) {
@@ -112,9 +92,8 @@ pub fn parse(input: &str) -> Option<Site> {
     })
 }
 
-/// `mailto:`, `javascript:`, `data:` — a scheme with no host behind it. A
-/// `host:port` is not one of these (the colon is followed by digits), and
-/// neither is an IPv6 literal.
+/// `mailto:`, `javascript:`, `data:`: a scheme with no host behind it. A
+/// `host:port` is not one of these, and neither is an IPv6 literal.
 fn is_other_scheme(input: &str) -> bool {
     if input.starts_with('[') {
         return false;
@@ -127,9 +106,8 @@ fn is_other_scheme(input: &str) -> bool {
     bare && !port && !head.eq_ignore_ascii_case("http") && !head.eq_ignore_ascii_case("https")
 }
 
-/// The registrable domain: `example.co.uk` for `www.example.co.uk`. `None` when
-/// the host is an IP, carries no dot, or *is* a public suffix — `Domain` then
-/// falls back to the exact host.
+/// The registrable domain, or `None` when the host is an IP, has no dot, or *is* a
+/// public suffix; `Domain` then falls back to the exact host.
 fn registrable(host: &str) -> Option<String> {
     if host.parse::<std::net::IpAddr>().is_ok() {
         return None;
@@ -137,9 +115,8 @@ fn registrable(host: &str) -> Option<String> {
     psl2::registrable_domain(host)
 }
 
-/// The best rank among an entry's URLs, with the URL that earned it, or `None`
-/// when none of them belong to the page. A `Never` URL for the page's host drops
-/// the whole entry, whatever else it carries.
+/// The best rank among an entry's URLs, with the URL that earned it. A `Never` URL
+/// for the page's host drops the whole entry, whatever else it carries.
 pub fn rank<'a>(entry: &'a Login, page: &Site) -> Option<(Rank, &'a str)> {
     let mut best: Option<(Rank, &str)> = None;
     for (url, rule) in entry.uris() {

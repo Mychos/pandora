@@ -1,28 +1,16 @@
-//! Searching one box: what a query matches and how well.
-//!
-//! It is the one place that knows which field of a record is worth searching.
-//! Never a password, never a seed, never a file's bytes: a login matches on its
-//! name, its user, its addresses and its notes, a note also on its body, and a
-//! file and a code on their names alone. Anything that grows a search box reads
-//! the same rules, so no pane can teach the search to look at a secret.
+//! Which field of a record a query matches: never a password, a seed or a file's bytes.
 
 use crate::vault::model::{Any, Entry, Folder, Kind, Vault};
 use std::borrow::Cow;
 
-/// One result: a record or a folder, with the line under the name and the score
-/// that ordered it.
 pub struct Hit<'a> {
     pub found: Found<'a>,
-    /// What the row shows beside the name: a login's user or address, a file's
-    /// size, nothing when the kind has nothing to add.
+    /// A login's user or address, a file's size, nothing otherwise.
     pub detail: Cow<'a, str>,
-    /// Lower is better: an exact name first, then a prefix, a substring, a field
-    /// and at last the free text. The finder reads it; nothing else should.
+    /// Lower is better: exact name, prefix, substring, field, then free text.
     pub score: u8,
 }
 
-/// A hit is either a record of the box or one of its folders. A folder is not a
-/// record, so it has no [`Kind`] to wear.
 pub enum Found<'a> {
     Record(Any<'a>),
     Folder(&'a Folder),
@@ -43,7 +31,7 @@ impl<'a> Hit<'a> {
         }
     }
 
-    /// The record's own kind; `None` for a folder, which is not a record.
+    /// `None` for a folder, which is not a record.
     pub fn kind(&self) -> Option<Kind> {
         match &self.found {
             Found::Record(it) => Some(it.kind()),
@@ -52,9 +40,8 @@ impl<'a> Hit<'a> {
     }
 }
 
-/// Every result for `query`, best first and stable within a score, so the box's
-/// own order shows through a tie. An empty query matches nothing: a finder that
-/// opens holding the whole box is not a finder.
+/// Best first, stable within a score so the box's own order shows through a tie;
+/// an empty query matches nothing.
 pub fn find<'a>(vault: &'a Vault, query: &str) -> Vec<Hit<'a>> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -69,7 +56,10 @@ pub fn find<'a>(vault: &'a Vault, query: &str) -> Vec<Hit<'a>> {
                 [login.notes.as_str()],
                 &q,
             ),
-            Any::Drive(Entry::Note(note)) => score(&note.name, [], [note.body.as_str()], &q),
+            Any::Drive(Entry::Note(note)) => {
+                let body = vault.note_text(note).unwrap_or_default();
+                score(&note.name, [], [body.as_str()], &q)
+            }
             Any::Drive(Entry::File(file)) => score(&file.name, [], [], &q),
             Any::Otp(otp) => score(&otp.name, [], [], &q),
         };
@@ -94,8 +84,7 @@ pub fn find<'a>(vault: &'a Vault, query: &str) -> Vec<Hit<'a>> {
     hits
 }
 
-/// What the row shows under the name. A login with no user falls back to its
-/// address; a document says how big it is; the rest say nothing.
+/// A login with no user falls back to its address; a file says how big it is.
 fn detail<'a>(it: &Any<'a>) -> Cow<'a, str> {
     match it {
         Any::Login(it) if !it.username.is_empty() => Cow::Borrowed(it.username.as_str()),
@@ -105,9 +94,7 @@ fn detail<'a>(it: &Any<'a>) -> Cow<'a, str> {
     }
 }
 
-/// How well one name and its fields match, or `None` when nothing does. `fields`
-/// are the ones shown beside the name, `body` the free text a note or a login
-/// carries; both are matched the same way, only after the name.
+/// `fields` are shown beside the name, `body` is free text; both rank under it.
 fn score<'a>(
     name: &str,
     fields: impl IntoIterator<Item = &'a str>,
@@ -185,7 +172,6 @@ mod tests {
         assert!(find(&vault(), "   ").is_empty());
     }
 
-    /// The whole point: a password and a seed are searchable by nothing.
     #[test]
     fn a_password_and_a_seed_are_never_found() {
         let mut v = Vault::new("Box");
@@ -206,8 +192,6 @@ mod tests {
         );
     }
 
-    /// A file's bytes are never read, so a word inside a document finds nothing
-    /// even though the bytes are right there.
     #[test]
     fn a_file_matches_only_by_name() {
         let mut v = Vault::new("Box");
@@ -223,7 +207,6 @@ mod tests {
         assert_eq!(names(&find(&v, "notes")), ["notes.txt"]);
     }
 
-    /// The best match is the first, whatever order the box holds its records in.
     #[test]
     fn the_best_match_comes_first() {
         let v = vault();
@@ -236,7 +219,6 @@ mod tests {
         );
     }
 
-    /// A field and the free text match too, and they rank under the name.
     #[test]
     fn a_field_and_a_body_rank_under_the_name() {
         let by_user = names(&find(&vault(), "octocat"));
@@ -250,8 +232,6 @@ mod tests {
         );
     }
 
-    /// A code is found by its name and never by its seed, which `score` never
-    /// sees. The same record found twice is impossible, so one row lands.
     #[test]
     fn every_kind_and_a_folder_are_reachable() {
         let mut v = vault();

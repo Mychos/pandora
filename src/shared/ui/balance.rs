@@ -1,11 +1,4 @@
-//! `text-wrap: balance` for the app's prose: `label` cuts a string at the
-//! narrowest width that still holds it on as many rows as the full width would,
-//! so a heading comes out even instead of stranding a word on its own line.
-//!
-//! It lays the text out the way [`egui::Label`] does — same job, same
-//! alignment, same galley — with only the wrap width narrowed first. A wrapping
-//! horizontal row, where `Label` indents the first row around other widgets, is
-//! handed straight back to it: there is nothing to even out there.
+//! Balanced label text: the narrowest wrap width that keeps the row count.
 
 use egui::{Direction, FontSelection, Label, Ui, WidgetText};
 use std::sync::Arc;
@@ -29,8 +22,7 @@ pub fn label(ui: &mut Ui, text: impl Into<WidgetText>) {
 
     let lines = rows(ui, &job);
     if lines > 1 {
-        // One pixel narrower and a word drops to the next row, so the tightest
-        // width that keeps the line count is also the evenest one.
+        // Narrow until a word would drop: the tightest width that keeps the rows is the evenest.
         let (mut lo, mut hi) = (0.0, job.wrap.max_width);
         for _ in 0..12 {
             let mid = (lo + hi) / 2.0;
@@ -60,8 +52,6 @@ mod tests {
     use crate::shared::ui::shot;
     use egui::{RichText, Shape};
 
-    /// Two rows of prose break where the words allow; balancing may not add a
-    /// row, may not widen the block, and leaves the rows no less even.
     #[test]
     fn balancing_keeps_the_rows_and_evens_them() {
         let ctx = egui::Context::default();
