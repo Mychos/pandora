@@ -1,28 +1,20 @@
-//! Pandora — offline secrets vault, one portable encrypted file.
-//!
-//! The desktop entry point. Everything it runs lives in the library, so Android
-//! (see `android_main`) starts the very same app.
+//! The desktop entry point; everything it runs lives in the library, so Android
+//! starts the same app through `android_main`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(not(target_os = "android"))]
 use pandora::{app, shared};
 
-/// Android never runs this binary — it loads the cdylib and `lib.rs` owns
-/// `android_main`. The empty `main` is only so a build of the whole package
-/// for the phone (which is how `scripts/android-apk.sh` asks for the `.so`)
-/// still has a binary target to compile.
+/// The phone loads the cdylib and never runs this binary; this empty `main` only
+/// gives the whole-package build a binary target to compile.
 #[cfg(target_os = "android")]
 fn main() {}
 
 #[cfg(not(target_os = "android"))]
 fn main() -> eframe::Result {
-    // Native Wayland gives the compositor the resize gesture, which is the
-    // fluid path on a modern desktop. winit 0.30 still only emits file drop
-    // events from X11 (`DroppedFile` is an X11/macOS/Windows event), so a
-    // Wayland session loses drag-and-drop. That is the trade: Wayland unless
-    // `PANDORA_X11=1` asks for the X11 backend to keep dropping files on the
-    // window.
+    // Wayland unless `PANDORA_X11=1`: winit 0.30 only emits `DroppedFile` from X11,
+    // so a Wayland session would lose drag-and-drop.
     #[cfg(target_os = "linux")]
     {
         let force_x11 = std::env::var_os("PANDORA_X11").is_some_and(|v| v != "0");
@@ -36,25 +28,31 @@ fn main() -> eframe::Result {
                 std::env::remove_var("WAYLAND_SOCKET");
             }
         } else if wayland {
-            // Keep winit on Wayland even though XWayland also exports DISPLAY.
+            // XWayland also exports DISPLAY; drop it to stay on Wayland.
             std::env::remove_var("DISPLAY");
         }
     }
+    #[cfg(feature = "glow")]
+    let renderer = if std::env::var("PANDORA_RENDERER").is_ok_and(|value| value == "wgpu") {
+        eframe::Renderer::Wgpu
+    } else {
+        eframe::Renderer::Glow
+    };
+    #[cfg(not(feature = "glow"))]
+    let renderer = eframe::Renderer::Wgpu;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Pandora")
-            // On Wayland a surface has no icon: GNOME matches the window to the
-            // `.desktop` file with this id (`assets/app/linux/pandora.desktop`).
+            // A Wayland surface has no icon; GNOME matches this id to the .desktop file.
             .with_app_id("pandora")
             .with_icon(shared::theme::window_icon())
             .with_decorations(false)
             .with_inner_size([1000.0, 700.0])
             .with_min_inner_size([380.0, 520.0]),
-        // One frame of swapchain room normally; `App::ui` raises it to
-        // `HIGH_THROUGHPUT` while a resize is in flight, so the edge keeps up
-        // without leaving the whole app a frame behind its pointer.
+        // One frame normally; `App::ui` raises it while a resize is in flight.
         wgpu_options: eframe::WgpuConfiguration::default()
             .with_surface_config(eframe::SurfaceConfig::LOW_LATENCY),
+        renderer,
         ..Default::default()
     };
     let _hold = app::hold().unwrap_or_else(|e| {

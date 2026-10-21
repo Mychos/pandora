@@ -6,6 +6,13 @@ description = "Pandora — offline secrets vault, one portable encrypted file"
 license = "MIT"
 default-run = "pandora"
 
+[features]
+# Desktop defaults to Glow: it is the smaller warm footprint (see AGENTS.md).
+# `PANDORA_RENDERER=wgpu` falls back at runtime; `--no-default-features` builds
+# wgpu-only, without linking Glow at all.
+default = ["glow"]
+glow = ["eframe/glow"]
+
 # Desktop runs the binary on top of this library; Android loads the `cdylib`
 # (see `android_main`) — so the same crate is both.
 [lib]
@@ -165,6 +172,14 @@ qrcode = "0.14"
 # egui, winit and wgpu are heavy enough that unoptimized they make every frame of
 # `cargo run` — the resize gesture above all — visibly slower than the release
 # build. The app's own crate stays unoptimized, so it keeps its debug info.
+[profile.dev]
+# The toolchain's incremental codegen and rust-lld disagree over the anonymous
+# globals LLVM's function merging leaves behind: after an edit the binary fails to
+# link with "undefined hidden symbol: anon.…". A clean build links, the next one
+# does not. One crate rebuilds here in seconds without it, so incremental goes
+# before the optimization below does.
+incremental = false
+
 [profile.dev.package."*"]
 opt-level = 2
 
