@@ -7,6 +7,7 @@ use crate::features::settings::model::Remote;
 use crate::features::shell::confirm::Confirm;
 use crate::features::sync::github::Fingerprint;
 use crate::vault::model::Vault;
+use crate::vault::store;
 use crate::vault::store::Credentials;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -57,6 +58,11 @@ pub struct Session {
     pub path: PathBuf,
     pub creds: Credentials,
     pub vault: Vault,
+    /// The tab is parked: `vault` is an empty placeholder that keeps the box's
+    /// name, and the real payload stays on disk. `parked_seq` is the generation
+    /// it had when it was parked, so a pull still compares against the right one.
+    pub parked: bool,
+    pub parked_seq: u64,
     pub dirty: bool,
     pub last_edit: Option<Instant>,
     pub last_mtime: Option<SystemTime>,
@@ -133,6 +139,8 @@ impl Session {
             path,
             creds,
             vault,
+            parked: false,
+            parked_seq: 0,
             dirty: false,
             last_edit: None,
             last_mtime: None,
@@ -171,6 +179,56 @@ impl Session {
         // to settle, because GitHub counts commits against an hourly budget and
         // typing is not a change.
         self.push_at = Some(Instant::now() + crate::features::sync::github::PUSH_QUIET);
+    }
+
+    /// Whether a secret field is being shown in the clear. The reveal belongs to
+    /// the box, so it goes with the session it was made in.
+    pub fn shown(&self, id: &str, field: Field) -> bool {
+        self.reveal.contains(&(id.to_owned(), field))
+    }
+
+    /// Open or close one of a record's secret fields.
+    pub fn show(&mut self, id: &str, field: Field, on: bool) {
+        let key = (id.to_owned(), field);
+        if on {
+            self.reveal.insert(key);
+        } else {
+            self.reveal.remove(&key);
+        }
+    }
+
+    /// Park a clean tab: keep the key and the path, drop the decrypted payload.
+    /// An unwritten edit or a pending conflict keeps the vault in memory, since
+    /// dropping it would lose what the user has not saved.
+    pub fn park(&mut self) {
+        // A file that is not there has nothing to reload: keeping the vault is
+        // the only safe answer, and a test fixture is not a box on disk.
+        if self.parked || self.dirty || self.conflict || !self.path.is_file() {
+            return;
+        }
+        self.parked_seq = self.vault.seq;
+        let name = self.vault.name.clone();
+        self.vault = Vault::new(&name);
+        self.parked = true;
+    }
+
+    /// Bring a parked tab back from its file. The key is the one the session
+    /// kept, so no password is asked; ids that no longer exist are dropped.
+    pub fn load_parked(&mut self) -> Result<(), String> {
+        if !self.parked {
+            return Ok(());
+        }
+        let vault = store::load(&self.path, &self.creds)?;
+        self.vault = vault;
+        self.parked = false;
+        self.parked_seq = self.vault.seq;
+        self.sanitize();
+        self.dirty = false;
+        self.last_edit = None;
+        self.conflict = false;
+        self.ignore_mtime = None;
+        self.last_mtime = store::modified_time(&self.path);
+        Ok(())
     }
 
     /// Drop the ids that no longer exist — they can only go stale after a reload

@@ -240,6 +240,8 @@ impl App {
         match store::adopt(&s.path, &bytes, &s.creds, None) {
             Ok(vault) => {
                 s.vault = vault;
+                s.parked = false;
+                s.parked_seq = s.vault.seq;
                 s.sanitize();
                 s.dirty = false;
                 s.last_edit = None;
@@ -353,6 +355,8 @@ impl Boxes {
         match store::load(&s.path, &s.creds) {
             Ok(v) => {
                 s.vault = v;
+                s.parked = false;
+                s.parked_seq = s.vault.seq;
                 s.sanitize();
                 s.dirty = false;
                 s.last_edit = None;
@@ -387,6 +391,11 @@ impl Boxes {
 /// that changed under us, is the user's to settle: taking the disk copy blind is
 /// how the other device's edits disappear.
 fn write(s: &mut Session, shell: &mut Shell, forced: bool) -> bool {
+    // A parked tab has no payload in memory: writing the placeholder would
+    // replace the box with an empty one.
+    if s.parked {
+        return false;
+    }
     if !forced {
         if s.conflict {
             return false;
@@ -417,6 +426,9 @@ fn write(s: &mut Session, shell: &mut Shell, forced: bool) -> bool {
 }
 
 fn write_if_dirty(s: &mut Session, shell: &mut Shell) {
+    if s.parked {
+        return;
+    }
     if s.dirty && !s.conflict {
         write(s, shell, false);
     }
@@ -505,13 +517,8 @@ mod tests {
     fn opened(name: &str) -> App {
         let ctx = egui::Context::default();
         let mut app = App::blank(&ctx);
+        // `App::open` writes the box, so the file already matches the vault.
         app.open(name);
-        let m = {
-            let s = app.boxes.session.as_mut().unwrap();
-            store::save(&s.path, &mut s.vault, &s.creds).unwrap();
-            store::modified_time(&s.path)
-        };
-        app.boxes.session.as_mut().unwrap().last_mtime = m;
         app
     }
 
@@ -610,8 +617,12 @@ mod tests {
         let parked = std::fs::read(&path).unwrap();
         assert_ne!(parked, before, "the parked box's edit reached the disk");
 
+        // The locked box is the one on screen; a parked tab is empty until it is
+        // brought back, so the edit that the lock must write is made after the
+        // switch.
+        app.switch(0);
         {
-            let s = app.boxes.tabs.last_mut().unwrap();
+            let s = app.boxes.session.as_mut().unwrap();
             s.vault.name = "Edited again".to_owned();
             s.dirty = true;
         }
@@ -619,7 +630,7 @@ mod tests {
         assert_ne!(
             std::fs::read(&path).unwrap(),
             parked,
-            "the lock wrote the parked edit before dropping the key"
+            "the lock wrote the padding edit before dropping the key"
         );
     }
 

@@ -36,15 +36,40 @@ impl App {
     /// Picking the tab already on screen is allowed: that is how the Unlock
     /// screen gets out of the way.
     pub fn switch(&mut self, i: usize) {
-        if i != self.boxes.active {
-            self.boxes.flush(&mut self.shell);
+        if i == self.boxes.active {
+            self.screen = Screen::Main;
+            return;
         }
-        let Some(current) = self.boxes.session.take() else {
+        // Load the tab we are going to before parking the one on screen: a box
+        // that cannot be read leaves the current one untouched.
+        let at = if i < self.boxes.active { i } else { i - 1 };
+        let mut all = std::mem::take(&mut self.boxes.tabs);
+        let mut incoming = all.remove(at);
+        if let Err(e) = incoming.load_parked() {
+            all.insert(at, incoming);
+            self.boxes.tabs = all;
+            self.shell.fail(crate::shared::i18n::tf(
+                "could not open the box: {error}",
+                &[("error", &e)],
+            ));
+            return;
+        }
+        self.boxes.flush(&mut self.shell);
+        let Some(mut current) = self.boxes.session.take() else {
+            self.boxes.session = Some(incoming);
+            self.boxes.tabs = all;
+            self.boxes.active = i;
+            self.screen = Screen::Main;
             return;
         };
-        let mut all = std::mem::take(&mut self.boxes.tabs);
-        all.insert(self.boxes.active.min(all.len()), current);
-        self.boxes.session = Some(all.remove(i));
+        current.park();
+        let insert_at = if i < self.boxes.active {
+            self.boxes.active - 1
+        } else {
+            self.boxes.active
+        };
+        all.insert(insert_at.min(all.len()), current);
+        self.boxes.session = Some(incoming);
         self.boxes.tabs = all;
         self.boxes.active = i;
         self.screen = Screen::Main;
@@ -70,6 +95,10 @@ impl App {
         }
         self.boxes.flush(&mut self.shell);
         self.boxes.session = None;
+        // The closed box's player, page, picture and palette belong to it, not
+        // to whatever tab slides into the slot (or to the sources screen).
+        self.preview = Default::default();
+        self.find = Default::default();
         if self.boxes.tabs.is_empty() {
             self.boxes.active = 0;
             self.screen = self.auth.landing();
@@ -78,7 +107,16 @@ impl App {
         }
         // the tab that slid into this slot, or the one before it when the last was closed
         let next = i.min(self.boxes.tabs.len() - 1);
-        self.boxes.session = Some(self.boxes.tabs.remove(next));
+        let mut incoming = self.boxes.tabs.remove(next);
+        if let Err(e) = incoming.load_parked() {
+            self.shell.fail(crate::shared::i18n::tf(
+                "could not open the box: {error}",
+                &[("error", &e)],
+            ));
+        }
+        // A box that cannot be read keeps its tab, parked and empty: the error
+        // says why, and `write` refuses to put that placeholder over the file.
+        self.boxes.session = Some(incoming);
         self.boxes.active = next;
         self.screen = Screen::Main;
         self.forget_closed();
@@ -167,5 +205,58 @@ mod tests {
         app.open("Personal");
         assert_eq!(strip(&app), ["Personal", "Work"]);
         assert_eq!(app.boxes.active, 0);
+    }
+
+    /// A parked tab keeps the key and the path but not the payload; switching
+    /// back reads the file with that key and restores the edits that were written
+    /// before it left the screen.
+    #[test]
+    fn a_parked_tab_drops_its_vault_and_loads_it_back() {
+        let ctx = egui::Context::default();
+        let mut app = App::blank(&ctx);
+        app.open("Personal");
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            let mut login = crate::vault::model::Login::new(1);
+            login.name = "only in personal".to_owned();
+            s.vault.logins.push(login);
+            s.mark_dirty();
+        }
+        app.boxes.persist(&mut app.shell);
+
+        app.open("Work");
+        let parked = &app.boxes.tabs[0];
+        assert!(parked.parked, "the box left the screen parked");
+        assert!(
+            parked.vault.logins.is_empty(),
+            "the decrypted payload is not in the tab"
+        );
+        assert_eq!(
+            crate::vault::store::load(&parked.path, &parked.creds)
+                .unwrap()
+                .logins[0]
+                .name,
+            "only in personal",
+            "the edit was written before it was parked"
+        );
+
+        app.switch(0);
+        let s = app.boxes.session.as_ref().unwrap();
+        assert!(!s.parked);
+        assert_eq!(s.vault.logins[0].name, "only in personal");
+    }
+
+    /// Closing the box on screen also closes its palette: the rows belonged to
+    /// the box that is gone, and the next tab starts with a clean finder.
+    #[test]
+    fn closing_the_active_box_closes_its_palette() {
+        let ctx = egui::Context::default();
+        let mut app = App::blank(&ctx);
+        app.open("Personal");
+        app.find.open = true;
+        app.find.query = "only in personal".to_owned();
+        app.close(0);
+        assert!(!app.find.open, "the palette went with the box");
+        assert!(app.find.query.is_empty());
     }
 }

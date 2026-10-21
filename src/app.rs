@@ -1,5 +1,4 @@
-//! Application state + eframe loop: navigation plus the cross-cutting bits, with
-//! each feature's own state grouped in `features/`.
+//! App state and the eframe loop; each feature keeps its own state in `features/`.
 
 use crate::features::auth::model::{Auth, WelcomeForm};
 use crate::features::boxes::model::Boxes;
@@ -20,8 +19,7 @@ pub use crate::features::shell::confirm::Confirm;
 pub use crate::features::shell::model::StatusKind;
 pub use crate::features::sync::model::{Job, Reply, RepoJob, RepoReply};
 
-/// Hold the data directory against another instance. One Pandora per data dir:
-/// the refresh token, the prefs and the vault are all single-writer resources.
+/// One Pandora per data dir: token, prefs and vault are single-writer resources.
 pub fn hold_at(dir: &std::path::Path) -> std::io::Result<std::fs::File> {
     let lock = std::fs::File::create(dir.join("pandora.lock"))?;
     lock.try_lock()?;
@@ -48,25 +46,76 @@ mod tests {
         drop(first);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// The app's settings dialog over whatever screen is behind it; the whole loop
+    /// runs so the button, its state and the dialog are exercised together.
+    #[test]
+    fn the_apps_own_settings_open_over_a_screen_with_no_box() {
+        use crate::shared::ui::shot;
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = App::blank(&ctx);
+        let size = egui::vec2(420.0, 780.0);
+        // The bar rides an `Area`: two idle frames before a rect is worth clicking.
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(shot::input(size, Vec::new()), |ui| app.run_ui(ui));
+            out.textures_delta.clear();
+        }
+        let at = ctx
+            .read_response(egui::Id::new("bar-prefs"))
+            .expect("the bar carries the app's own settings")
+            .rect
+            .center();
+        for events in [
+            vec![egui::Event::PointerMoved(at), shot::press(at, true)],
+            vec![shot::press(at, false)],
+        ] {
+            let mut out = ctx.run_ui(shot::input(size, events), |ui| app.run_ui(ui));
+            out.textures_delta.clear();
+        }
+        assert!(app.prefs_open, "the sliders open the app's settings");
+        assert_eq!(app.screen, Screen::Sources, "and leave the screen behind");
+
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            // The dialog is an `Area` too, with its own sizing pass.
+            let mut out = ctx.run_ui(shot::input(size, Vec::new()), |ui| app.run_ui(ui));
+            out.textures_delta.clear();
+            shapes = out.shapes;
+        }
+        let drawn = shot::words(&shapes);
+        for want in [
+            "GENERAL SETTINGS",
+            "APPEARANCE",
+            "LANGUAGE",
+            "Dark",
+            "Light",
+            "English",
+            "Español",
+        ] {
+            assert!(
+                drawn.iter().any(|word| word == want),
+                "the app's settings are painted over the screen: missing {want}"
+            );
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
     Welcome,
     Unlock,
-    /// The boxes the app knows about: local files first, then each repo. Also
-    /// where a repo is added.
+    /// The boxes the app knows about: local files first, then each repo.
     Sources,
     Main,
     /// The password tool. It reads nothing from a box, so it opens with none.
     Generate,
-    /// The camera reading a QR, full screen: a picture to aim, not a dialog. A
-    /// phone's screen, so on a desktop the variant is not even here.
+    /// The camera reading a QR, full screen; the variant exists only on a phone.
     #[cfg(target_os = "android")]
     Scan,
 }
 
-/// Masked text fields of an entry. Each one reveals on its own.
+/// Masked text fields of an entry; each reveals on its own.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Field {
     Password,
@@ -80,8 +129,7 @@ pub enum Drag {
     Folder(String),
 }
 
-/// A coarse location: the screen, the box on it, the pane and folder inside it,
-/// and the sources view. A change to any field is one step back.
+/// A coarse place: screen, box, pane, folder and sources view; any change is one step back.
 #[derive(Clone, PartialEq)]
 struct Place {
     screen: Screen,
@@ -116,25 +164,21 @@ pub struct App {
     pub preview: crate::features::drive::preview::Preview,
     /// The Ctrl+K palette: what was typed and which hit the keyboard is on.
     pub find: crate::features::find::model::Find,
-    /// Where a file dropped on the window lands this frame, if anywhere. Set by
-    /// the drive's grid, tree and breadcrumb while they are drawn, consumed by
-    /// `handle_dropped` at the end of the frame. `None` = nothing under the
-    /// pointer, `Some(None)` = the drive root.
+    /// Where a dropped file lands this frame: set by the drive while drawing, consumed
+    /// by `handle_dropped`. `None` = nothing under the pointer, `Some(None)` = root.
     pub drop_at: Option<Option<String>>,
     /// The rect of the folder under the pointer while files are being dragged,
     /// with its own corner radius, so the overlay can outline exactly where they
     /// would land.
     pub drop_highlight: Option<(egui::Rect, u8)>,
-    /// The language picker is open: the bar's globe, as a modal.
-    pub lang_open: bool,
+    /// The app's own settings are open: the bar's sliders, as a dialog. It is not
+    /// a page of the box, and it rides every screen.
+    pub prefs_open: bool,
     pub idle: Monitor,
-    /// The local socket the native host relays through, so the browser never has to
-    /// ask for the master password while this window is open.
+    /// The local socket the host relays through, so a browser never asks for the password.
     pub bridge: crate::features::bridge::Bridge,
-    /// The swapchain latency currently applied. `LOW_LATENCY` at rest, raised
-    /// while a resize is in flight so the edge does not trail the pointer.
-    /// Desktop only: the phone draws through glow, where the swap interval is
-    /// the compositor's.
+    /// `LOW_LATENCY` at rest, raised while a resize is in flight; wgpu only, since with
+    /// Glow the swap interval is the compositor's.
     #[cfg(not(target_os = "android"))]
     surface: eframe::SurfaceConfig,
     /// Until this instant the window is considered resizing.
@@ -143,14 +187,18 @@ pub struct App {
     /// Last viewport size, so a resize can be detected without a winit event.
     #[cfg(not(target_os = "android"))]
     last_size: egui::Vec2,
+    /// Whether this process draws through wgpu; the swapchain knob is a wgpu API.
+    #[cfg(not(target_os = "android"))]
+    wgpu: bool,
     nav: Nav,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // The prefs come first: the language and the scheme are both read out of them
-        // and both are applied to the context, so loading them after the theme would
-        // paint the first frame in a scheme the user did not choose.
+        // A picker copy that never reached a save is plaintext; drop it now.
+        store::clear_staging();
+        // Prefs first: language and scheme are applied to the context, or the first
+        // frame paints a scheme the user did not choose.
         let prefs = crate::features::settings::model::load();
         crate::shared::i18n::set(prefs.lang);
         theme::set(prefs.theme);
@@ -166,15 +214,10 @@ impl App {
         let recents = crate::features::auth::model::load();
         let mut shell = Shell::default();
         let mut sync = Sync::default();
-        // A remembered session comes back before the first frame, so the one the
-        // user signed in for is already there when the window opens. What the
-        // store kept is the refresh token when there is one, and the access
-        // token that goes with it is minted on the first frame.
+        // A remembered session comes back before the first frame; its access token is
+        // minted then. A store answering "nothing" is worth a line on screen.
         if prefs.remember {
-            // A session that was asked for and is not there is worth a line: the
-            // three ways the store can answer "nothing" — never kept, the key
-            // rotated, the keystore not up yet — are otherwise one and the same
-            // silence on screen. `Pandora.recall` names its own in `logcat`.
+            // Never kept, key rotated or keystore not up yet would otherwise be the same silence.
             log::info!("pandora: the session is remembered; asking the store for it");
             match crate::features::sync::remember::load() {
                 Ok(Some(kept)) => {
@@ -209,7 +252,7 @@ impl App {
             find: crate::features::find::model::Find::default(),
             drop_at: None,
             drop_highlight: None,
-            lang_open: false,
+            prefs_open: false,
             idle: Monitor::start(),
             bridge: crate::features::bridge::Bridge::start(cc.egui_ctx.clone()),
             #[cfg(not(target_os = "android"))]
@@ -218,16 +261,16 @@ impl App {
             resize_until: None,
             #[cfg(not(target_os = "android"))]
             last_size: egui::Vec2::ZERO,
+            #[cfg(not(target_os = "android"))]
+            wgpu: cc.wgpu_render_state.is_some(),
             nav: Nav::default(),
         }
     }
 
-    /// Lock every unlocked vault and land on the Unlock screen; unsaved,
-    /// conflict-free edits are written first.
+    /// Lock every vault and land on Unlock; unsaved edits are written first.
     pub fn lock(&mut self, ctx: &egui::Context) {
         self.boxes.flush_all(&mut self.shell);
-        // The key is about to go and no other moment is coming, so a push the box
-        // has not sent yet goes now. The worker keeps its own copy.
+        // A push the box has not sent goes now; the worker keeps its own copy.
         if self
             .boxes
             .session
@@ -242,20 +285,20 @@ impl App {
         self.boxes.tabs.clear();
         self.boxes.active = 0;
         self.preview = Default::default();
+        self.find = Default::default();
         self.auth.unlock_password.zeroize();
         self.generate.out.zeroize();
         self.auth.recent_search.clear();
         self.auth.op = None;
         self.auth.login = None;
-        self.lang_open = false;
-        // The repo token stays, and so does a push in flight: the token reads
-        // nothing without the master password. Sign out clears it.
+        self.prefs_open = false;
+        // The repo token and a push in flight stay: neither reads anything without the
+        // password. Sign out clears them.
         // Every vault is gone, so no place behind this one can be returned to.
         self.nav = Nav::default();
         self.screen = self.auth.landing();
-        // Dropping the sessions wipes the buffers the app owns, but egui keeps its
-        // own copy of every field — the master password included, in the undo
-        // snapshot behind it. That copy is only reachable by clearing the lot.
+        // egui keeps its own copy of every field, the master password included in the
+        // undo snapshot; clearing the lot is the only way to reach it.
         ctx.data_mut(|d| d.clear());
     }
 
@@ -309,14 +352,12 @@ impl App {
             .set_status(format!("box locked: {reason}"), StatusKind::Info);
     }
 
-    /// Where the user is, coarsely: the screen, the box on it, the pane and the
-    /// folder inside it, and the sources view. Any change is one step back.
+    /// The place, coarsely; any change is one step back.
     fn place(&self) -> Place {
         let s = self.boxes.session.as_ref();
         Place {
             screen: self.screen,
-            // None and `Recents` show the same view: one spelling, so picking
-            // the default view is not a step.
+            // None and `Recents` show the same view: one spelling, so it is not a step.
             side: self.auth.side.or(Some(Side::Recents)),
             vault: s.map(|s| s.path.clone()),
             tab: s.map_or(Tab::Passwords, |s| s.tab),
@@ -327,9 +368,8 @@ impl App {
         }
     }
 
-    /// Push the place just left when the current one changes. A place whose box
-    /// is no longer open is dropped: there would be nowhere to return. Called
-    /// once a frame, after the screens, so it catches every way of navigating.
+    /// Push the place left when the current one changes; a place whose box is closed is
+    /// dropped. Once a frame, after the screens, so it catches every navigation.
     pub(crate) fn record_place(&mut self) {
         let now = self.place();
         let Some(old) = self.nav.at.clone() else {
@@ -339,8 +379,7 @@ impl App {
         if old == now {
             return;
         }
-        // A scan lasts as long as its screen: leaving it — by the bar's back, by
-        // the platform's — is what puts the camera away.
+        // Leaving the scanner — bar or platform — puts the camera away.
         #[cfg(target_os = "android")]
         if old.screen == Screen::Scan && now.screen != Screen::Scan {
             self.boxes.stop_scan();
@@ -367,7 +406,7 @@ impl App {
                 || s.editing_entry.is_some()
                 || s.selected.is_some()
         });
-        self.lang_open
+        self.prefs_open
             || self.find.open
             || overlay
             || self.sync.adding
@@ -375,16 +414,13 @@ impl App {
             || !self.nav.past.is_empty()
     }
 
-    /// Close the topmost layer: the language picker, the QR chooser, the entry's
-    /// generator, the viewer, the delete prompt, the new-entry chooser, the folder
-    /// editor or the open entry; then the sources' new-box form and repo picker.
-    /// Overlays are not places.
+    /// Close the topmost layer, then step back through places; overlays are not places.
     fn close_overlay(&mut self) -> bool {
         if std::mem::take(&mut self.find.open) {
             self.find.query.clear();
             return true;
         }
-        if std::mem::take(&mut self.lang_open) {
+        if std::mem::take(&mut self.prefs_open) {
             return true;
         }
         if self.generate.entry.take().is_some() {
@@ -469,8 +505,8 @@ impl App {
         }
     }
 
-    /// Return to a place: switch box if needed, then set screen, view, pane and
-    /// folder. Overlays stay closed.
+    /// Return to a place: switch box if needed, then screen, view, pane and folder;
+    /// overlays stay closed.
     fn apply(&mut self, place: Place) {
         if let Some(path) = place.vault.as_ref() {
             if let Some(at) = self.boxes.position(path) {
@@ -516,15 +552,14 @@ impl App {
 
     pub fn run_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        // Before anything draws: a character typed on a phone's keyboard arrives
-        // here, and it has to land on the widget that has focus.
+        // Before anything draws: a phone's typed character must land on the focused widget.
         #[cfg(target_os = "android")]
         crate::shared::android::feed_keyboard(&ctx);
         self.pump();
         self.pump_bridge(&ctx);
         self.pump_sync(&ctx);
-        // A preview belongs to the entry it was opened for: closing the modal,
-        // changing pane or locking the box puts the player and the PDF away.
+        // A preview belongs to its entry: closing the modal, changing pane or locking
+        // puts the player and the PDF away.
         let watching = self.screen == Screen::Main
             && self
                 .boxes
@@ -543,9 +578,8 @@ impl App {
         self.drop_at = None;
         self.drop_highlight = None;
 
-        // While files are being dragged over the window, keep the frame loop
-        // alive so the overlay and the hovered folder stay painted. The drag is
-        // announced as a hover until it is released as a drop.
+        // While files are dragged, keep frames coming so the overlay and the hovered
+        // folder stay painted; the drag arrives as a hover until it is dropped.
         let dragging = self.screen == Screen::Main
             && self.boxes.session.is_some()
             && ui
@@ -572,9 +606,8 @@ impl App {
         if self.boxes.session.is_some() {
             self.boxes.tick(&mut self.shell);
         }
-        // The bar runs everywhere: a phone has no window to drag or close, but it
-        // keeps Back and the tool. Only a desktop has edges to resize, and they
-        // ride the same layer as the bar so a modal cannot cover them.
+        // The bar runs everywhere; only a desktop has edges, on the bar's layer so a
+        // modal cannot cover them.
         crate::features::shell::windowbar::show(ui, self);
         self.shell.draw(ui);
         match self.screen {
@@ -592,22 +625,17 @@ impl App {
                 crate::features::shell::screen::main(ui, self);
             }
         }
-        // The picker rides every screen: its globe is on the bar.
-        crate::features::settings::ui::modal(&ctx, self);
-        // The trash rides the settings card that opens it, and draws outside the
-        // pane so a restore can take the user to the record it put back.
+        // The app's settings ride every screen: their button is on the bar.
+        crate::features::settings::ui::general(&ctx, self);
+        // The trash draws outside the settings pane, so a restore can jump to the record.
         crate::features::settings::ui::trash_modal(&ctx, self);
-        // The Ctrl+K palette is an overlay like any other: it searches the box on
-        // screen and takes the user to what it finds.
+        // The Ctrl+K palette is an overlay: it searches the box on screen.
         crate::features::find::ui::modal(&ctx, self);
-        // Last, so it sits over whatever screen is behind it: a browser asking to be
-        // let in can arrive on any of them.
+        // Last, over whatever screen is behind: a browser asking in can arrive on any.
         crate::features::bridge::ui::modal(&ctx, self);
 
-        // While files are being dragged over the window, paint a drop zone over
-        // everything so it is obvious where they land, and outline the folder the
-        // pointer is hovering. The whole viewport is covered, bar included, so the
-        // window's outline stays unbroken.
+        // While files are dragged, cover the viewport (bar included) and outline the
+        // hovered folder.
         if dragging {
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
@@ -660,10 +688,7 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // A resize is a short burst of frames: give the swapchain two frames of
-        // room for its duration, then go back to one so the window's edge does
-        // not trail the pointer in the steady state. It is a wgpu knob, so the
-        // phone — drawing through glow — has nothing to do here.
+        // A resize raises the swapchain to two frames of room, then back to one; wgpu only.
         #[cfg(not(target_os = "android"))]
         {
             const SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -681,29 +706,35 @@ impl eframe::App for App {
                 eframe::SurfaceConfig::LOW_LATENCY
             };
             if wanted != self.surface {
-                _frame.set_wgpu_surface_config(wanted);
+                if self.wgpu {
+                    _frame.set_wgpu_surface_config(wanted);
+                }
                 self.surface = wanted;
             }
         }
         self.run_ui(ui);
     }
 
-    /// Quitting is the one exit the clip countdown never gets: without this a
-    /// password copied a minute ago outlives the app on the system clipboard.
-    #[cfg(not(target_os = "android"))]
+    /// Quitting is the one exit the clip countdown never sees; without this a copied
+    /// password outlives the app on the clipboard.
+    #[cfg(all(not(target_os = "android"), feature = "glow"))]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.shell.take_back_clip();
+    }
+
+    #[cfg(all(not(target_os = "android"), not(feature = "glow")))]
     fn on_exit(&mut self) {
         self.shell.take_back_clip();
     }
 
-    /// The same, for the phone: glow's exit hook hands over the GL context, and
-    /// nothing here wants it.
+    /// The same for the phone: glow's exit hook hands over the GL context, unused.
     #[cfg(target_os = "android")]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.shell.take_back_clip();
     }
 }
 
-/// Test fixtures: a bare app, and a throwaway unlocked vault.
+/// Test fixtures: a bare app and a throwaway unlocked vault.
 #[cfg(test)]
 impl App {
     pub fn blank(ctx: &egui::Context) -> Self {
@@ -720,7 +751,7 @@ impl App {
             find: crate::features::find::model::Find::default(),
             drop_at: None,
             drop_highlight: None,
-            lang_open: false,
+            prefs_open: false,
             idle: Monitor::default(),
             bridge: crate::features::bridge::Bridge::default(),
             #[cfg(not(target_os = "android"))]
@@ -729,13 +760,34 @@ impl App {
             resize_until: None,
             #[cfg(not(target_os = "android"))]
             last_size: egui::Vec2::ZERO,
+            #[cfg(not(target_os = "android"))]
+            wgpu: true,
             nav: Nav::default(),
         }
     }
 
     pub fn open(&mut self, name: &str) {
-        let path = std::path::PathBuf::from(format!("/tmp/{name}.vault"));
+        // A path per test and per box name: two parallel tests never share a file.
+        let test = std::thread::current()
+            .name()
+            .unwrap_or("test")
+            .replace("::", "-");
+        let path = std::env::temp_dir().join(format!(
+            "pandora-{}-{test}-{name}.vault",
+            std::process::id()
+        ));
+        // A box already in the strip is switched to, not saved: its parked session holds
+        // the credentials.
+        if let Some(i) = self.boxes.position(&path) {
+            self.switch(i);
+            return;
+        }
+        // A fresh run starts from a fresh file, not from the previous run's leftovers.
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension(format!("{}.bak", store::EXT)));
         let creds = store::Credentials::rekey("test", None).unwrap();
-        self.enter(creds, crate::vault::model::Vault::new(name), path);
+        let mut vault = crate::vault::model::Vault::new(name);
+        store::save(&path, &mut vault, &creds).unwrap();
+        self.enter(creds, vault, path);
     }
 }

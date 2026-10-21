@@ -23,9 +23,11 @@ impl App {
             return;
         }
         // The box on screen is about to be parked behind the new one, where no
-        // tick reaches it any more: its edits go to disk first.
+        // tick reaches it any more: its edits go to disk first, and only a clean
+        // one gives up its decrypted payload.
         self.boxes.flush(&mut self.shell);
-        if let Some(current) = self.boxes.session.take() {
+        if let Some(mut current) = self.boxes.session.take() {
+            current.park();
             self.boxes
                 .tabs
                 .insert(self.boxes.active.min(self.boxes.tabs.len()), current);

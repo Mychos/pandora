@@ -358,6 +358,8 @@ mod tests {
             path: PathBuf::from("/tmp/pandora-bridge-test.pandora"),
             creds: Credentials::rekey("test", None).unwrap(),
             vault,
+            parked: false,
+            parked_seq: 0,
             dirty: false,
             last_edit: None,
             last_mtime: None,
