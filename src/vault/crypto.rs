@@ -90,19 +90,6 @@ impl Hasher {
     }
 }
 
-/// `aad` is authenticated, not encrypted: the vault binds its header and chunks this way.
-pub fn encrypt(plain: &[u8], key: &Key, aad: &[u8]) -> Result<([u8; NONCE_LEN], Vec<u8>), String> {
-    let k: &[u8] = key.as_ref();
-    let key = ChaChaKey::try_from(k).map_err(|_| String::from("bad key length"))?;
-    let cipher = XChaCha20Poly1305::new(&key);
-    let nonce = random_bytes::<NONCE_LEN>();
-    let nonce = XNonce::try_from(nonce.as_slice()).map_err(|_| String::from("bad nonce"))?;
-    let ct = cipher
-        .encrypt(&nonce, Payload { msg: plain, aad })
-        .map_err(|e| format!("encrypt failed: {e}"))?;
-    Ok((nonce.into(), ct))
-}
-
 /// Encrypt in place, appending the tag: a save never holds a second copy of the payload.
 pub fn encrypt_in_place(
     plain: &mut Vec<u8>,
@@ -224,11 +211,19 @@ mod tests {
         derive_key(&material(password, None), salt, &KdfParams::default()).unwrap()
     }
 
+    /// The one-shot shape the tests read better with: encrypt, and hand back the nonce
+    /// beside the ciphertext.
+    fn sealed(plain: &[u8], key: &Key, aad: &[u8]) -> ([u8; NONCE_LEN], Vec<u8>) {
+        let mut buf = plain.to_vec();
+        let nonce = encrypt_in_place(&mut buf, key, aad).unwrap();
+        (nonce, buf)
+    }
+
     #[test]
     fn roundtrip() {
         let salt = random_bytes::<SALT_LEN>();
         let k = key("correct horse battery staple", &salt);
-        let (nonce, ct) = encrypt(b"attack at dawn", &k, b"header").unwrap();
+        let (nonce, ct) = sealed(b"attack at dawn", &k, b"header");
         let pt = decrypt(&nonce, &ct, &k, b"header").unwrap();
         assert_eq!(pt, b"attack at dawn");
     }
@@ -238,7 +233,7 @@ mod tests {
         let salt = random_bytes::<SALT_LEN>();
         let k1 = key("aaa", &salt);
         let k2 = key("bbb", &salt);
-        let (nonce, ct) = encrypt(b"secret", &k1, b"").unwrap();
+        let (nonce, ct) = sealed(b"secret", &k1, b"");
         assert!(decrypt(&nonce, &ct, &k2, b"").is_err());
     }
 
@@ -246,7 +241,7 @@ mod tests {
     fn tamper_fails() {
         let salt = random_bytes::<SALT_LEN>();
         let k = key("pw", &salt);
-        let (nonce, mut ct) = encrypt(b"secret", &k, b"").unwrap();
+        let (nonce, mut ct) = sealed(b"secret", &k, b"");
         let last = ct.len() - 1;
         ct[last] ^= 0xFF;
         assert!(decrypt(&nonce, &ct, &k, b"").is_err());
@@ -286,7 +281,7 @@ mod tests {
     fn aad_mismatch_fails() {
         let salt = random_bytes::<SALT_LEN>();
         let k = key("pw", &salt);
-        let (nonce, ct) = encrypt(b"secret", &k, b"header|argon2id").unwrap();
+        let (nonce, ct) = sealed(b"secret", &k, b"header|argon2id");
         assert!(decrypt(&nonce, &ct, &k, b"header|argon2i").is_err());
     }
 
