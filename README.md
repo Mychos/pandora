@@ -4,11 +4,15 @@
 
 > Your secrets, boxed.
 
-Pandora keeps your secrets in a single file you own. There is no account, no
-server and no sync service in the middle: the box is a `.pandora` file, encrypted
-with a key derived from your master password, that you can copy, back up, put on a
-USB stick or mirror to a private GitHub repo. The app is a native desktop program
-(egui/eframe) and the same code runs on Android.
+Pandora keeps your logins, notes, files and one-time codes in **one encrypted file
+you own**. No account, no server, no sync service. The box is a `.pandora` file:
+copy it, back it up, put it on a stick.
+
+**GitHub built in.** Point it at a private repo of yours and Pandora keeps that copy
+current — one encrypted blob, no git, nothing readable on GitHub's side. The file on
+your disk stays the source.
+
+Native desktop (egui/eframe), same code on Android.
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
@@ -16,73 +20,94 @@ USB stick or mirror to a private GitHub repo. The app is a native desktop progra
   <img alt="Rust" src="https://img.shields.io/badge/built%20with-Rust-orange.svg">
 </p>
 
-- **One file.** Everything — logins, folders, notes, documents, TOTP seeds and the
-  trash — lives inside the encrypted payload. Nothing else is needed beside it:
-  your settings live in the app data directory, not in the box.
-- **Offline by default.** The only network request the app can make is to GitHub,
-  and only after you add a repo yourself.
-- **No lock-in.** An open container with a JSON manifest, plain Rust, and a
-  plaintext CSV import/export for when you want to leave.
+## Why Pandora
+
+Every other password manager puts your secrets on someone else's computer. Pandora
+does not.
+
+- **Yours.** One file. Uninstall the app and it still opens in the next version.
+- **Offline.** Works unplugged, measures nothing. Two requests exist, both to
+  GitHub — the mirror you add and the update check — and both switch off.
+- **No lock-in.** JSON manifest, plain Rust, MIT, CSV export in the shape those
+  managers already import.
+- **Boring crypto.** Argon2id, XChaCha20-Poly1305, the Public Suffix List. Nothing
+  homegrown.
+- **Honest.** Not audited, plaintext in memory while unlocked, plaintext CSV export.
+  All of it is in [`SECURITY.md`](SECURITY.md).
+- **Undo.** Autosave, atomic writes, one backup beside the box, a trash and `Ctrl+Z`.
+
+**Not for teams.** No sharing, roles, admin console or account recovery — there is no
+account. Need those? Use a hosted manager.
+
+## First questions
+
+**Where does the file go?** Anywhere. Each box can live in its own folder.
+
+**Forgot the master password?** Nothing can reset it. No recovery key, no back door.
+Write it down, or use a keyfile.
+
+**Lost the file?** Then you lost that copy. Back it up, or mirror it to a private
+GitHub repo.
+
+**What lives outside the box?** Settings, recents and the sealed fingerprint keys —
+never vault contents:
+
+| Platform | Data directory |
+| --- | --- |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/pandora/` |
+| macOS | `~/Library/Application Support/pandora/` |
+| Windows | `%LOCALAPPDATA%\pandora\` |
+| Android | the app's private directory, handed over by the activity |
+
+**Can I get my data back out?** Yes: CSV for logins, notes and codes, and documents
+through Save. Both are plaintext and both warn you first.
 
 ## Features
 
 ### Passwords
 
-- Logins with name, username, password, notes and **one or more URLs**.
-- Per-URL matching rules (`domain`, `host`, `prefix`, `never`) so a login only
-  fills the sites it should. The default is the registrable domain from the Public
-  Suffix List, so `mail.google.com` matches `accounts.google.com` but
-  `github.com` never matches `github.com.evil.com`.
-- Folders, drag to move, list or generated folders view (grouped by site or
-  username), and a `Ctrl+K` search over the whole box — names, users, addresses,
-  notes, folder names, note bodies and code names. Passwords, seeds and file
-  bytes are never searched.
-- Autosave after 900 ms of quiet, atomic writes, and a one-slot backup of the
-  previous version (`<box>.pandora.bak`).
+- Logins with a name, username, password, notes and **one or more URLs**.
+- Each URL carries a rule — `domain` (default), `host`, `prefix`, `never`. So
+  `mail.google.com` fills `accounts.google.com`, and `github.com` never fills
+  `github.com.evil.com`.
+- Folders, drag to move, grouped views, and `Ctrl+K` over the whole box: names,
+  users, addresses, notes, folders, note bodies, code names. Never passwords, seeds
+  or file bytes.
 
 ### Files
 
-- A note is text; a document is bytes. They are different types, so a note cannot
-  carry a file and a file cannot carry text.
-- Preview images (PNG, JPEG, WebP), PDF pages and text/code without leaving the
-  app. Audio (MP3, WAV, FLAC, OGG) can be played. Video and archives get a card,
-  not a player — save them out to open them.
-- Drag and drop onto the window on the desktop; the phone's own file picker on
-  Android. Documents are streamed into encrypted chunks, so there is no per-file
-  size ceiling; previews stop at 64 MiB and point you at Save.
+- A note is text, a document is bytes. Different types, so neither can carry the
+  other.
+- Images, PDF pages, text and code preview in place. Audio plays. Video and archives
+  are save-only.
+- Streamed into encrypted chunks, so no per-file ceiling. Previews stop at 64 MiB.
 
 ### Codes
 
-- TOTP seeds in Base32 or `otpauth://` form. SHA-1, SHA-256 and SHA-512, 6–8
-  digits and a custom period.
-- Read a seed from a QR code: from a screenshot on the clipboard or a file on the
-  desktop, and from the photo picker or the live full-screen scanner on a phone.
-  The reader is ZXing's (`rxing`), because the hard case is a photograph of a
-  screen, not a clean render.
+- TOTP in Base32 or `otpauth://`, SHA-1/256/512, 6–8 digits, custom period.
+- A seed can come from a QR: clipboard, file, photo picker, or the live scanner on a
+  phone (ZXing, via `rxing`).
 
 ### Around the box
 
-- **Password generator** with length and character classes, reachable with
-  `Ctrl+3` even when no box is open.
-- **Multiple boxes** open in tabs, with a recents screen that, when empty,
-  points to the local files and GitHub repos; each box has its own master
-  password.
-- **Trash and undo.** Deleting a record is reversible (`Ctrl+Z`) until the trash
-  is emptied; only then are a file's bytes erased.
-- **CSV import/export.** Import reads the column aliases KeePassXC, KeePass and
-  Bitwarden write; export writes every login, note and code as plaintext
-  (documents are skipped) after a confirmation that names the file and offers a
-  neutral name instead.
-- **GitHub mirror.** The box is pushed as one opaque encrypted blob through the
-  Contents API. The local file is the source; the repo is a copy.
-- **Browser extension.** A Chrome/Firefox WebExtension fills logins through a
-  native-messaging host, and fills a one-time code from the Codes pane into a field
-  that asks for one. It never reads the vault and never runs the crypto.
-- **Fingerprint unlock** on Android: the device's reader unlocks the platform
-  keystore, and the keystore holds a sealed copy of the box's derived key.
-- **Settings:** the box's own page — master password, idle lock, clipboard
-  countdown, unlock attempt limits, browser access, the trash — and a general one
-  for the app itself: English or Spanish, and dark or light.
+- **Password generator** with length and character classes, on `Ctrl+3`.
+- **Multiple boxes** in tabs, each with its own master password.
+- **Trash and undo.** Deleting is reversible until the trash is emptied; only then
+  are a document's bytes erased.
+- **Autosave** after 900 ms of quiet, atomic writes, one `.bak` beside the box.
+- **CSV import/export**, reading KeePassXC, KeePass and Bitwarden aliases.
+- **GitHub mirror.** One encrypted blob through the Contents API. Private repos
+  only, and one made public later is refused on the next push.
+- **Browser extension.** Chrome and Firefox, filling logins and codes through a
+  native host. It never reads the vault and never runs the crypto.
+- **Autofill on Android.** The phone's own fill panel, in any app whose login form
+  is a WebView: the entries claiming the page, one row each, and the codes for a
+  field that asks for one. It reads the box open in the app and nothing else.
+- **Updates.** A newer release is offered as a strip; the click downloads it, checks
+  the published SHA-256 and swaps the file. Nothing installs without that click.
+- **Fingerprint unlock** on Android, sealed in the platform keystore.
+- **Settings:** one page per box, one for the app (English or Spanish, dark or
+  light).
 
 ## How it works
 
@@ -92,179 +117,69 @@ desktop / phone ──────▶ Pandora app ──────▶ one encr
                              ├───────────▶ GitHub repo (optional mirror)
                              │
 browser extension ──▶ native host ──▶ local bridge (the app holds the key)
+
+phone's fill panel ──▶ the app's copy of the open box (no socket, no second file)
 ```
 
-With no app listening, the host opens the box file itself. Letting a browser
-unlock it that way is the Settings → Browser option *Let a browser open a box on
-its own*, off by default; the extension otherwise says to open the box in the
-app.
+The app holds the key while a box is unlocked. The browser asks a small native host,
+which relays to the app — or opens the box itself, if you allowed that in Settings →
+Browser. Android's fill panel cannot do that: it may be started with no activity at
+all, so the app leaves it a copy of the open box instead, dropped the moment the box
+locks.
 
-The crate is split so the vault core has no UI and no platform knowledge:
+A box is a 4 KiB header, 1 MiB encrypted chunks and an encrypted manifest. Only v4
+opens; an older container is refused rather than migrated. Byte layout in
+[`AGENTS.md`](AGENTS.md#vault-format).
 
-```
-src/
-  vault/       format, crypto, matching, search, TOTP — no egui
-  shared/      i18n, theme, responsive UI helpers, the Android shim
-  features/    one directory per capability: entries, drive, codes,
-               boxes, auth, sync, settings, find, shell…
-  bridge/      the local socket the browser host relays to
-  host/        the native-messaging host's behaviour
-  app.rs       the composition root: the loop and cross-cutting state
-  bin/         pandora-native-host
-```
-
-`AGENTS.md` documents the ownership rules, the feature-first layout and the
-platform split in detail. `android/README.md` covers the phone, and
-`../extension/README.md` the browser side.
+The vault core has no UI and no platform knowledge, so desktop and phone run the same
+code. [`AGENTS.md`](AGENTS.md) maps the tree; the phone has
+[`android/README.md`](android/README.md) and the browser side
+[`../extension/README.md`](../extension/README.md).
 
 ## Security
 
-- **Key derivation:** Argon2id, 64 MiB of memory, 3 passes, 4 lanes, 16-byte
-  salt. Derivation runs on a worker thread, never the UI thread.
-- **Encryption:** XChaCha20-Poly1305 with a random 24-byte nonce, for the
-  manifest and for each 1 MiB chunk. Chunk AAD binds the box id, the record id
-  and kind, the chunk index and the plaintext length.
-- **Header binding:** the header is authenticated as AEAD associated data, so
-  the KDF parameters cannot be changed under the ciphertext. Only v4 boxes are
-  read; an older container is refused rather than migrated. The manifest
-  authenticates the header and the chunks stay outside it.
-- **Size padding:** each chunk pads its last plaintext block to 4 KiB, and the
-  whole file is rounded to a 4 KiB block with a 64 KiB floor, so the file size
-  does not reveal how much is inside and a small box is never its own few
-  hundred bytes.
-- **Atomic writes:** sibling temp file → `fsync` → rename → directory `fsync`. A
-  half-written box is never left behind, and the previous version is kept in one
-  `<box>.pandora.bak` slot — a password change drops it, because it is sealed
-  with the key that change replaced.
-- **Keyfile (optional):** a BLAKE2b-512 digest of the file is appended to the
-  password before derivation, so the file alone is never a key. The path is never
-  stored in the box, and the box does not say whether one was used either: the
-  app derives with the keyfile when one is handed over and the AEAD tag says
-  which key the box owns. Losing it loses the vault.
-- **Unlock limits:** failed attempts are counted per box file, with an optional
-  delay and a configurable maximum. A successful unlock forgets the failures.
-- **In memory:** the master password is used only for derivation and dropped; the
-  derived key and secret fields are `Zeroizing`. Record types hand-write their
-  `Debug` so a panic cannot print one.
-- **Clipboard:** a copied password is cleared after a countdown (30 s by default).
-  The app keeps a BLAKE2 fingerprint, not the text, so something you copied
-  afterwards is left alone. `0` never clears.
-- **Idle lock:** after 15 minutes by default, and on the OS locking or suspending,
-  every open box is flushed and locked. `0` disables it.
-- **One app per data directory:** a `pandora.lock` file holds the settings, the
-  recents and the vault against a second instance.
+- **Key.** Argon2id, 64 MiB, 3 passes, 4 lanes, derived off the UI thread.
+- **Cipher.** XChaCha20-Poly1305 with a random nonce, in 1 MiB chunks bound to the
+  box, the record and the position.
+- **Size.** Padded to 4 KiB blocks with a 64 KiB floor, so a one-login box is not
+  visibly smaller than a hundred.
+- **Keyfile.** Optional: a BLAKE2b digest of a file is mixed into the password. Lose
+  it and the vault is gone.
+- **Memory and clipboard.** Secrets are `Zeroizing`. A copied password clears after a
+  countdown, and an idle box locks after 15 minutes.
+- **Limits.** Not audited. Plaintext in process memory while unlocked, so it does not
+  stop malware running as you, a debugger, root or a memory dump. Fingerprint unlock
+  is as strong as the platform keystore. The CSV export is plaintext by design.
 
-### What this does not protect against
-
-Pandora is not audited. An unlocked box is plaintext in process memory, so it
-does not defend against malware running as you, a debugger, root, or a memory
-dump. The browser bridge socket is protected by being user-private — same-user
-malware can claim any caller id, exactly as it can against KeePassXC. Fingerprint
-unlock is only as strong as the platform keystore. And the CSV export is
-**plaintext by design**; the app warns you before writing it.
-
-[`SECURITY.md`](SECURITY.md) is the long form: who is assumed honest, what is out
-of scope and why, and how to report something that looks wrong.
-
-## The vault file
-
-A box is one file. v4 writes a fixed 4 KiB header (`PANDORA4\n` plus JSON with
-the KDF, a random box id and the manifest's location), 1 MiB encrypted chunks for
-documents and notes, and an encrypted manifest at the end. This version only
-opens v4; an older JSON container is refused rather than migrated.
-
-The decrypted manifest holds four collections — `folders`, `logins`, `drive`,
-`otps` — plus `trash`, the records deleted but not erased. A drive entry is a
-tagged `Entry`: a `note` or a `file`. Records are addressed by id, so operations
-that do not care about the kind (select, drag, move, delete, export) never need
-to know which collection a record came from.
-
-A file's or note's bytes live in chunks outside the manifest; only the manifest
-is read when a box opens. A document is decrypted when it is previewed or
-exported, one chunk at a time, so the box does not carry every file in memory.
-Files picked or dropped on the desktop stay where they are until the save
-chunks them; a phone picker copy is staged, chunked and then removed.
-
-## Where things live
-
-`prefs.json`, `recent.json` and `biometric.json` sit in the app data directory,
-**never inside a box**:
-
-| Platform | Data directory |
-| --- | --- |
-| Linux | `${XDG_DATA_HOME:-~/.local/share}/pandora/` |
-| macOS | `~/Library/Application Support/pandora/` |
-| Windows | `%LOCALAPPDATA%\pandora\` |
-| Android | the app's private directory, handed over by the activity |
-
-```
-pandora/
-  vault.pandora          default box (yours can live anywhere)
-  prefs.json             settings, sources, remotes, attempt counters
-  recent.json            boxes the Unlock screen offers
-  biometric.json         sealed per-box keys (ciphertext only)
-  pandora.lock           single-instance lock
-  sources/               working copies of boxes pulled from a repo
-```
-
-Beside a box you may see `<box>.pandora.bak` (the previous version) and
-`<box>.pandora.<uuid>.tmp` only while a write is in flight.
+The long form is [`SECURITY.md`](SECURITY.md).
 
 ## Install
 
-### Desktop
-
-Pandora builds from source with a stable Rust toolchain (edition 2021):
+**Desktop.** Stable Rust (edition 2021):
 
 ```sh
 cargo run --release
 ```
 
-On Linux the audio preview links against ALSA, so the development headers are
-needed:
+Linux needs the ALSA headers (`libasound2-dev`, `alsa-lib-devel`). macOS and Windows
+need only the toolchain. Wayland is used when the session offers it; `PANDORA_X11=1`
+forces X11, which is what drag-and-drop from the file manager needs. Desktop file and
+icons under `assets/app/linux/`; `scripts/appimage.sh` and `scripts/package-macos.sh`
+package a release build.
 
-```sh
-# Debian / Ubuntu
-sudo apt install libasound2-dev
-# Fedora
-sudo dnf install alsa-lib-devel
-```
+Prebuilt: AppImage on Linux, portable zip and bare `.exe` on Windows, universal
+`.dmg`/`.zip` on macOS. The in-app updater installs them.
 
-macOS and Windows need only the Rust toolchain. On Linux the app runs native
-Wayland when the session offers it; set `PANDORA_X11=1` to force the X11 backend
-if you need drag-and-drop from the file manager, since winit 0.30 only emits file
-drops from X11.
-
-A `.desktop` file and the hicolor icons for a manual install live under
-`assets/app/linux/`; macOS (`.icns`) and Windows (`.ico`) icons are next to them.
-To package the release build locally:
-
-```sh
-scripts/appimage.sh        # Linux: target/appimage/Pandora-<version>-x86_64.AppImage
-scripts/package-macos.sh   # macOS: universal .app, .dmg and .zip
-```
-
-GitHub sign-in is compiled in from `PANDORA_GITHUB_CLIENT_ID` (set in
-`.cargo/config.toml`, which is not committed). A build without it refuses the
-GitHub flow as unconfigured; local boxes are unaffected.
-
-### Android
-
-The phone build needs the Android SDK, an NDK and a JDK 17–25. One command builds
-the Rust `.so`, packages the release APK and optionally installs it:
+**Android.** SDK, NDK and a JDK 17–25:
 
 ```sh
 ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/path/to/jdk-21 scripts/android-apk.sh install
 ```
 
-See [`android/README.md`](android/README.md) for minSdk, the arm64-only packaging
-and the Rust-side details.
+`arm64-v8a` only, which is every phone on minSdk 29. See
+[`android/README.md`](android/README.md).
 
-### Browser extension
-
-The extension lives in the sibling `extension/` folder (see
-`../extension/README.md`). It installs the native host,
-writes the browser manifests and assembles the unpacked Chrome/Firefox builds:
+**Browser extension.** Lives next door and installs the native host:
 
 ```sh
 ../extension/install.sh
@@ -272,16 +187,13 @@ writes the browser manifests and assembles the unpacked Chrome/Firefox builds:
 
 ## Use
 
-1. **Create a box** with a master password (12 characters minimum, with a
-   strength meter) and, if you want, a keyfile.
-2. **Add records** with `Ctrl+N`. A login gets one or more URLs; a note, file or
-   code lives in its own pane.
-3. **Search** with `Ctrl+K` for anything in the box, or `Ctrl+F` to focus the
-   current list's field.
-4. **Lock** with `Ctrl+L`, or let the idle timer do it. Unlock with the password,
-   the keyfile if it has one, or a fingerprint on a phone that supports it.
-5. **Mirror** the box to GitHub from Settings → GitHub if you want an off-machine
-   copy. Reads and pushes happen on worker threads; the UI never waits.
+1. **Create a box** with a master password (12 characters minimum) and, if you want,
+   a keyfile.
+2. **Add records** with `Ctrl+N`.
+3. **Search** with `Ctrl+K`, or `Ctrl+F` for the current list.
+4. **Lock** with `Ctrl+L`, or let the idle timer do it.
+5. **Mirror** to GitHub from Settings → GitHub. Reads and pushes run off the UI
+   thread.
 
 ### Keyboard
 
@@ -306,8 +218,7 @@ writes the browser manifests and assembles the unpacked Chrome/Firefox builds:
 | `Escape` | Clear the selection, or close the dialog |
 | Browser Back | Go back (also the Android back button) |
 
-Below 620 px wide the layout collapses to a single column, which is what the
-phone uses.
+Below 620 px the layout collapses to one column, which is what the phone uses.
 
 ### Environment
 
@@ -321,6 +232,7 @@ phone uses.
 ## Development
 
 ```sh
+cargo run                         # the GUI; needs a display
 cargo test                        # full suite, ~25 s
 cargo test vault::store           # one module
 cargo test create_open_roundtrip  # one test
@@ -328,100 +240,26 @@ cargo fmt
 cargo clippy --all-targets
 ```
 
-### Releases
+GitHub sign-in is compiled in from `PANDORA_GITHUB_CLIENT_ID` (set in
+`.cargo/config.toml`, not committed); without it the GitHub flow is refused and local
+boxes are unaffected.
 
-`.github/workflows/release.yml` builds every shipped platform:
-
-| Platform | Artifact |
-| --- | --- |
-| Linux | `Pandora-<version>-x86_64.AppImage` |
-| Windows | `Pandora-<version>-windows-x86_64.zip` (portable, unsigned) |
-| macOS | `Pandora-<version>-macos-universal.dmg` and `.zip` (ad-hoc signed, not notarized) |
-| Android | `Pandora-<version>-android-arm64.apk` (debug key, not store-ready) |
-
-The Linux job runs on Ubuntu 22.04 on purpose: the AppImage inherits the
-runner's glibc floor, and 2.35 still opens on Debian 12 and Ubuntu 22.04.
-
-A `vX.Y.Z` tag runs every job and publishes the artifacts plus `SHA256SUMS` as a
-GitHub Release. PRs do not build packages: `check.yml` is the PR gate, and it
-typechecks Linux, Windows and macOS.
-
-A manual `workflow_dispatch` accepts `jobs` (`all` or a comma-separated subset of
-`linux,windows,macos,android`) and an optional `tag_name`. Without `tag_name` it
-only builds artifacts; with it, it publishes that tag. The version comes from
-`Cargo.toml`, and the workflow refuses a tag or Android `versionName` that
-disagrees.
-
-To cut a release, bump `version` in `Cargo.toml` and `versionName` in
-`android/app/build.gradle`, commit, and push the tag:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The build reads the public OAuth client id from the repository variable
-`PANDORA_GITHUB_CLIENT_ID` (Settings → Secrets and variables → Actions →
-Variables). Without it the build still succeeds, but the GitHub mirror is
-unconfigured, exactly like a local build without `.cargo/config.toml`.
-
-To run the Linux job locally with `act` and Podman, expose Podman's Docker API in
-one terminal:
-
-```sh
-podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock"
-```
-
-and run the workflow from another:
-
-```sh
-export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/podman/podman.sock"
-act workflow_dispatch -W .github/workflows/release.yml -j linux \
-  -P ubuntu-22.04=catthehacker/ubuntu:act-22.04 \
-  -P ubuntu-latest=catthehacker/ubuntu:act-latest \
-  --container-architecture linux/amd64 \
-  --artifact-server-path /tmp/act-artifacts \
-  --var PANDORA_GITHUB_CLIENT_ID=your-client-id
-```
-
-`act` only runs the Linux job: Windows and macOS need their own runners, and the
-Android job wants the SDK/NDK. `-j linux` stops before `publish`, which needs a
-`GITHUB_TOKEN` with `contents: write`. The uploaded artifact is left under
-`/tmp/act-artifacts`; the action's working tree is discarded with the container.
-
-`features::shell::screen::probe_rows` is a debug probe, ignored on purpose: it
-prints the shapes the top of the list paints and asserts nothing. `cargo test` is
-green without it; run it when the question is what the frame actually drew:
-
-```sh
-cargo test -- --ignored probe_rows --nocapture
-```
-
-There is also a headless resize benchmark that drives the real `App::run_ui`:
-
-```sh
-XDG_RUNTIME_DIR=/tmp/pandora-bench \
-  cargo run --release --example bench_resize -- 1000 120
-```
-
-Layout tests run egui headless and assert on painted shapes through
-`shared::ui::shot`. Read [`AGENTS.md`](AGENTS.md) before changing architecture:
-it is the project's contract for the feature-first tree, the vault format, the
-platform split and the security rules.
+Releases — workflow, artifacts, the Android signing key, `act` — are in
+[`AGENTS.md`](AGENTS.md#releases). Read that file before changing architecture.
 
 ## Limitations
 
-- iOS is not wired up yet; the icon assets exist, the entry point does not.
-- GitHub is the only mirror provider. A box is read through the Contents API, and
-  past 1 MB through the Git Blobs API under the same sha; GitHub caps a blob at
-  100 MB, so a box carrying a very large attachment may be too big for GitHub;
-  local storage itself has no per-file ceiling.
-- A box that needs a keyfile cannot be opened from the browser.
+- iOS is not wired up: the icons exist, the entry point does not.
+- Android autofill answers for WebViews only: a native app has no URL, so no stored
+  entry claims it, and Chrome keeps its own forms out of the framework entirely.
+  Codes are offered in any app, unfiltered by site.
+- GitHub is the only mirror, and caps a blob at 100 MB; a box with a huge attachment
+  may not fit. Local storage has no per-file ceiling.
+- A keyfile box cannot be opened from the browser.
 - No video preview, no auto-type, no server-side sync, no plugin API.
-- The vault format is not frozen: v4 is the only format this version reads and
-  writes; an older container is refused, and a future version may add fields
-  (persisted fields must be optional).
-- Android packages only `arm64-v8a`, which is every phone that runs minSdk 29.
+- The format is not frozen: v4 is all this version reads and writes, and a future
+  version may add fields (they must be optional).
+- Android packages only `arm64-v8a`.
 
 ## License
 
@@ -429,15 +267,12 @@ MIT. See [`LICENSE`](LICENSE).
 
 ## Credits
 
-Pandora stands on a lot of good Rust:
-
-- [egui / eframe](https://github.com/emilk/egui) for the immediate-mode UI, glow
-  on the desktop (wgpu is the fallback) and glow on the phone.
+- [egui / eframe](https://github.com/emilk/egui) — the immediate-mode UI.
 - [Argon2](https://github.com/RustCrypto/password-hashes) and
-  [XChaCha20-Poly1305](https://github.com/RustCrypto/AEADs).
-- [rxing](https://github.com/rxing-core/rxing) (ZXing) for QR reading.
-- [hayro](https://github.com/typst/hayro) for PDF rasterization in pure Rust,
-  and [rodio](https://github.com/RustAudio/rodio) for audio playback.
-- [Lucide](https://lucide.dev) for the UI icons (ISC) and
-  [simple-icons](https://simpleicons.org) for the brand marks (CC0).
-- The Public Suffix List via [`psl2`](https://crates.io/crates/psl2).
+  [XChaCha20-Poly1305](https://github.com/RustCrypto/AEADs) — the crypto.
+- [rxing](https://github.com/rxing-core/rxing) (ZXing) — QR reading.
+- [hayro](https://github.com/typst/hayro) — PDF rasterization; [rodio](https://github.com/RustAudio/rodio)
+  — audio.
+- [Lucide](https://lucide.dev) (ISC) and [simple-icons](https://simpleicons.org)
+  (CC0) — icons and brand marks.
+- [`psl2`](https://crates.io/crates/psl2) — the Public Suffix List.

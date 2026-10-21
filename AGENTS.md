@@ -32,7 +32,8 @@ scripts/package-macos.sh
 # JDK 17-25; the wrapper is Gradle 9.3.1 and refuses anything newer.
 scripts/android-apk.sh install
 
-# The Linux release job locally, through act + Podman (README has the socket setup).
+# The Linux release job locally, through act + Podman (## Releases below has the
+# socket setup).
 act workflow_dispatch -W .github/workflows/release.yml -j linux \
   -P ubuntu-22.04=catthehacker/ubuntu:act-22.04 \
   -P ubuntu-latest=catthehacker/ubuntu:act-latest
@@ -48,6 +49,95 @@ question is what a frame painted:
 ```bash
 cargo test -- --ignored probe_rows --nocapture
 ```
+
+There is also a headless resize benchmark that drives the real `App::run_ui`:
+
+```bash
+XDG_RUNTIME_DIR=/tmp/pandora-bench \
+  cargo run --release --example bench_resize -- 1000 120
+```
+
+## Releases
+
+`.github/workflows/release.yml` builds every shipped platform:
+
+| Platform | Artifact |
+| --- | --- |
+| Linux | `Pandora-<version>-x86_64.AppImage` |
+| Windows | `Pandora-<version>-windows-x86_64.zip` (portable, unsigned) and the bare `.exe` the in-app update replaces |
+| macOS | `Pandora-<version>-macos-universal.dmg` and `.zip` (ad-hoc signed, not notarized) |
+| Android | `Pandora-<version>-android-arm64.apk` (signed with the release key) |
+
+The Linux job runs on Ubuntu 22.04 on purpose: the AppImage inherits the runner's
+glibc floor, and 2.35 still opens on Debian 12 and Ubuntu 22.04.
+
+A `vX.Y.Z` tag runs every job and publishes the artifacts plus `SHA256SUMS` as a
+GitHub Release. PRs do not build packages: `check.yml` is the PR gate, and it
+typechecks Linux, Windows and macOS.
+
+A manual `workflow_dispatch` accepts `jobs` (`all` or a comma-separated subset of
+`linux,windows,macos,android`) and an optional `tag_name`. Without `tag_name` it
+only builds artifacts; with it, it publishes that tag. The version comes from
+`Cargo.toml`, and the workflow refuses a tag or Android `appVersion` that
+disagrees.
+
+To cut a release, bump `version` in `Cargo.toml` and `appVersion` in
+`android/app/build.gradle` (its `versionCode` is derived from that name, so it is
+not a second thing to remember), commit, and push the tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Two things the Android half carries that a release has to know about:
+
+- **The manifest declares an autofill service** (`dev.pandora.AutofillService`, with
+  `BIND_AUTOFILL_SERVICE` and `res/xml/autofill.xml`) since 0.1.1. It asks for no
+  permission: the user picks Pandora in the phone's autofill settings, and the APK
+  installs and updates like any other. A build without `AutofillService.java` fails
+  at `aapt2 link` on the missing `@xml/autofill`, so a broken service is caught
+  before the release, not after.
+- **R8 keeps three classes by name**, not one: `Pandora`, `Autofill` and
+  `AutofillService` (`android/app/proguard-rules.pro`). The middle one is the one
+  nothing else would catch — the `Java_dev_pandora_Autofill_*` symbols carry the
+  class name, and a renamed class leaves every `native` there unbound at runtime.
+
+The build reads the public OAuth client id from the repository variable
+`PANDORA_GITHUB_CLIENT_ID` (Settings → Secrets and variables → Actions →
+Variables). Without it the build still succeeds, but the GitHub mirror is
+unconfigured, exactly like a local build without `.cargo/config.toml`.
+
+The Android APK is signed with the release key, which lives in four repository
+secrets — `PANDORA_KEYSTORE_BASE64`, `PANDORA_KEYSTORE_PASSWORD`,
+`PANDORA_KEY_ALIAS` and `PANDORA_KEY_PASSWORD` — and `release.yml` refuses a tag
+without them, because an APK signed with another key is an APK no existing user
+can install. Losing that key means every user uninstalls once; `android/README.md`
+and `SECURITY.md` have the rest.
+
+To run the Linux job locally with `act` and Podman, expose Podman's Docker API in
+one terminal:
+
+```sh
+podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock"
+```
+
+and run the workflow from another:
+
+```sh
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/podman/podman.sock"
+act workflow_dispatch -W .github/workflows/release.yml -j linux \
+  -P ubuntu-22.04=catthehacker/ubuntu:act-22.04 \
+  -P ubuntu-latest=catthehacker/ubuntu:act-latest \
+  --container-architecture linux/amd64 \
+  --artifact-server-path /tmp/act-artifacts \
+  --var PANDORA_GITHUB_CLIENT_ID=your-client-id
+```
+
+`act` only runs the Linux job: Windows and macOS need their own runners, and the
+Android job wants the SDK/NDK. `-j linux` stops before `publish`, which needs a
+`GITHUB_TOKEN` with `contents: write`. The uploaded artifact is left under
+`/tmp/act-artifacts`; the action's working tree is discarded with the container.
 
 ## Architecture
 
@@ -67,6 +157,13 @@ signature show what the method actually touches.
 Dependencies point inward, never up: `vault/` is the platform-agnostic core (**no
 egui**, no knowledge of features) meant to be shared on mobile; `shared/` holds only
 what several features need and imports no feature. Neither reaches up into `features/`.
+
+**The phone's autofill.** `shared/autofill/` is where the app leaves the copy of the
+open box that Android's `AutofillService` reads, since a fill request can start the
+process with no activity and therefore no `android_main`. `shared/autofill/jni.rs`
+is the Java-facing end (one string per answer, `Android/README.md` has the rest); the
+service itself is `android/…/AutofillService.java`, and it only ever knows where a
+form keeps its fields.
 
 **Beside the box.** `prefs.json` (settings, sources, remotes, failed-unlock counters),
 `recent.json` (the boxes the Unlock screen offers) and `biometric.json` (the sealed
@@ -180,6 +277,33 @@ version went out. Automatic pushes wait `PUSH_QUIET` after the last
 edit and are paced against the hourly write budget (`Quota`); reads are paced by
 `STALE`. A fetched copy goes through `store::adopt`, and the working copy it replaces
 is stashed, so a fetch is never what loses an edit that had not reached the repo.
+
+## Updates
+
+`features/update/` is the one place that asks the network without an account:
+GitHub's public release list, and the download that follows a click. `model`
+holds the version comparison (`parse`, `newer`, two-digit strides, a prerelease
+suffix ignored), the `Channel` a build sits on — `$APPIMAGE`, Windows, macOS,
+Android, or `External` for a binary a package manager owns — and the worker
+state. `github` reads the list, picks the newest *published* release, matches the
+artifact to the channel by name (`Pandora-<version>-…`), and hashes what arrives
+against the release's `SHA256SUMS` with `sha2`. `install` is the only platform
+split, and every variant swaps the file the process is running from: a rename for
+an AppImage and an `.exe`, `ditto` plus a bundle swap on macOS, and an APK staged
+under `data_dir()/updates` for Android, where the system installer takes over
+through the FileProvider. `logic` owns the threads and the single worker slot;
+`ui` owns the strip and the settings row.
+
+Rules this module lives by, in the same spirit as the rest of the app:
+
+- **No install without a click.** The check only ever produces a notice.
+- **Never downgrade.** A re-uploaded release is not an update; `newer` says no.
+- **The open box is written first.** `App::install_update` flushes every session
+  and refuses on a conflict or a failed save, because the install ends the process.
+- **The check is off-switchable.** `prefs.update_check` gates the startup look and
+the one on focus regain; `prefs.skip` remembers a version the user said "Later" to.
+- **The repository is `model::REPO`.** Renaming it is one constant, a URL in
+  `github`'s doc comment, and nothing else.
 
 ## Browser extension
 
