@@ -722,36 +722,67 @@ fn recent(ui: &mut egui::Ui, app: &mut App) {
 /// With nothing opened before, the two places a first box starts from.
 fn start(ui: &mut egui::Ui, app: &mut App) {
     let icons = &app.icons;
-    let mut pick = None;
-    ui.add_space(2.0);
-    ui.columns(2, |cols| {
-        if start_tile(
-            &mut cols[0],
-            icons,
+    let ways = [
+        (
+            Side::Machine,
             None,
             theme::Icon::Folder,
             t("Local"),
             t("Boxes on this machine"),
-        ) {
-            pick = Some(Side::Machine);
-        }
-        if start_tile(
-            &mut cols[1],
-            icons,
+        ),
+        (
+            Side::Github,
             Some(theme::Brand::Github),
             theme::Icon::Folder,
             t("GitHub"),
             t("Your repositories"),
-        ) {
-            pick = Some(Side::Github);
-        }
+        ),
+    ];
+    ui.add_space(2.0);
+    let faces = ui.columns(2, |cols| {
+        cols.iter_mut()
+            .zip(ways)
+            .map(|(col, way)| (way, start_tile(col, icons, way.1, way.2, way.3, way.4)))
+            .collect::<Vec<_>>()
     });
+    // Both tiles wear the taller one's height: a subtitle that wraps in a narrow
+    // window must not leave its neighbour shorter than it.
+    let height = faces
+        .iter()
+        .map(|(_, (rect, _))| rect.height())
+        .fold(0.0, f32::max);
+    let tiles: Vec<_> = faces
+        .into_iter()
+        .map(|(way, (rect, surface))| {
+            let rect =
+                egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.min.y + height));
+            (way, rect, surface)
+        })
+        .collect();
+    let mut pick = None;
+    for (way, rect, surface) in tiles {
+        let resp = ui
+            .interact(rect, ui.id().with(("start", way.3)), egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let label = format!("{}, {}", way.3, way.4);
+        resp.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Button, true, false, label.as_str())
+        });
+        theme::focus(ui, &resp);
+        let (fill, line) = theme::state(false, resp.hovered());
+        surface.paint(ui, rect, theme::radius(10), fill, line);
+        if resp.clicked() {
+            pick = Some(way.0);
+        }
+    }
     if let Some(side) = pick {
         app.auth.side = Some(side);
     }
 }
 
-/// One of the two ways into a first box: a tile that answers the click, not a row.
+/// One of the two ways into a first box: the face of a tile, drawn but neither
+/// painted nor made to answer a click. The caller owns both: it knows the two
+/// tiles, so it can hand them one height and paint them afterwards.
 fn start_tile(
     ui: &mut egui::Ui,
     icons: &theme::Icons,
@@ -759,7 +790,7 @@ fn start_tile(
     icon: theme::Icon,
     title: &str,
     sub: &str,
-) -> bool {
+) -> (egui::Rect, theme::Surface) {
     let surface = theme::Surface::reserve(ui);
     let frame = egui::Frame::default()
         .inner_margin(egui::Margin::symmetric(16, 18))
@@ -776,18 +807,7 @@ fn start_tile(
                 ui.label(RichText::new(sub).small().color(theme::palette().faint));
             });
         });
-    let rect = frame.response.rect;
-    let resp = ui
-        .interact(rect, ui.id().with(("start", title)), egui::Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
-    let label = format!("{title}, {sub}");
-    resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, true, false, label.as_str())
-    });
-    theme::focus(ui, &resp);
-    let (fill, line) = theme::state(false, resp.hovered());
-    surface.paint(ui, rect, theme::radius(10), fill, line);
-    resp.clicked()
+    (frame.response.rect, surface)
 }
 
 /// One box list: the mark says where each box lives, `q` filters names and paths.
