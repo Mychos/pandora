@@ -34,5 +34,33 @@
                 android:value="pandora" />
         </activity>
 
+        <!-- The phone's own autofill. `BIND_AUTOFILL_SERVICE` is the system's: the
+             service is exported so the framework can bind it, and that permission
+             is what keeps every other app out. No permission is asked for here. -->
+        <service
+            android:name=".AutofillService"
+            android:exported="true"
+            android:label="Pandora"
+            android:permission="android.permission.BIND_AUTOFILL_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.autofill.AutofillService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.autofill"
+                android:resource="@xml/autofill" />
+        </service>
+
+        <!-- The staged APK an update hands to the system installer: a file in the
+             app's own directory reaches that process only as a content:// URI. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
     </application>
 </manifest>

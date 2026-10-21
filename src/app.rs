@@ -282,6 +282,9 @@ impl App {
         self.shell.take_back_clip();
         self.shell.activity = None;
         self.boxes.session = None; // drops keys + vaults: Zeroizing fields wipe secrets
+                                   // The phone's autofill copy goes with the keys, not with the next frame:
+                                   // an idle lock, a closed box and a lock from Settings all land here.
+        crate::shared::autofill::clear();
         self.boxes.tabs.clear();
         self.boxes.active = 0;
         self.preview = Default::default();
@@ -605,6 +608,25 @@ impl App {
         self.watch_lock(&ctx);
         if self.boxes.session.is_some() {
             self.boxes.tick(&mut self.shell);
+        }
+        // What a phone's autofill may offer, kept in step after the tick that can
+        // save and the watch that can lock: one call, so no transition forgets it.
+        #[cfg(target_os = "android")]
+        {
+            // Off publishes nothing: the service then finds no box and offers only
+            // the way to open the app.
+            let published = if self.prefs.autofill {
+                self.boxes
+                    .session
+                    .as_ref()
+                    .map(|s| (s.path.as_path(), &s.vault))
+            } else {
+                None
+            };
+            crate::shared::autofill::follow(published);
+            // Still drained when it is off: a login queued a moment before the
+            // switch was turned off is the user's, not the setting's.
+            self.boxes.drain_autofill();
         }
         // The bar runs everywhere; only a desktop has edges, on the bar's layer so a
         // modal cannot cover them.

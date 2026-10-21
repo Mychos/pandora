@@ -111,6 +111,9 @@ public final class Pandora {
         public void onReceive(Context context, Intent intent) {
             if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
                 SYSTEM_LOCK.set(true);
+                // The box locks on the next frame, which a phone in a pocket may
+                // never paint; the autofill copy must not outlive the screen.
+                Autofill.nativeForget();
             }
         }
     };

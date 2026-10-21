@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What the system reads about the autofill service. No inline suggestions: the
+  panel is the dropdown the framework draws, and a row only opens the app or
+  fills the two fields of a login.
+-->
+<autofill-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:settingsActivity="dev.pandora.MainActivity" />

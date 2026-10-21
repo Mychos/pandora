@@ -80,6 +80,11 @@ pub struct Prefs {
     /// been approved, so the bridge asks before letting one in.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub browsers: Vec<String>,
+    /// Whether the phone's own autofill may read the box on screen. On by default:
+    /// the copy lives only while the box is unlocked, and the panel is the whole
+    /// point of a manager on a phone. Off keeps the box to this window.
+    #[serde(skip_serializing_if = "is_true")]
+    pub autofill: bool,
     /// How the passwords pane last drew a box, and what it grouped by, so a fresh
     /// unlock lands where the user left off instead of asking again.
     pub view: View,
@@ -153,6 +158,7 @@ impl Default for Prefs {
             biometric: false,
             unlock_from_browser: false,
             browsers: Vec::new(),
+            autofill: true,
             view: View::List,
             axis: Axis::Target,
             lang: Lang::En,
@@ -418,6 +424,10 @@ mod tests {
         assert_eq!(old.max_attempts, 0, "an older file never refuses a box");
         assert_eq!(old.retry_delay, 0);
         assert!(old.tries.is_empty());
+        assert!(
+            old.autofill,
+            "a file written before autofill existed reads as on"
+        );
 
         fs::write(
             dir.join("prefs.json"),

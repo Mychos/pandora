@@ -442,6 +442,36 @@ fn superseded(s: &Session) -> bool {
 }
 
 impl Boxes {
+    /// A login the phone's autofill panel saved, landed the way one from the
+    /// browser panel lands: through `serve::create_login`, with the box's own
+    /// autosave writing it afterwards.
+    #[cfg(target_os = "android")]
+    pub fn drain_autofill(&mut self) {
+        let queued = crate::shared::autofill::take();
+        let Some(s) = self.session.as_mut() else {
+            return;
+        };
+        let mut landed = false;
+        for pending in queued {
+            // The rule an import already uses: an entry that is already there is
+            // not a second one. A fresh password off the panel still lands.
+            if crate::shared::autofill::duplicate(&s.vault, &pending) {
+                continue;
+            }
+            crate::bridge::serve::create_login(
+                &mut s.vault,
+                pending.name,
+                pending.username,
+                pending.password.as_str(),
+                pending.url,
+            );
+            landed = true;
+        }
+        if landed {
+            s.mark_dirty();
+        }
+    }
+
     pub fn pane(&mut self, tab: Tab) {
         let Some(s) = self.session.as_mut() else {
             return;

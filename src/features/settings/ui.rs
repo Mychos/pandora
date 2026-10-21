@@ -52,6 +52,11 @@ pub fn run(ui: &mut egui::Ui, app: &mut App, compact: bool) {
                         ui.add_space(CARD);
                         browser(ui, app);
                         ui.add_space(CARD);
+                        #[cfg(target_os = "android")]
+                        {
+                            autofill(ui, app);
+                            ui.add_space(CARD);
+                        }
                         footer(ui, app);
                     });
                 },
@@ -939,6 +944,42 @@ fn let_in(allowed: usize) -> String {
     } else {
         t("the browsers you allow are listed on the window bar, with a way to take each back")
             .to_owned()
+    }
+}
+
+/// The phone's own autofill. On, another app's login form can fill from the box
+/// on screen; off, the box stays in this window and the panel offers nothing but
+/// the way to open the app.
+#[cfg(target_os = "android")]
+fn autofill(ui: &mut egui::Ui, app: &mut App) {
+    card(ui, t("Autofill"), |ui| {
+        let mut on = app.prefs.autofill;
+        if theme::check(ui, &mut on, t("Fill logins from this box in other apps")).changed() {
+            app.prefs.autofill = on;
+            prefs::save(&app.prefs);
+            if !on {
+                // Off now, not at the next frame: the copy is what the switch is about.
+                crate::shared::autofill::clear();
+            }
+        }
+        ui.add_space(HINT);
+        balance::label(
+            ui,
+            RichText::new(t(autofill_switch(on)))
+                .small()
+                .color(theme::palette().muted),
+        );
+    });
+}
+
+/// What a tick alone cannot say: off and on paint the same box, and the difference
+/// — whether another app can read this one — is the whole switch.
+#[cfg(target_os = "android")]
+fn autofill_switch(on: bool) -> &'static str {
+    if on {
+        t("on — another app's login form fills from this box while it is open here, and the copy goes as soon as it locks")
+    } else {
+        t("off — the box stays in this window, and no other app can fill from it")
     }
 }
 

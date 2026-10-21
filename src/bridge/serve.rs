@@ -3,7 +3,7 @@
 
 use crate::bridge::protocol::{Candidate, CodeInfo, Request, Response};
 use crate::vault::matching;
-use crate::vault::model::{now_secs, Login, Vault};
+use crate::vault::model::{now_secs, Login, Otp, Vault};
 use crate::vault::totp;
 use zeroize::Zeroizing;
 
@@ -136,11 +136,15 @@ pub fn entries(vault: &Vault) -> Vec<Candidate> {
 
 /// Entries claiming the page, most specific first, each naming the URL that matched.
 pub fn matches(vault: &Vault, page: &str) -> Vec<Candidate> {
+    rank(&vault.logins, page)
+}
+
+/// The same ranking over a set of logins a caller already holds.
+pub fn rank(logins: &[Login], page: &str) -> Vec<Candidate> {
     let Some(page) = matching::parse(page) else {
         return Vec::new();
     };
-    let mut hits: Vec<(&Login, matching::Rank, &str)> = vault
-        .logins
+    let mut hits: Vec<(&Login, matching::Rank, &str)> = logins
         .iter()
         .filter_map(|item| matching::rank(item, &page).map(|(rank, url)| (item, rank, url)))
         .collect();
@@ -162,9 +166,12 @@ pub fn reveal(vault: &Vault, id: &str) -> Option<(String, String)> {
 
 /// Every seed by name: the seed never leaves the box, and neither does a code.
 pub fn codes(vault: &Vault) -> Vec<CodeInfo> {
-    vault
-        .otps
-        .iter()
+    listing(&vault.otps)
+}
+
+/// The same listing over seeds a caller already holds.
+pub fn listing(otps: &[Otp]) -> Vec<CodeInfo> {
+    otps.iter()
         .map(|otp| CodeInfo {
             id: otp.id.clone(),
             name: otp.name.clone(),
@@ -175,7 +182,11 @@ pub fn codes(vault: &Vault) -> Vec<CodeInfo> {
 /// The code a seed holds now, derived on the spot for one id: what a page needs,
 /// never the seed itself.
 pub fn code(vault: &Vault, id: &str, now: u64) -> Option<(Zeroizing<String>, u64)> {
-    let otp = vault.otps.iter().find(|otp| otp.id == id)?;
+    derive(vault.otps.iter().find(|otp| otp.id == id)?, now)
+}
+
+/// The same derivation over one seed, for a caller that holds no box.
+pub fn derive(otp: &Otp, now: u64) -> Option<(Zeroizing<String>, u64)> {
     totp::at(&otp.secret, now).ok()
 }
 

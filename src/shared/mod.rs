@@ -1,3 +1,4 @@
+pub mod autofill;
 pub mod i18n;
 pub mod idle;
 pub mod theme;
