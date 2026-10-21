@@ -84,22 +84,32 @@ pub fn main(ui: &mut Ui, app: &mut App) {
 
 /// The strip an error wears: message and way out, wrapping in a narrow window.
 fn banner(ui: &mut Ui, id: &'static str, message: &'static str, actions: impl FnOnce(&mut Ui)) {
+    strip(
+        ui,
+        id,
+        crate::shared::i18n::t(message),
+        theme::palette().error,
+        actions,
+    );
+}
+
+/// The same strip for a notice in another colour, whose text is already built: a
+/// version and a percentage are not catalog entries.
+pub(crate) fn notice(ui: &mut Ui, id: &'static str, text: &str, actions: impl FnOnce(&mut Ui)) {
+    strip(ui, id, text, theme::palette().note, actions);
+}
+
+fn strip(ui: &mut Ui, id: &'static str, text: &str, color: Color32, actions: impl FnOnce(&mut Ui)) {
     egui::Panel::top(id)
         .frame(
             egui::Frame::NONE
                 .fill(theme::palette().panel)
                 .inner_margin(egui::Margin::symmetric(18, 10))
-                .stroke(theme::stroke(theme::palette().error, 1.0)),
+                .stroke(theme::stroke(color, 1.0)),
         )
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(crate::shared::i18n::t(message))
-                            .color(theme::palette().error),
-                    )
-                    .wrap(),
-                );
+                ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
                 actions(ui);
             });
         });
