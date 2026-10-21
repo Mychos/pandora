@@ -4,7 +4,6 @@
 use crate::app::{App, Confirm, Field, StatusKind};
 use crate::features::drive::preview;
 
-use crate::features::shell::clipboard::Clip;
 use crate::shared::theme;
 use crate::shared::ui::entry as record;
 use crate::shared::ui::responsive;
@@ -130,14 +129,16 @@ fn face(ui: &mut Ui, app: &mut App, sel: &str, close: bool) -> (bool, bool) {
     let Some(s) = app.boxes.session.as_mut() else {
         return (false, false);
     };
+    let found = s.vault.drive.iter().find(|i| i.id() == sel);
+    let glyph = match found {
+        Some(Entry::Note(_)) => theme::kind_icon(Kind::Note),
+        Some(Entry::File(file)) => preview::icon(preview::kind(ui.ctx(), &s.vault, file)),
+        None => return (false, false),
+    };
+    let tint = theme::tag_color(found.map(|it| it.kind()).unwrap_or(Kind::File));
     let Some(it) = s.vault.drive.iter_mut().find(|i| i.id() == sel) else {
         return (false, false);
     };
-    let glyph = match &*it {
-        Entry::Note(_) => theme::kind_icon(Kind::Note),
-        Entry::File(file) => preview::icon(preview::kind(ui.ctx(), file)),
-    };
-    let tint = theme::tag_color(it.kind());
     let name = match &mut *it {
         Entry::Note(note) => &mut note.name,
         Entry::File(file) => &mut file.name,
@@ -180,15 +181,34 @@ fn face(ui: &mut Ui, app: &mut App, sel: &str, close: bool) -> (bool, bool) {
 }
 
 fn body(ui: &mut Ui, app: &mut App, sel: &str) {
+    let is_file = app
+        .boxes
+        .session
+        .as_ref()
+        .and_then(|s| s.vault.drive.iter().find(|entry| entry.id() == sel))
+        .is_some_and(|entry| matches!(entry, Entry::File(_)));
+    if is_file {
+        body_file(ui, app, sel);
+        return;
+    }
     let icons = &app.icons;
     let Some(s) = app.boxes.session.as_mut() else {
         return;
     };
     let mut changed = false;
-    let mut clip: Option<Clip> = None;
-    let mut show_body = s.reveal.contains(&(sel.to_owned(), Field::Notes));
+    let mut copied = false;
+    let mut show_body = s.shown(sel, Field::Notes);
     let body_was = show_body;
-    let mut export_this = false;
+    if s.vault
+        .drive
+        .iter()
+        .any(|entry| matches!(entry, Entry::Note(note) if note.id == sel))
+    {
+        if let Err(e) = s.vault.ensure_note(sel) {
+            app.shell.fail(e);
+            return;
+        }
+    }
     let it = s.vault.drive.iter_mut().find(|i| i.id() == sel);
     let Some(it) = it else { return };
 
@@ -199,17 +219,21 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
             // Read out here: inside a horizontal row, the height left over is the
             // row's own, not the room the note is being given.
             let h = room(ui).max(LEAST);
-            ui.horizontal(|ui| {
-                let taken = 2.0 * responsive::target(ui.ctx()) + 2.0 * ui.spacing().item_spacing.x;
-                let w = (ui.available_width() - taken).max(80.0);
-                // The box belongs to the entry, not to the text: it is painted out
-                // here, outside the scroll, so a long note moves inside it while its
-                // edges — and the ring that says the field holds the keyboard — stay
-                // where they are. The field inside is frameless and only as tall as
-                // `min_size` asks, never `f32::INFINITY`, which would make the note a
-                // run with no end.
-                let field = ui
-                    .allocate_ui_with_layout(
+            let (field, copy) = record::secret(
+                ui,
+                icons,
+                &mut show_body,
+                2,
+                80.0,
+                egui::Align::Min,
+                |ui, w, shown| {
+                    // The box belongs to the entry, not to the text: it is painted out
+                    // here, outside the scroll, so a long note moves inside it while its
+                    // edges — and the ring that says the field holds the keyboard — stay
+                    // where they are. The field inside is frameless and only as tall as
+                    // `min_size` asks, never `f32::INFINITY`, which would make the note a
+                    // run with no end.
+                    ui.allocate_ui_with_layout(
                         egui::vec2(w, h),
                         Layout::top_down(egui::Align::Min),
                         |ui| {
@@ -228,7 +252,7 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
                                 |ui| {
                                     ui.add(
                                         TextEdit::multiline(&mut *note.body)
-                                            .password(!show_body)
+                                            .password(!shown)
                                             .hint_text(crate::shared::i18n::t("notes…"))
                                             .desired_width(f32::INFINITY)
                                             .frame(
@@ -251,58 +275,22 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
                             field
                         },
                     )
-                    .inner;
-                changed |= field.changed();
-                ui.with_layout(Layout::left_to_right(egui::Align::Min), |ui| {
-                    let (toggle, copy) = record::secret_actions(ui, icons, show_body);
-                    if toggle {
-                        show_body = !show_body;
-                    }
-                    if copy {
-                        ui.ctx().copy_text(note.body.to_string());
-                        clip = Some(Clip::new(note.body.as_str()));
-                    }
-                });
-            });
+                    .inner
+                },
+            );
+            changed |= field.changed();
+            if copy {
+                app.shell.copy_text(ui.ctx(), note.body.as_str());
+                copied = true;
+            }
         }
         // A file is its document: the name is the row above, how big it is sits
         // beside the label, and the only other thing to offer is the way out of
         // the box.
-        Entry::File(file) => {
-            ui.horizontal(|ui| {
-                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icons
-                        .button(
-                            ui,
-                            theme::Icon::Download,
-                            14.0,
-                            theme::palette().muted,
-                            "save to disk",
-                        )
-                        .clicked()
-                    {
-                        export_this = true;
-                    }
-                    theme::hint(ui, &store::human_size(file.bytes()));
-                });
-            });
-            ui.add_space(4.0);
-            preview::show(ui, &mut app.preview, file, room(ui).max(LEAST), icons);
-        }
+        Entry::File(_) => {}
     }
 
-    ui.add_space(FOOT);
-    if icons
-        .button(
-            ui,
-            theme::Icon::Trash,
-            16.0,
-            theme::palette().error,
-            "Delete entry",
-        )
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked()
-    {
+    if record::delete(ui, icons, FOOT) {
         s.confirm = Some(Confirm::Entry(sel.to_owned()));
     }
 
@@ -313,26 +301,56 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
         s.mark_dirty();
     }
     if show_body != body_was {
-        let key = (sel.to_owned(), Field::Notes);
-        if show_body {
-            s.reveal.insert(key);
-        } else {
-            s.reveal.remove(&key);
-        }
+        s.show(sel, Field::Notes, show_body);
     }
 
+    if copied {
+        app.shell
+            .set_status("copied to clipboard", StatusKind::Saved);
+    }
+}
+
+fn body_file(ui: &mut Ui, app: &mut App, sel: &str) {
+    let icons = &app.icons;
+    let preview = &mut app.preview;
+    let Some(s) = app.boxes.session.as_mut() else {
+        return;
+    };
+    let Some(file) = s.vault.drive.iter().find_map(|entry| match entry {
+        Entry::File(file) if file.id == sel => Some(file),
+        _ => None,
+    }) else {
+        return;
+    };
+    let mut export_this = false;
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+            if icons
+                .button(
+                    ui,
+                    theme::Icon::Download,
+                    14.0,
+                    theme::palette().muted,
+                    "save to disk",
+                )
+                .clicked()
+            {
+                export_this = true;
+            }
+            theme::hint(ui, &store::human_size(file.bytes()));
+        });
+    });
+    ui.add_space(4.0);
+    preview::show(ui, preview, file, &s.vault, room(ui).max(LEAST), icons);
+
+    if record::delete(ui, icons, FOOT) {
+        s.confirm = Some(Confirm::Entry(sel.to_owned()));
+    }
     if export_this {
-        // Out of the box is never silent: the prompt says it leaves in the
-        // clear and asks which name it takes.
         s.confirm = Some(Confirm::File {
             id: sel.to_owned(),
             neutral: false,
         });
-    }
-    if let Some(c) = clip {
-        app.shell.arm_clip(ui.ctx(), c);
-        app.shell
-            .set_status("copied to clipboard", StatusKind::Saved);
     }
 }
 

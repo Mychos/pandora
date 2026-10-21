@@ -3,11 +3,9 @@
 //! presses its own button, and the countdown takes it back.
 
 use crate::app::{App, Confirm, Drag, Field, StatusKind};
-use crate::features::shell::clipboard::Clip;
 use crate::shared::theme;
 use crate::shared::ui::drop::{landing, mark, Landing};
 use crate::shared::ui::entry as record;
-use crate::shared::ui::responsive;
 use crate::vault::model::{now_secs, Kind};
 use crate::vault::totp;
 use egui::{Layout, RichText, Sense, TextEdit, Ui};
@@ -454,14 +452,13 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
     }
 
     let mut changed = false;
-    let mut clip: Option<Clip> = None;
+    let mut copied = false;
     let open = theme::dialog(ctx, egui::Id::new("otp"), |ui| {
         theme::width(ui, 360.0);
         let Some(s) = app.boxes.session.as_mut() else {
             return true;
         };
-        let reveal = (sel.clone(), Field::Secret);
-        let mut show = s.reveal.contains(&reveal);
+        let mut show = s.shown(&sel, Field::Secret);
         let was = show;
         let Some(it) = s.vault.otps.iter_mut().find(|o| o.id == sel) else {
             return true;
@@ -483,33 +480,27 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
         ui.add_space(12.0);
         theme::field_label(ui, "Secret");
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let taken = 2.0 * responsive::target(ui.ctx()) + 2.0 * ui.spacing().item_spacing.x;
-            let w = (ui.available_width() - taken).max(90.0);
-            changed |= ui
-                .add(
+        let (field, copy) = record::secret(
+            ui,
+            &app.icons,
+            &mut show,
+            2,
+            90.0,
+            egui::Align::Center,
+            |ui, w, shown| {
+                ui.add(
                     TextEdit::singleline(&mut *it.secret)
-                        .password(!show)
+                        .password(!shown)
                         .hint_text(crate::shared::i18n::t("Base32 secret or otpauth:// URI"))
                         .desired_width(w)
                         .margin(egui::Margin::symmetric(10, 7)),
                 )
-                .changed();
-            let (toggle, copy) = record::secret_actions(ui, &app.icons, show);
-            if toggle {
-                show = !show;
-            }
-            if copy {
-                ctx.copy_text(it.secret.to_string());
-                clip = Some(Clip::new(it.secret.as_str()));
-            }
-        });
-        if show != was {
-            if show {
-                s.reveal.insert(reveal);
-            } else {
-                s.reveal.remove(&reveal);
-            }
+            },
+        );
+        changed |= field.changed();
+        if copy {
+            app.shell.copy_text(ctx, it.secret.as_str());
+            copied = true;
         }
 
         ui.add_space(10.0);
@@ -535,8 +526,8 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
                             )
                             .clicked()
                         {
-                            ctx.copy_text(code.to_string());
-                            clip = Some(Clip::new(&code));
+                            app.shell.copy_text(ctx, &code);
+                            copied = true;
                         }
                     });
                 });
@@ -544,20 +535,11 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
             Err(_) => theme::hint(ui, "Invalid TOTP secret or URI"),
         }
 
-        ui.add_space(20.0);
-        if app
-            .icons
-            .button(
-                ui,
-                theme::Icon::Trash,
-                16.0,
-                theme::palette().error,
-                "Delete entry",
-            )
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
-        {
+        if record::delete(ui, &app.icons, 20.0) {
             s.confirm = Some(Confirm::Entry(sel.clone()));
+        }
+        if show != was {
+            s.show(&sel, Field::Secret, show);
         }
         closed
     });
@@ -570,8 +552,7 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
             s.mark_dirty();
         }
     }
-    if let Some(c) = clip {
-        app.shell.arm_clip(ctx, c);
+    if copied {
         app.shell
             .set_status("copied to clipboard", StatusKind::Saved);
     }

@@ -1,7 +1,6 @@
 //! The login editor, beside the passwords list or over it as a modal.
 
 use crate::app::{App, Confirm, Field, StatusKind};
-use crate::features::shell::clipboard::Clip;
 use crate::shared::theme;
 use crate::shared::ui::entry as record;
 use crate::shared::ui::responsive;
@@ -244,10 +243,10 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
         return;
     };
     let mut changed = false;
-    let mut clip: Option<Clip> = None;
-    let mut show_secret = s.reveal.contains(&(sel.to_owned(), Field::Password));
+    let mut copied = false;
+    let mut show_secret = s.shown(sel, Field::Password);
     let secret_was = show_secret;
-    let mut show_notes = s.reveal.contains(&(sel.to_owned(), Field::Notes));
+    let mut show_notes = s.shown(sel, Field::Notes);
     let notes_was = show_notes;
 
     let it = s.vault.logins.iter_mut().find(|i| i.id == sel);
@@ -372,8 +371,7 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
     ui.horizontal(|ui| {
         // The field fills what the three marks give up: they keep their own
         // square, so the row ends flush with the card.
-        let taken = 3.0 * responsive::target(ui.ctx()) + 3.0 * ui.spacing().item_spacing.x;
-        let w = (ui.available_width() - taken).max(90.0);
+        let w = record::width(ui, 3, 90.0);
         let field = ui.add(
             TextEdit::singleline(&mut *it.password)
                 .password(!show_secret)
@@ -388,8 +386,8 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
             show_secret = !show_secret;
         }
         if copy {
-            ui.ctx().copy_text(it.password.to_string());
-            clip = Some(Clip::new(it.password.as_str()));
+            app.shell.copy_text(ui.ctx(), it.password.as_str());
+            copied = true;
         }
         if icons
             .button(ui, theme::Icon::Dices, 14.0, theme::ACCENT, "generate")
@@ -400,41 +398,31 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
     });
 
     ui.add_space(14.0);
-    ui.horizontal(|ui| {
-        let taken = 2.0 * responsive::target(ui.ctx()) + 2.0 * ui.spacing().item_spacing.x;
-        let w = (ui.available_width() - taken).max(80.0);
-        changed |= ui
-            .add(
+    let (field, copy) = record::secret(
+        ui,
+        icons,
+        &mut show_notes,
+        2,
+        80.0,
+        egui::Align::Center,
+        |ui, w, shown| {
+            ui.add(
                 TextEdit::multiline(&mut *it.notes)
-                    .password(!show_notes)
+                    .password(!shown)
                     .desired_rows(7)
                     .hint_text(crate::shared::i18n::t("notes…"))
                     .desired_width(w)
                     .margin(egui::Margin::symmetric(10, 8)),
             )
-            .changed();
-        let (toggle, copy) = record::secret_actions(ui, icons, show_notes);
-        if toggle {
-            show_notes = !show_notes;
-        }
-        if copy {
-            ui.ctx().copy_text(it.notes.to_string());
-            clip = Some(Clip::new(it.notes.as_str()));
-        }
-    });
+        },
+    );
+    changed |= field.changed();
+    if copy {
+        app.shell.copy_text(ui.ctx(), it.notes.as_str());
+        copied = true;
+    }
 
-    ui.add_space(28.0);
-    if icons
-        .button(
-            ui,
-            theme::Icon::Trash,
-            16.0,
-            theme::palette().error,
-            "Delete entry",
-        )
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked()
-    {
+    if record::delete(ui, icons, 28.0) {
         s.confirm = Some(Confirm::Entry(sel.to_owned()));
     }
 
@@ -449,17 +437,11 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
         (Field::Notes, show_notes, notes_was),
     ] {
         if show != was {
-            let key = (sel.to_owned(), field);
-            if show {
-                s.reveal.insert(key);
-            } else {
-                s.reveal.remove(&key);
-            }
+            s.show(sel, field, show);
         }
     }
 
-    if let Some(c) = clip {
-        app.shell.arm_clip(ui.ctx(), c);
+    if copied {
         app.shell
             .set_status("copied to clipboard", StatusKind::Saved);
     }
@@ -484,6 +466,8 @@ pub(crate) mod tests {
             path: PathBuf::from("/tmp/editor-test.pandora"),
             creds: Credentials::rekey("test", None).unwrap(),
             vault,
+            parked: false,
+            parked_seq: 0,
             dirty: false,
             last_edit: None,
             last_mtime: None,

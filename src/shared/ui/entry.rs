@@ -1,14 +1,11 @@
-//! The pieces every record's row and editor share: its glyph, the eye and copy
-//! pair that guards a secret, and the pane an editor draws its card on. What a
-//! record *is* decides the rest, and that lives in the pane that owns it.
+//! The glyph, eye/copy marks and card every record row and editor share.
 
 use crate::shared::theme;
+use crate::shared::ui::responsive;
 use crate::vault::model::Kind;
 use egui::Ui;
 
-/// The pane a record's editor draws on: the centred card the record sits in, or
-/// the hint that asks for one to be picked. The card is measured against the room
-/// the pane really has, the bar's gutter already taken off it.
+/// The centred card a record's editor sits in, or the hint to pick one.
 pub fn pane<T>(ui: &mut Ui, selected: Option<T>, add: impl FnOnce(&mut Ui, &T)) {
     let Some(selected) = selected else {
         ui.centered_and_justified(|ui| {
@@ -39,8 +36,6 @@ pub fn pane<T>(ui: &mut Ui, selected: Option<T>, add: impl FnOnce(&mut Ui, &T)) 
     );
 }
 
-/// The mark a record wears: the brand it was given or the URL suggests, else the
-/// icon of its kind.
 pub fn glyph(
     ui: &mut Ui,
     icons: &theme::Icons,
@@ -74,12 +69,56 @@ pub fn secret_actions(ui: &mut Ui, icons: &theme::Icons, shown: bool) -> (bool, 
     (toggle, copied)
 }
 
-/// One row of a pane: the surface reserved behind the content, the frame inset
-/// every row shares, the hit zone with its focus ring and pointer, and the fill
-/// and hairline the state picks. `content` returns the rect the row's own clicks
-/// must stop at — a mark on the right that answers its own clicks — and whatever
-/// the caller needs back. The response is the row's, `rect` is what a drop line
-/// is measured on.
+/// Room left for a field after `marks` squares and the gaps between them, never
+/// below `least`.
+pub fn width(ui: &Ui, marks: usize, least: f32) -> f32 {
+    let square = responsive::target(ui.ctx()) + ui.spacing().item_spacing.x;
+    (ui.available_width() - marks as f32 * square).max(least)
+}
+
+/// A field that hides what it holds, with the eye and copy marks closing its row;
+/// `true` comes back when copy was pressed, and the clipboard belongs to a feature.
+#[allow(clippy::too_many_arguments)] // the row's own geometry: marks, floor, align
+pub fn secret<R>(
+    ui: &mut Ui,
+    icons: &theme::Icons,
+    shown: &mut bool,
+    marks: usize,
+    least: f32,
+    align: egui::Align,
+    field: impl FnOnce(&mut Ui, f32, bool) -> R,
+) -> (R, bool) {
+    ui.with_layout(egui::Layout::left_to_right(align), |ui| {
+        let w = width(ui, marks, least);
+        let out = field(ui, w, *shown);
+        let (toggle, copied) = secret_actions(ui, icons, *shown);
+        if toggle {
+            *shown = !*shown;
+        }
+        (out, copied)
+    })
+    .inner
+}
+
+/// `gap`, then the delete mark. What a deletion means belongs to the feature.
+pub fn delete(ui: &mut Ui, icons: &theme::Icons, gap: f32) -> bool {
+    ui.add_space(gap);
+    icons
+        .button(
+            ui,
+            theme::Icon::Trash,
+            16.0,
+            theme::palette().error,
+            "Delete entry",
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+/// One row of a pane: the shared inset and surface, the hit zone with its focus ring,
+/// and the fill and hairline the state picks. `content` returns the rect where the
+/// row's own clicks stop (a mark answers its own); the response is the row's, `rect`
+/// is what a drop line is measured on.
 pub fn row<R>(
     ui: &mut Ui,
     id: egui::Id,
@@ -89,11 +128,10 @@ pub fn row<R>(
     name: &str,
     content: impl FnOnce(&mut Ui) -> (Option<egui::Rect>, R),
 ) -> (egui::Response, egui::Rect, R) {
-    // Reserved up front so the fill and hairline land behind the row content —
-    // painting them afterwards covers the label on hover.
+    // Reserved first so the fill and hairline land behind the content, not over the label.
     let surface = theme::Surface::reserve(ui);
     let frame = egui::Frame::default()
-        // The pane's own row inset: every list starts on the same grid.
+        // The pane's own row inset, so every list starts on the same grid.
         .inner_margin(egui::Margin::symmetric(14, 0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -107,8 +145,7 @@ pub fn row<R>(
 
     let rect = frame.response.rect;
     let (stop, out) = frame.inner;
-    // The row's own click zone stops where the marks begin: interacted after them
-    // and over them too, it would take their clicks for itself.
+    // The click zone stops where the marks begin, so their clicks stay theirs.
     let zone = stop.map_or(rect, |mark| {
         egui::Rect::from_min_max(rect.min, egui::pos2(mark.min.x, rect.max.y))
     });
@@ -126,4 +163,82 @@ pub fn row<R>(
     let (fill, line) = theme::state(selected, resp.hovered());
     surface.paint(ui, rect, theme::radius(8), fill, line);
     (resp, rect, out)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shared::ui::responsive;
+    use crate::shared::ui::shot;
+
+    fn room(ctx: &egui::Context, want: f32, marks: usize, least: f32) -> (f32, f32, f32) {
+        let mut out = (0.0, 0.0, 0.0);
+        let mut frame = ctx.run_ui(shot::input(egui::vec2(800.0, 200.0), Vec::new()), |ui| {
+            ui.set_width(want);
+            out = (
+                super::width(ui, marks, least),
+                ui.available_width(),
+                ui.spacing().item_spacing.x,
+            );
+        });
+        frame.textures_delta.clear();
+        out
+    }
+
+    #[test]
+    fn the_marks_take_their_own_square_off_the_field() {
+        let ctx = egui::Context::default();
+        super::theme::apply(&ctx);
+
+        let (field, avail, gap) = room(&ctx, 400.0, 2, 90.0);
+        let square = responsive::target(&ctx) + gap;
+
+        assert_eq!(avail, 400.0, "the fixture is not the row it claims to be");
+        assert_eq!(
+            field,
+            400.0 - 2.0 * square,
+            "the marks were not taken off the row"
+        );
+    }
+
+    #[test]
+    fn a_row_too_narrow_for_the_marks_keeps_the_floor() {
+        let ctx = egui::Context::default();
+        super::theme::apply(&ctx);
+
+        let (field, avail, _) = room(&ctx, 10.0, 2, 90.0);
+
+        assert_eq!(avail, 10.0, "the fixture is not the row it claims to be");
+        assert_eq!(field, 90.0, "the field was crushed instead of floored");
+    }
+
+    #[test]
+    fn the_delete_footer_is_one_mark_that_only_answers_a_press() {
+        let ctx = egui::Context::default();
+        super::theme::apply(&ctx);
+        let icons = super::theme::Icons::load(&ctx);
+        let mut pressed = None;
+        let size = egui::vec2(900.0, 200.0);
+
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            shapes = shot::frame(&ctx, size, Vec::new(), |ui| {
+                pressed = Some(super::delete(ui, &icons, 20.0));
+            });
+        }
+        let glyphs: Vec<egui::Rect> = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Rect(r) if r.brush.is_some() => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(pressed, Some(false), "the footer answered without a press");
+        assert_eq!(glyphs.len(), 1, "the footer is not one mark: {glyphs:?}");
+        assert_eq!(
+            glyphs[0].height(),
+            16.0,
+            "the mark is not 16 tall: {glyphs:?}"
+        );
+    }
 }
