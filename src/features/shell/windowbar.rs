@@ -1,7 +1,5 @@
-//! Custom window chrome for the OS title bar disabled in `main.rs`: the window's
-//! top, where a mouse looks for it. Under a finger the bar stays at the top and
-//! keeps Back and the box's own actions, while the panes move to the app's floor —
-//! the phone's navigation, standing on the phone's own bar.
+//! Custom window chrome. Under a finger the bar keeps Back and the box actions, and
+//! the panes move to the app's floor over the phone's own navigation.
 
 #[cfg(not(target_os = "android"))]
 use crate::app::Session;
@@ -11,36 +9,26 @@ use crate::shared::ui::{chrome, responsive};
 use egui::{pos2, vec2, Align, Color32, Context, CornerRadius, Id, Layout, Rect, Ui};
 #[cfg(not(target_os = "android"))]
 use egui::{CursorIcon, PointerButton, RichText, Sense, Stroke, StrokeKind, ViewportCommand};
-/// What only the edge strips need. macOS resizes a borderless window with its own
-/// border and `BeginResize` is not supported there, so it has no strips: a strip
-/// would swallow the press the system needs.
+/// macOS resizes a borderless window itself and does not support `BeginResize`, so it
+/// gets no strips: one would swallow the press the system needs.
 #[cfg(not(any(target_os = "android", target_os = "macos")))]
 use egui::{PointerState, ResizeDirection};
 
-/// A bar slot under a pointer: a window button on the desktop, a chip beside it
-/// otherwise. A finger asks [`responsive::grow_target`] for its own.
+/// A bar slot under a pointer; a finger asks [`responsive::grow_target`].
 const CONTROL: f32 = 38.0;
 /// The glyph inside a slot.
 const ICON: f32 = 15.0;
-/// The Back glyph and the invisible box behind it. `framed` grows both on a
-/// narrow screen, so a phone gets a whole target without a second set of numbers.
-/// Desktop only: a phone's bar keeps Back on the floor, and its own numbers live
-/// with `nav`.
+/// The Back glyph and its invisible box; `framed` grows both on a narrow screen.
 #[cfg(not(target_os = "android"))]
 const BACK: (f32, f32) = (15.0, theme::ICON);
-/// The window's own edges: how far the drag region stays off them, how a window
-/// button darkens, and the tab chip's metrics. None of it outlives a desktop
-/// window.
+/// The window's own edges: drag-region inset, button darkening, tab chip metrics.
 #[cfg(not(target_os = "android"))]
 const EDGE: f32 = 8.0;
-/// The top strip is the bar's own edge: the bar's chips are `ICON` tall and sit
-/// at its very top, so a strip as thick as the sides would swallow the middle of
-/// every one of them.
+/// As thick as the sides would swallow the middle of every chip, so the top is its own.
 #[cfg(not(target_os = "android"))]
 const TOP: f32 = 6.0;
-/// How far a corner strip reaches along the edge it shares with a side strip: a
-/// diagonal drag is the one gesture a mouse cannot aim, so the corner is the
-/// wider target.
+/// The corner reaches past its side strip: a diagonal drag is the gesture a mouse
+/// cannot aim.
 #[cfg(not(any(target_os = "android", target_os = "macos")))]
 const CORNER: f32 = 14.0;
 #[cfg(not(any(target_os = "android", target_os = "macos")))]
@@ -51,19 +39,15 @@ const PAD: f32 = 12.0;
 const GAP: f32 = 8.0;
 #[cfg(not(target_os = "android"))]
 const CROSS: f32 = 13.0;
-/// The bar's own insets at its two ends: a thumb wants the buttons clear of the
-/// screen's edge, where a mouse pointer does not care.
+/// The bar's end insets: a thumb needs the buttons clear of the screen edge.
 const LEAD: f32 = 10.0;
 const TAIL: f32 = 4.0;
 const THUMB: f32 = 16.0;
-/// The air two destinations keep between them on the floor. Three thumb targets
-/// edge to edge are one wide target: a miss lands on the pane beside the one
-/// meant, and the wash of the one pressed bleeds into its neighbour. Eight is
-/// the floor a finger needs; ten makes the break visible as well.
+/// Eight is the floor a finger needs between two thumb targets; ten keeps the miss
+/// from landing on the pane beside it.
 const SPREAD: f32 = 10.0;
 
-/// Back and the panes are all the finger gets on the floor of a phone, so both
-/// the bar and every slot on it must hold a target a thumb can land on.
+/// Back and the panes are all a finger gets on the floor, so every slot holds a thumb target.
 const _: () = assert!(chrome::NAV >= 48.0);
 
 /// A bar slot's own width here, and the glyph inside it.
@@ -91,8 +75,7 @@ fn tail(ctx: &Context) -> f32 {
     }
 }
 
-/// Called after the window bar, in the same area, so the strips win the outer
-/// border.
+/// Called after the window bar, in the same area, so the strips win the outer border.
 #[cfg(not(any(target_os = "android", target_os = "macos")))]
 pub fn resize(ui: &mut Ui) {
     let ctx = ui.ctx().clone();
@@ -110,19 +93,16 @@ pub fn resize(ui: &mut Ui) {
     }
 }
 
-/// The compositor grabs the pointer for a native move or resize and never
-/// delivers the button release, so egui would keep the press down — and hover
-/// nothing at all — until the next click. The native op owns the gesture from
-/// here: egui's pointer state goes with it.
-/// `emilk/egui#7959`.
+/// The compositor keeps the pointer for a native move or resize and never delivers
+/// the button release, so egui would hold the press; the native op owns the gesture
+/// from here. `emilk/egui#7959`.
 #[cfg(not(any(target_os = "android", target_os = "macos")))]
 fn handoff(ctx: &Context) {
     ctx.input_mut(|i| i.pointer = PointerState::default());
     ctx.stop_dragging();
 }
 
-/// The eight border strips, clockwise from the top edge. A corner reaches past
-/// the strip it sits on, so the two never overlap.
+/// The eight border strips, clockwise; the corner reaches past its side, so they never overlap.
 #[cfg(not(any(target_os = "android", target_os = "macos")))]
 fn zones(s: Rect) -> [(ResizeDirection, Rect, CursorIcon); 8] {
     let (w, top, c) = (EDGE, TOP, CORNER);
@@ -170,14 +150,11 @@ fn zones(s: Rect) -> [(ResizeDirection, Rect, CursorIcon); 8] {
     ]
 }
 
-/// Paints and interacts in a layer above `Order::Foreground`, where `egui::Modal`
-/// lives: a modal's backdrop is painted over the whole window, so the whole
-/// chrome — the bars and the resize strips — must sit above.
+/// Above `Order::Foreground`, where `egui::Modal` paints its backdrop: the whole
+/// chrome must sit above it.
 pub fn show(ui: &mut Ui, app: &mut App) {
     let ctx = ui.ctx().clone();
-    // The bar is the window's own edge: the top, where a mouse looks for it and
-    // where the window buttons are. A thumb gets the same bar there, and its
-    // panes at the floor, over the phone's own navigation.
+    // The bar is the window's own edge; a thumb keeps it at the top and the panes on the floor.
     let strip = chrome::strip(&ctx);
     egui::Panel::top("windowbar")
         .exact_size(strip)
@@ -196,8 +173,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     egui::Area::new(Id::new("pandora-chrome"))
         .order(egui::Order::Tooltip)
         .fixed_pos(screen.min)
-        // The reserved panel moved `content_rect` off the bar; the default
-        // constraint would drag the bar back into it.
+        // The reserved panel moved `content_rect`; the default constraint would drag it back.
         .constrain_to(screen)
         // A fade would dim the bar on its first frames; this bar never fades.
         .fade_in(false)
@@ -205,8 +181,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             ui.set_width(screen.width());
             ui.set_height(strip);
             bar(ui, app);
-            // After the bar, so the strips win the outer border and the very edge
-            // resizes even where a tab or a window button reaches it.
+            // After the bar, so the strips win the outer edge, even under a tab or a button.
             #[cfg(not(any(target_os = "android", target_os = "macos")))]
             resize(ui);
         });
@@ -229,8 +204,7 @@ fn bar(ui: &mut Ui, app: &mut App) {
     let finger = chrome::touch(&ctx);
     let strip = ui.max_rect();
     paint(ui, strip);
-    // A phone has no window behind this: nothing to drag. A desktop keeps its
-    // drag region at any width — a narrow window is still a borderless window.
+    // A phone has no window to drag; a narrow desktop is still borderless.
     #[cfg(not(target_os = "android"))]
     {
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -251,8 +225,7 @@ fn bar(ui: &mut Ui, app: &mut App) {
             ui.add_space(lead(&ctx));
             ui.add(app.icons.logo(22.0, theme::ACCENT));
             ui.add_space(12.0);
-            // A pointer's bar carries Back, the tool and the vault tabs; a
-            // thumb's one keeps only Back up here — the panes are on the floor.
+            // A desktop bar carries Back, the tool and the vault tabs; a thumb keeps only Back here.
             #[cfg(not(target_os = "android"))]
             if !finger {
                 let can = app.can_back();
@@ -279,22 +252,20 @@ fn bar(ui: &mut Ui, app: &mut App) {
                 strip_tabs(ui, app);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // The window's own buttons are the desktop's, narrow or not: with no
-                // title bar they are the only way to control the window, so they never
-                // leave the bar. They sit flush at the corner, as a window expects.
+                // With no title bar these are the only way to control the window, so they never leave.
                 #[cfg(not(target_os = "android"))]
                 {
                     let ctx = ui.ctx().clone();
                     controls(ui, &ctx);
                 }
                 ui.add_space(tail(&ctx));
-                // A thumb's bar keeps the box's own actions, where the panes would
-                // be on the floor: right to left, the gear is the rightmost.
+                // Right to left, so the gear is the rightmost.
                 if finger {
                     settings_button(ui, app);
                     lock_button(ui, app);
                 }
-                crate::features::settings::ui::language(ui, app);
+                // The app's settings stand beside the box's; both are read before any box opens.
+                crate::features::settings::ui::button(ui, app);
                 #[cfg(not(target_os = "android"))]
                 if !finger {
                     browsers(ui, app);
@@ -304,15 +275,12 @@ fn bar(ui: &mut Ui, app: &mut App) {
     });
 }
 
-/// The app's own navigation at the floor of a narrow window: the generator opens
-/// it at the far left, the box's panes occupy its centre and Back closes it at
-/// the far right. It is on the top area's layer, so a modal cannot cover it.
+/// The floor navigation: generator far left, the box's panes centred, Back far right;
+/// same layer as the top area, so a modal cannot cover it.
 fn nav(ui: &mut Ui, app: &mut App) {
     let ctx = ui.ctx().clone();
     let strip = ui.max_rect();
-    // The phone's navigation bar goes under this one rather than over it: the
-    // app's own row is the strip's first `NAV` points, and what is left below is
-    // the room the phone asked for.
+    // The phone's own bar goes under this one: what is left below is its room.
     let bar = Rect::from_min_max(strip.min, pos2(strip.max.x, strip.min.y + chrome::NAV));
     paint_nav(ui, strip, bar);
     ui.spacing_mut().item_spacing.x = 0.0;
@@ -327,15 +295,12 @@ fn nav(ui: &mut Ui, app: &mut App) {
             }
             // The tool and the scan are not pages of the box: while either is
             // the screen, the pane it was reached from keeps its tab but drops
-            // the mark. The floor marks one place, the one the user is at.
+            // The floor marks one place: the one the user is at.
             let live = app.screen == Screen::Main;
             let mut go = None;
             if let Some(s) = app.boxes.session.as_ref() {
                 let want = s.tab;
-                // The three panes are the bar's centre: the generator holds the
-                // left end and Back the right one, so neither shifts them. Their
-                // own rect keeps them centred on the whole bar, not on what the
-                // generator leaves, and its width carries the air between them.
+                // The three panes are the bar's centre; generator left and Back right never shift them.
                 let row = ui.max_rect();
                 let panes = Rect::from_center_size(
                     row.center(),
@@ -367,8 +332,7 @@ fn nav(ui: &mut Ui, app: &mut App) {
                 app.boxes.pane(pane);
                 app.screen = Screen::Main;
             }
-            // Back belongs at the far end of the floor, where a thumb finds it
-            // without crossing the panes.
+            // Back sits at the far end, where a thumb finds it without crossing the panes.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(tail(&ctx));
                 let can = app.can_back();
@@ -394,9 +358,8 @@ fn nav(ui: &mut Ui, app: &mut App) {
     });
 }
 
-/// One action on a bar: a slot the bar's own height, so its wash and its rule
-/// reach the edges instead of floating inside it, with the glyph centred. `off`
-/// is the tint at rest; `on` lifts it to the accent.
+/// One action on a bar: a slot the bar's height, glyph centred, `off` at rest and
+/// `on` in the accent.
 #[allow(clippy::too_many_arguments)]
 fn action(
     ui: &mut Ui,
@@ -428,8 +391,7 @@ fn action(
     resp.on_hover_text(label)
 }
 
-/// One pane of the app's navigation: the icon, and the accent rule on the bar's
-/// ceiling — the edge the body is on, since this bar is the window's floor.
+/// One pane of the navigation: icon and the accent rule on the bar's ceiling.
 fn destination(
     ui: &mut Ui,
     icons: &theme::Icons,
@@ -450,8 +412,7 @@ fn destination(
     .clicked()
 }
 
-/// The lock acts on the whole app, so a phone keeps it in reach at the top, on
-/// the bar's floor where a click's mark lands.
+/// The lock acts on the whole app, so a phone keeps it in reach at the top.
 fn lock_button(ui: &mut Ui, app: &mut App) {
     if app.boxes.session.is_none() {
         return;
@@ -473,14 +434,13 @@ fn lock_button(ui: &mut Ui, app: &mut App) {
     }
 }
 
-/// Settings is a page of the open box, and the only way to it once the panes have
-/// left the bar.
+/// Box settings are a page of the open box, and the only way to it once the panes
+/// left the bar; app settings are the sliders beside it.
 fn settings_button(ui: &mut Ui, app: &mut App) {
     if app.boxes.session.is_none() {
         return;
     }
-    // Settings is a page of the box too, so the tool or the scan leaving the
-    // box behind takes its mark with them.
+    // Settings is a page of the box: the tool or scan leaving takes its mark.
     let on = app.screen == Screen::Main
         && app
             .boxes
@@ -492,7 +452,7 @@ fn settings_button(ui: &mut Ui, app: &mut App) {
         &app.icons,
         Id::new("bar-settings"),
         theme::Icon::Settings,
-        "Settings",
+        crate::shared::i18n::t("Box settings"),
         theme::palette().muted,
         on,
         theme::Edge::Floor,
@@ -527,8 +487,7 @@ fn paint(ui: &Ui, strip: Rect) {
         .rect_filled(seam, CornerRadius::ZERO, theme::palette().hair);
 }
 
-/// The floor's own paint: the body meets the navigation at its ceiling, and the
-/// room the phone asked for below keeps the bar's colour.
+/// The floor's paint: body meets navigation at its ceiling, phone's room below keeps the colour.
 fn paint_nav(ui: &Ui, strip: Rect, bar: Rect) {
     ui.painter()
         .rect_filled(strip, CornerRadius::ZERO, theme::palette().panel);
@@ -540,8 +499,7 @@ fn paint_nav(ui: &Ui, strip: Rect, bar: Rect) {
 /// Move the window from the bar; only a desktop has one to move.
 #[cfg(not(target_os = "android"))]
 fn drag(ui: &mut Ui, ctx: &Context, grab: Rect) {
-    // `CLICK | DRAG`: the press alone must not start a move, or the compositor
-    // takes the pointer and the release never comes back.
+    // `CLICK | DRAG`: a press alone must not start a move, or the release never returns.
     let resp = ui
         .interact(
             grab,
@@ -565,8 +523,7 @@ fn strip_tabs(ui: &mut Ui, app: &mut App) {
     let Some(current) = app.boxes.session.as_ref() else {
         return;
     };
-    // Only the box screen has a vault on show: on Sources (the "+") or the tool,
-    // no tab is the active window.
+    // Only the box screen has a vault on show; Sources and the tool leave no active tab.
     let live = app.screen == Screen::Main;
     let at = app.boxes.active.min(app.boxes.tabs.len());
     let mut order: Vec<&Session> = Vec::with_capacity(app.boxes.tabs.len() + 1);
@@ -597,10 +554,8 @@ enum Press {
     Close,
 }
 
-/// `current` is the tab holding the box on screen: its name stays bright and its
-/// close cross always shows, whatever screen is up. `live` is whether that box is
-/// the screen — the accent rule belongs to the window on show, so Sources and the
-/// tool leave the strip unmarked without taking the cross away.
+/// `current`: the tab holding the box on screen, name bright and cross always shown.
+/// `live`: whether it is the screen, since the accent rule belongs to the window on show.
 #[cfg(not(target_os = "android"))]
 fn vault_tab(ui: &mut Ui, name: &str, current: bool, live: bool) -> Press {
     let font = egui::TextStyle::Small.resolve(ui.style());
@@ -686,9 +641,7 @@ fn plus(ui: &mut Ui, app: &mut App) {
     }
 }
 
-/// The password tool reads nothing from a box, so it rides the bar and not a box's
-/// pane strip: it must open with none. On a phone it is one of the destinations on
-/// the floor.
+/// The password tool reads nothing from a box, so it rides the bar, not a pane strip.
 fn tool(ui: &mut Ui, app: &App, edge: theme::Edge) -> bool {
     let on = app.screen == Screen::Generate;
     action(
@@ -704,10 +657,8 @@ fn tool(ui: &mut Ui, app: &App, edge: theme::Edge) -> bool {
     .clicked()
 }
 
-/// The browsers the user has allowed to read the box open here: a chip appears
-/// while any is, and opens the list. A `chrome-extension://` origin is shared by
-/// Chrome, Brave and Edge and the browser never says which, so a row names the
-/// family, not the browser — never more than one Chromium row, plus Firefox.
+/// Browsers the user allowed: a chip while any is open, naming the family, because a
+/// `chrome-extension://` origin does not say which Chromium browser it is.
 #[cfg(not(target_os = "android"))]
 fn browsers(ui: &mut Ui, app: &mut App) {
     if app.prefs.browsers.is_empty() {
@@ -746,10 +697,7 @@ fn browsers(ui: &mut Ui, app: &mut App) {
 
     egui::Popup::menu(&resp).show(|ui| {
         theme::menu(ui);
-        // `with_layout` inside claims every pixel it is not given back, so the
-        // width is pinned: the row's action column then lands on one x for every
-        // row instead of the popup stretching to the screen and stranding the
-        // trash a hand's width from the name.
+        // `with_layout` claims every pixel; pin the width so the action column lands on one x.
         ui.set_width(220.0);
         theme::field_label(ui, "Allowed browsers");
         ui.add_space(10.0);
@@ -757,12 +705,9 @@ fn browsers(ui: &mut Ui, app: &mut App) {
         for (i, caller) in linked.iter().enumerate() {
             let (name, note) = crate::features::bridge::model::browser(caller);
             ui.horizontal(|ui| {
-                // `Min`, so the action sits on the row's first line, where the name
-                // is, instead of floating between two lines of a wrapped row.
+                // `Min`, so the action sits on the row's first line, where the name is.
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    // `framed` and not `button`: a 28pt slot leaves a dead band
-                    // under the last row that the popup's own padding cannot even
-                    // out against its ceiling.
+                    // `framed` and not `button`: a 28pt slot leaves a dead band under the last row.
                     if app
                         .icons
                         .framed(
@@ -904,8 +849,6 @@ mod tests {
     use crate::shared::ui::chrome::HEIGHT;
     use crate::shared::ui::shot;
 
-    /// egui lays an `Area` out on a first, invisible sizing pass, so an idle
-    /// frame runs in front before the shot.
     fn frame(
         ctx: &egui::Context,
         app: &mut App,
@@ -936,8 +879,6 @@ mod tests {
         frame(ctx, app, vec![shot::press(at, false)]);
     }
 
-    /// Every accent rule the chrome paints: the one under the place on show,
-    /// and nothing else.
     fn rules(shapes: &[egui::epaint::ClippedShape]) -> Vec<Rect> {
         shapes
             .iter()
@@ -1004,10 +945,6 @@ mod tests {
         assert_eq!(app.boxes.session.as_ref().unwrap().vault.name, "Work");
     }
 
-    /// A narrow window has no room for a strip under the bar, so the panes move to
-    /// the app's floor: the generator opens it at the far left, the panes sit
-    /// centred, Back closes it at the far right, and the rule of the pane on show
-    /// sits on the bar's ceiling.
     #[test]
     fn the_narrow_bar_puts_the_panes_on_the_floor() {
         let ctx = egui::Context::default();
@@ -1016,9 +953,7 @@ mod tests {
         app.open("Work");
 
         let size = vec2(420.0, 780.0);
-        // Two frames: the floor is placed on the first pass and is only where it
-        // ends up on the second, and the read below answers with what the pass
-        // before the last one left behind.
+        // Two frames: the floor is placed on the first pass and read on the second.
         frame_at(&ctx, &mut app, size, vec![]);
         let shapes = frame_at(&ctx, &mut app, size, vec![]);
         assert_eq!(chrome::strip(&ctx), chrome::NAV, "the bar holds a thumb");
@@ -1072,9 +1007,6 @@ mod tests {
             left = rect.max.x;
         }
 
-        // Back is the far end of the floor, and the only mark there: its glyph
-        // sits inside its own square, so the gap is the bar's inset plus the
-        // square's own padding.
         let indoor = (crate::shared::ui::responsive::grow_target(&ctx, BACK.1) - glyph(&ctx)) * 0.5;
         let back = shapes
             .iter()
@@ -1092,7 +1024,7 @@ mod tests {
         );
         drop(shapes);
 
-        // The floor is what switches the box, and the screen it was on.
+        // The floor switches the box, and the screen it was on.
         let codes = slot("Codes").center();
         app.screen = Screen::Generate;
         for held in [true, false] {
@@ -1114,10 +1046,6 @@ mod tests {
         );
     }
 
-    /// The panes are the floor's centre, not what the generator leaves behind:
-    /// the three stand on the bar's own middle at any width a thumb meets, keep
-    /// a finger's worth of air between them, and still clear the generator on
-    /// the left and Back on the right.
     #[test]
     fn the_narrow_floor_centres_the_panes_on_the_bar() {
         for size in [vec2(420.0, 780.0), vec2(380.0, 780.0)] {
@@ -1126,8 +1054,7 @@ mod tests {
             let mut app = App::blank(&ctx);
             app.open("Work");
 
-            // Two frames, as above: the floor is placed on the first pass and
-            // the response read below answers with what the pass before left.
+            // Two frames, as above: the floor is placed on the first pass.
             frame_at(&ctx, &mut app, size, vec![]);
             frame_at(&ctx, &mut app, size, vec![]);
 
@@ -1143,8 +1070,7 @@ mod tests {
                 (span.center().x - size.x * 0.5).abs() <= 1.0,
                 "the panes are not centred on the bar: {span:?} vs {size:?}"
             );
-            // Targets edge to edge are one wide target: a thumb that misses the
-            // one it aimed at lands on its neighbour.
+            // Targets edge to edge are one wide target: a miss lands on its neighbour.
             for pair in [first, slot("Files"), last].windows(2) {
                 let (left, right) = (pair[0], pair[1]);
                 let air = right.min.x - left.max.x;
@@ -1169,8 +1095,6 @@ mod tests {
         }
     }
 
-    /// The tool is not a page of the box, so opening it leaves the pane behind
-    /// it unmarked: the floor marks the one place the user is at.
     #[test]
     fn the_tool_leaves_the_pane_behind_it_unmarked() {
         let ctx = egui::Context::default();
@@ -1195,9 +1119,6 @@ mod tests {
         );
     }
 
-    /// Settings is a page of the box too: once the tool takes the screen, the
-    /// gear it left behind loses its mark, and a click still brings the box back
-    /// to it.
     #[test]
     fn the_tool_darkens_the_gear_it_left_behind() {
         let ctx = egui::Context::default();
@@ -1232,7 +1153,7 @@ mod tests {
             "the gear is not the place on show: {marks:?} vs {gear:?}"
         );
 
-        // The gear still leads back to the box, from wherever it was reached.
+        // The gear still leads back to the box, wherever it was reached.
         let at = gear.center();
         for held in [true, false] {
             frame_at(
@@ -1249,9 +1170,6 @@ mod tests {
         );
     }
 
-    /// A narrow desktop window is still a borderless window: its bar keeps the
-    /// drag region and the min/max/close buttons even though the panes moved to
-    /// the floor.
     #[test]
     fn the_narrow_desktop_bar_keeps_the_window_controls() {
         let ctx = egui::Context::default();
@@ -1275,8 +1193,7 @@ mod tests {
             "the drag region must survive a narrow desktop window"
         );
 
-        // The close button is the rightmost control: hovering its centre must
-        // paint the ERROR wash. The hover lands a frame late.
+        // The close button is the rightmost control; the hover lands a frame late.
         let at = egui::pos2(420.0 - 16.0 - 19.0, 28.0);
         let mut o = ctx.run_ui(
             crate::shared::ui::shot::input(size, vec![egui::Event::PointerMoved(at)]),
@@ -1840,6 +1757,78 @@ mod tests {
         app.record_place();
         app.back();
         assert_eq!(app.screen, Screen::Sources, "and Back leads home");
+    }
+
+    /// The app's own settings are not a page of a box: their way in is on the
+    /// bar, and it works with nothing unlocked. The gear beside it is the open
+    /// box's page, so the two are told apart by the glyph, not by the id alone.
+    #[test]
+    fn the_apps_own_settings_open_from_the_bar_with_no_box_open() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = App::blank(&ctx);
+        assert!(app.boxes.session.is_none());
+
+        frame(&ctx, &mut app, vec![]);
+        let at = ctx
+            .read_response(Id::new("bar-prefs"))
+            .expect("the bar carries the app's own settings")
+            .rect
+            .center();
+        assert!(
+            ctx.read_response(Id::new("bar-settings")).is_none(),
+            "no box, so no box settings button"
+        );
+
+        click(&ctx, &mut app, at);
+        assert!(app.prefs_open, "the sliders open the app's settings");
+        assert_eq!(
+            app.screen,
+            Screen::Sources,
+            "without opening a box or leaving the screen"
+        );
+    }
+
+    /// A phone's bar carries both, side by side and apart: the box's gear, and
+    /// the app's sliders.
+    #[test]
+    fn a_phone_bar_tells_the_boxs_settings_from_the_apps() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = App::blank(&ctx);
+        app.open("Work");
+        app.boxes.pane(Tab::Passwords);
+        app.screen = Screen::Main;
+
+        let size = vec2(420.0, 780.0);
+        frame_at(&ctx, &mut app, size, vec![]);
+        let gear = ctx
+            .read_response(Id::new("bar-settings"))
+            .expect("the box's gear is on a phone's bar")
+            .rect;
+        let sliders = ctx
+            .read_response(Id::new("bar-prefs"))
+            .expect("so are the app's sliders")
+            .rect;
+        assert!(
+            !gear.intersects(sliders),
+            "the two settings are not one button: {gear:?} and {sliders:?}"
+        );
+
+        let at = sliders.center();
+        for held in [true, false] {
+            frame_at(
+                &ctx,
+                &mut app,
+                size,
+                vec![egui::Event::PointerMoved(at), shot::press(at, held)],
+            );
+        }
+        assert!(app.prefs_open, "the sliders open the app's settings");
+        assert!(
+            app.boxes.session.as_ref().unwrap().tab == Tab::Passwords,
+            "and leave the box on the page it was on"
+        );
     }
 
     /// The chip carries no text, so it is reached by the id its own slot wears.

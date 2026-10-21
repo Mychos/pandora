@@ -11,16 +11,12 @@ use crate::vault::model::Kind;
 use crate::vault::store;
 use egui::{Label, RichText, TextEdit};
 
-/// Between two cards.
 const CARD: f32 = 20.0;
 
-/// Between two rows of the same card.
 const ROW: f32 = 12.0;
 
-/// Between a card's fields and its action.
 const ACT: f32 = 16.0;
 
-/// Between a control and the note that explains it.
 const HINT: f32 = 8.0;
 
 pub fn run(ui: &mut egui::Ui, app: &mut App, compact: bool) {
@@ -56,8 +52,6 @@ pub fn run(ui: &mut egui::Ui, app: &mut App, compact: bool) {
                         ui.add_space(CARD);
                         browser(ui, app);
                         ui.add_space(CARD);
-                        theme_card(ui, app);
-                        ui.add_space(CARD);
                         footer(ui, app);
                     });
                 },
@@ -65,8 +59,7 @@ pub fn run(ui: &mut egui::Ui, app: &mut App, compact: bool) {
         });
 }
 
-/// What the box holds, read in one pass: the card edits the session, so it cannot
-/// hold a borrow of it while it does.
+/// What the box holds, read in one pass: the card edits the session while it holds it.
 struct Facts {
     path: String,
     size: String,
@@ -108,9 +101,7 @@ fn facts(app: &App) -> Facts {
     }
 }
 
-/// Whether the box on screen needs its keyfile to open: `Some(true)` when it
-/// does, `Some(false)` when it does not, and `None` when this session never ran a
-/// KDF — a finger unlocked it, and the file itself does not say.
+/// `Some` when the KDF proved whether a keyfile is needed; `None` after a biometric unlock.
 fn keyfile(app: &App) -> Option<bool> {
     app.boxes
         .session
@@ -118,7 +109,7 @@ fn keyfile(app: &App) -> Option<bool> {
         .and_then(|s| s.creds.needs_keyfile())
 }
 
-/// The box card: its name, its file, what it holds, and the CSV way in and out.
+/// The box card: name, file, contents, and the CSV way in and out.
 fn box_card(ui: &mut egui::Ui, app: &mut App, facts: &Facts, keyfile: Option<bool>, compact: bool) {
     card(ui, "", |ui| {
         if let Some(s) = app.boxes.session.as_mut() {
@@ -249,8 +240,7 @@ fn box_card(ui: &mut egui::Ui, app: &mut App, facts: &Facts, keyfile: Option<boo
     });
 }
 
-/// What the trash holds, and the two things that can be done with it: look at it,
-/// or erase it. Nothing leaves the box until the second one.
+/// What the trash holds: look at it, or erase it; nothing leaves until the second.
 fn trash_card(ui: &mut egui::Ui, app: &mut App, trashed: usize, compact: bool) {
     card(ui, "Trash", |ui| {
         kv(
@@ -317,12 +307,8 @@ fn trash_card(ui: &mut egui::Ui, app: &mut App, trashed: usize, compact: bool) {
     });
 }
 
-/// The trash's own window: one row per deleted record, with the way back. It
-/// draws outside the settings pane so a restore can take the user to the record
-/// it just put back.
-///
-/// The one permanent erase is its own button, and it leaves the window to ask
-/// for the same confirm every other destructive action wears.
+/// The trash's window, outside the settings pane so a restore can jump to the record.
+/// The permanent erase asks for the usual confirm.
 pub fn trash_modal(ctx: &egui::Context, app: &mut App) {
     if !app.boxes.session.as_ref().is_some_and(|s| s.show_trash) {
         return;
@@ -409,7 +395,7 @@ pub fn trash_modal(ctx: &egui::Context, app: &mut App) {
     }
 }
 
-/// How long ago a record was deleted, in the coarsest unit that says it.
+/// How long ago a record was deleted, in the coarsest unit.
 fn ago(secs: u64) -> String {
     let now = crate::vault::model::now_secs();
     let d = now.saturating_sub(secs);
@@ -583,41 +569,6 @@ fn clipboard_card(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-/// Which way the app is painted. Two buttons and not a select: there are two
-/// schemes, and a segmented pair says that better than a dropdown that opens onto
-/// the same two. The change lands on the next frame, not after a restart.
-fn theme_card(ui: &mut egui::Ui, app: &mut App) {
-    card(ui, "Appearance", |ui| {
-        let mut picked = None;
-        ui.horizontal(|ui| {
-            for scheme in theme::Scheme::ALL {
-                let selected = app.prefs.theme == scheme;
-                let edge = if selected {
-                    theme::ACCENT
-                } else {
-                    theme::palette().hair
-                };
-                let mut row =
-                    egui::Button::new(RichText::new(scheme.name()).color(theme::palette().text))
-                        .stroke(theme::stroke(edge, 1.0));
-                if selected {
-                    row = row.fill(theme::palette().accent_dim);
-                }
-                if ui.add(row).clicked() {
-                    picked = Some(scheme);
-                }
-            }
-        });
-        let Some(scheme) = picked.filter(|scheme| *scheme != app.prefs.theme) else {
-            return;
-        };
-        app.prefs.theme = scheme;
-        theme::set(scheme);
-        theme::apply(ui.ctx());
-        prefs::save(&app.prefs);
-    });
-}
-
 /// How many wrong passwords a box takes before it starts refusing, and for how long.
 fn attempts_card(ui: &mut egui::Ui, app: &mut App) {
     card(ui, "Unlock attempts", |ui| {
@@ -695,77 +646,209 @@ fn footer(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-pub fn language(ui: &mut egui::Ui, app: &mut App) {
+/// The bar's way into the app's settings: scheme and language, which outlive every box.
+pub fn button(ui: &mut egui::Ui, app: &mut App) {
     let ctx = ui.ctx().clone();
     let width = crate::shared::ui::responsive::target(&ctx);
     let glyph = crate::shared::ui::responsive::grow(&ctx, 15.0);
     let resp = theme::slot(
         ui,
         width,
-        egui::Id::new("bar-language"),
-        false,
+        egui::Id::new("bar-prefs"),
+        app.prefs_open,
         ui.available_height(),
         theme::Edge::Floor,
         |ui| {
             ui.add_space(((width - glyph) / 2.0).floor().max(0.0));
-            if let Some(img) = app
-                .icons
-                .image(theme::Icon::Globe, glyph, theme::palette().muted)
-            {
+            if let Some(img) = app.icons.image(
+                theme::Icon::Sliders,
+                glyph,
+                if app.prefs_open {
+                    theme::ACCENT
+                } else {
+                    theme::palette().muted
+                },
+            ) {
                 ui.add(img);
             }
         },
     );
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t("Language")));
-    if resp.on_hover_text(t("Language")).clicked() {
-        app.lang_open = true;
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t("General settings"))
+    });
+    if resp.on_hover_text(t("General settings")).clicked() {
+        app.prefs_open = true;
     }
 }
 
-/// The languages, as a modal: an anchored menu is a moving target on a phone, and
-/// a picker that lives in the bar has nowhere to grow.
-pub fn modal(ctx: &egui::Context, app: &mut App) {
-    if !app.lang_open {
+/// App settings in a dialog: scheme and language, read before any box opens.
+pub fn general(ctx: &egui::Context, app: &mut App) {
+    if !app.prefs_open {
         return;
     }
-    let open = theme::dialog(ctx, egui::Id::new("language"), |ui| {
-        theme::width(ui, 260.0);
-        let closed = theme::head(ui, &app.icons, t("Language"));
-        ui.add_space(6.0);
-        let mut picked = None;
-        for lang in Lang::ALL {
-            let selected = app.prefs.lang == lang;
-            // The chosen one wears the same green a selected row does everywhere
-            // else; the rest keep an edge, so no language floats bare in the card.
-            let edge = if selected {
-                theme::ACCENT
-            } else {
-                theme::palette().hair
-            };
-            let mut row =
-                egui::Button::new(RichText::new(lang.name()).color(theme::palette().text))
-                    .stroke(theme::stroke(edge, 1.0));
-            if selected {
-                row = row.fill(theme::palette().accent_dim);
-            }
-            if ui
-                .add_sized(egui::vec2(ui.available_width(), 36.0), row)
-                .clicked()
-            {
-                picked = Some(lang);
-            }
-        }
-        let Some(lang) = picked else {
-            return closed;
-        };
-        app.prefs.lang = lang;
-        i18n::set(lang);
-        prefs::save(&app.prefs);
-        true
+    let open = theme::dialog(ctx, egui::Id::new("general-settings"), |ui| {
+        theme::width(ui, 300.0);
+        let closed = theme::head(ui, &app.icons, t("General settings"));
+        appearance(ui, app);
+        ui.add_space(ACT);
+        languages(ui, app);
+        closed
     });
     if !open {
-        app.lang_open = false;
+        app.prefs_open = false;
     }
+}
+
+/// Which way the app is painted: tiles, not a select, so the choice is made by eye.
+/// The change lands on the next frame.
+fn appearance(ui: &mut egui::Ui, app: &mut App) {
+    theme::field_label(ui, "Appearance");
+    ui.add_space(8.0);
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        // The pair takes the row whole: half the width each, less the gap the
+        // layout leaves between the two.
+        let gap = ui.spacing().item_spacing.x;
+        let width = (ui.available_width() - gap) / 2.0;
+        for scheme in theme::Scheme::ALL {
+            let selected = app.prefs.theme == scheme;
+            if scheme_tile(ui, scheme, selected, width).clicked() {
+                picked = Some(scheme);
+            }
+        }
+    });
+    let Some(scheme) = picked.filter(|scheme| *scheme != app.prefs.theme) else {
+        return;
+    };
+    app.prefs.theme = scheme;
+    theme::set(scheme);
+    theme::apply(ui.ctx());
+    prefs::save(&app.prefs);
+}
+
+/// One scheme painted in its own colours; the one in use wears the green edge and a check.
+fn scheme_tile(
+    ui: &mut egui::Ui,
+    scheme: theme::Scheme,
+    selected: bool,
+    width: f32,
+) -> egui::Response {
+    let palette = theme::palette_of(scheme);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 84.0), egui::Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let edge = if selected {
+        theme::ACCENT
+    } else if resp.hovered() {
+        theme::palette().muted
+    } else {
+        theme::palette().hair
+    };
+    {
+        let painter = ui.painter();
+        painter.rect_filled(rect, theme::radius(10), palette.paper);
+        painter.rect_stroke(
+            rect,
+            theme::radius(10),
+            theme::stroke(edge, if selected { 2.0 } else { 1.0 }),
+            egui::StrokeKind::Inside,
+        );
+        // What every page of the app is: a card on the paper, two lines of text
+        // and a button in the brand green.
+        let card = egui::Rect::from_min_size(
+            rect.min + egui::vec2(10.0, 10.0),
+            egui::vec2(rect.width() - 20.0, 46.0),
+        );
+        painter.rect_filled(card, theme::radius(6), palette.panel);
+        painter.rect_stroke(
+            card,
+            theme::radius(6),
+            theme::stroke(palette.hair, 1.0),
+            egui::StrokeKind::Inside,
+        );
+        let bar = |at: egui::Vec2, w: f32, h: f32, color: egui::Color32| {
+            painter.rect_filled(
+                egui::Rect::from_min_size(card.min + at, egui::vec2(w, h)),
+                theme::radius(2),
+                color,
+            );
+        };
+        bar(
+            egui::vec2(12.0, 11.0),
+            card.width() * 0.42,
+            4.0,
+            palette.text,
+        );
+        bar(
+            egui::vec2(12.0, 21.0),
+            card.width() * 0.62,
+            3.0,
+            palette.muted,
+        );
+        bar(egui::vec2(12.0, 31.0), 22.0, 9.0, theme::ACCENT);
+        painter.text(
+            egui::pos2(rect.center().x, rect.max.y - 13.0),
+            egui::Align2::CENTER_CENTER,
+            scheme.name(),
+            egui::FontId::proportional(12.5),
+            if selected {
+                palette.text
+            } else {
+                palette.muted
+            },
+        );
+        if selected {
+            let check = egui::pos2(rect.max.x - 15.0, rect.max.y - 13.0);
+            painter.circle_filled(check, 7.0, theme::ACCENT);
+            let tick = theme::stroke(palette.paper, 1.6);
+            painter.line_segment(
+                [check + egui::vec2(-3.0, 0.2), check + egui::vec2(-0.8, 2.5)],
+                tick,
+            );
+            painter.line_segment(
+                [check + egui::vec2(-0.8, 2.5), check + egui::vec2(3.2, -2.3)],
+                tick,
+            );
+        }
+    }
+    theme::focus(ui, &resp);
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, scheme.name())
+    });
+    resp
+}
+
+/// The languages, one row each.
+fn languages(ui: &mut egui::Ui, app: &mut App) {
+    theme::field_label(ui, "Language");
+    ui.add_space(8.0);
+    let mut picked = None;
+    for lang in Lang::ALL {
+        let selected = app.prefs.lang == lang;
+        // The chosen one wears the same green a selected row does everywhere
+        // else; the rest keep an edge, so no language floats bare in the card.
+        let edge = if selected {
+            theme::ACCENT
+        } else {
+            theme::palette().hair
+        };
+        let mut row = egui::Button::new(RichText::new(lang.name()).color(theme::palette().text))
+            .stroke(theme::stroke(edge, 1.0));
+        if selected {
+            row = row.fill(theme::palette().accent_dim);
+        }
+        if ui
+            .add_sized(egui::vec2(ui.available_width(), 36.0), row)
+            .clicked()
+        {
+            picked = Some(lang);
+        }
+    }
+    let Some(lang) = picked else {
+        return;
+    };
+    app.prefs.lang = lang;
+    i18n::set(lang);
+    prefs::save(&app.prefs);
 }
 
 /// What the fingerprint card has to say about the box on screen.
@@ -797,9 +880,7 @@ impl Reader {
     }
 }
 
-/// The card's state, from the three facts it depends on. A pure function of them
-/// on purpose: the reader only exists on a phone, so this is the only way the
-/// branching is checkable anywhere.
+/// The card's state from the three facts it depends on; pure so the branching is testable.
 fn reader(available: bool, sealed: bool, wanted: bool) -> Reader {
     if !available {
         return Reader::None;
@@ -814,11 +895,8 @@ fn reader(available: bool, sealed: bool, wanted: bool) -> Reader {
     }
 }
 
-/// The fingerprint card: the switch, and what it cannot say by itself.
-///
-/// A desktop never paints it — there the master password is the only door and
-/// the switch would be dead. Android always does, so a phone whose reader the
-/// app may not use explains itself instead of hiding the switch without a word.
+/// The fingerprint card. A desktop never paints it (the master password is the only
+/// door); Android always does, and a reader it may not use explains itself.
 /// Whether a browser may open a box of its own. Separate from the bridge, which needs
 /// no switch: with the app open the extension uses the box this window has and never
 /// asks for a password. This is the other thing — a master password typed into a
@@ -981,6 +1059,28 @@ mod tests {
 
     fn page(w: f32, h: f32) -> Vec<egui::epaint::ClippedShape> {
         page_set(w, h, |_| {})
+    }
+
+    /// The app's own settings, as `general` paints them: a bare app with no box
+    /// open — which is the point of them — and the dialog switched on.
+    fn app_settings(size: (f32, f32)) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = App::blank(&ctx);
+        app.prefs_open = true;
+        // A dialog is an `Area`: egui lays it out on a first, invisible sizing
+        // pass and fades it in over the next few, so the frame read is one whose
+        // colours are the palette's own.
+        let mut shapes = Vec::new();
+        for _ in 0..12 {
+            let mut out = ctx.run_ui(shot::input(egui::vec2(size.0, size.1), Vec::new()), |ui| {
+                let ctx = ui.ctx().clone();
+                general(&ctx, &mut app)
+            });
+            out.textures_delta.clear();
+            shapes = out.shapes;
+        }
+        shapes
     }
 
     /// Every card on the page, in the order they are painted.
@@ -1306,6 +1406,71 @@ mod tests {
             assert_eq!(
                 words, more,
                 "the page shows the same words, in the same order, at {w} as at 1000"
+            );
+        }
+    }
+
+    /// The scheme and the language are read out of `prefs` before a box opens and
+    /// outlive every one of them: the box's page must not offer them, and the
+    /// app's own dialog must — with nothing unlocked.
+    #[test]
+    fn the_scheme_and_the_language_are_the_apps_not_the_boxs() {
+        let drawn = shot::words(&page(1000.0, TALL));
+        for gone in [
+            "APPEARANCE",
+            "LANGUAGE",
+            "Dark",
+            "Light",
+            "English",
+            "Español",
+        ] {
+            assert!(
+                !drawn.iter().any(|word| word == gone),
+                "{gone} is not the box's to set: {drawn:?}"
+            );
+        }
+
+        let shapes = app_settings((420.0, 620.0));
+        let drawn = shot::words(&shapes);
+        for want in [
+            "GENERAL SETTINGS",
+            "APPEARANCE",
+            "LANGUAGE",
+            "Dark",
+            "Light",
+            "English",
+            "Español",
+        ] {
+            assert!(
+                drawn.iter().any(|word| word == want),
+                "missing {want}: {drawn:?}"
+            );
+        }
+        // Each tile is painted in the scheme it offers, not the one in use: the
+        // preview is the choice, so a wrong palette is the one bug that would
+        // still read as a working switch.
+        for scheme in theme::Scheme::ALL {
+            let paper = theme::palette_of(scheme).paper;
+            assert!(
+                shapes
+                    .iter()
+                    .any(|s| matches!(&s.shape, egui::Shape::Rect(r)
+                    if r.fill == paper && r.rect.height() > 60.0)),
+                "no tile wears {scheme:?}'s own paper"
+            );
+        }
+        // A dialog does not scroll: it has to fit the window it is given.
+        for shape in &shapes {
+            let rect = shape.shape.visual_bounding_rect();
+            if !rect.min.is_finite() || !rect.max.is_finite() {
+                continue;
+            }
+            assert!(
+                rect.min.x >= -1.0
+                    && rect.max.x <= 421.0
+                    && rect.min.y >= -1.0
+                    && rect.max.y <= 621.0,
+                "the app's settings stay in their window: {rect:?}"
             );
         }
     }

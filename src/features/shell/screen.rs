@@ -56,9 +56,8 @@ pub fn main(ui: &mut Ui, app: &mut App) {
         );
     }
 
-    // A wide window keeps the panes on the strip under the bar; a narrow one hands
-    // them to the app's floor, where a thumb reaches them, and keeps only the
-    // content up here.
+    // A wide window keeps the panes on the strip under the bar; a narrow one hands them
+    // to the floor, where a thumb reaches them.
     if !crate::shared::ui::chrome::touch(&ctx) {
         tabs(ui, app);
     }
@@ -76,18 +75,14 @@ pub fn main(ui: &mut Ui, app: &mut App) {
         Tab::Settings => settings::run(ui, app, compact),
     }
 
-    // The entry's own generator: the same recipe the tool page edits, over the
-    // modal the drive pane opens an entry in.
+    // The entry's own generator, over the modal the drive opens it in.
     crate::features::generator::ui::modal(&ctx, app);
 
-    // Last, so the confirmation sits above the entry or folder modal it was
-    // opened from.
+    // Last, so the confirmation sits above the modal it was opened from.
     crate::features::shell::confirm::modal(&ctx, app);
 }
 
-/// The strip an error wears: the message and the way out of it. The row wraps,
-/// so a narrow window folds the actions under the message instead of running them
-/// past its edge — the message keeps its whole text either way.
+/// The strip an error wears: message and way out, wrapping in a narrow window.
 fn banner(ui: &mut Ui, id: &'static str, message: &'static str, actions: impl FnOnce(&mut Ui)) {
     egui::Panel::top(id)
         .frame(
@@ -110,15 +105,13 @@ fn banner(ui: &mut Ui, id: &'static str, message: &'static str, actions: impl Fn
         });
 }
 
-/// Height of the tab strip; tabs span it whole so their underline sits on the
-/// strip's bottom rule.
+/// Height of the tab strip; tabs span it so their underline sits on the bottom rule.
 const BAR: f32 = 44.0;
 const PAD: f32 = 14.0;
 const GAP: f32 = 10.0;
 
-/// Lock and settings act on the open box, so they live on its strip, not on the
-/// app's window bar. The strip is the wide window's: a narrow one puts the panes —
-/// and settings with them — at the app's floor and on the bar's own end.
+/// Lock and box settings act on the open box, so they live on its strip; a narrow
+/// window moves the panes and settings to the floor.
 fn tabs(ui: &mut Ui, app: &mut App) {
     let want = app
         .boxes
@@ -152,10 +145,9 @@ fn tabs(ui: &mut Ui, app: &mut App) {
                     }
                 }
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                    // mirrors the strip's left inset, so the far end is not flush
-                    // with the border
+                    // Mirrors the strip's left inset, so the far end is not flush with the border.
                     ui.add_space(12.0);
-                    // right to left: the lock is the rightmost, the gear beside it
+                    // Right to left: lock rightmost, gear beside it.
                     lock = bar_button(
                         ui,
                         &app.icons,
@@ -169,7 +161,7 @@ fn tabs(ui: &mut Ui, app: &mut App) {
                         &app.icons,
                         theme::Icon::Settings,
                         theme::palette().muted,
-                        "Settings",
+                        crate::shared::i18n::t("Box settings"),
                         want == Tab::Settings,
                     );
                 });
@@ -184,7 +176,7 @@ fn tabs(ui: &mut Ui, app: &mut App) {
     app.boxes.pane(picked);
 }
 
-/// Reserves the slot before its content, so the wash and the rule land behind it.
+/// Reserves the slot before its content, so wash and rule land behind it.
 fn slot(
     ui: &mut Ui,
     width: f32,
@@ -256,9 +248,7 @@ fn bar_button(
     resp.on_hover_text(tooltip).clicked()
 }
 
-/// The pane's own `+`. Three panes hold one record each and create it straight
-/// away; the drive holds two — a note and a file — so it is the only one that
-/// asks, and the file answer is the platform's own picker.
+/// The pane's own `+`: the drive holds note and file, so it is the one that asks.
 fn new_modal(ctx: &Context, app: &mut App) {
     if !app.boxes.session.as_ref().is_some_and(|s| s.show_new) {
         return;
@@ -325,8 +315,6 @@ mod shots {
         shot::png(ctx, name, w, h, held, |ui| main(ui, app));
     }
 
-    /// Centre of the first text run at or right of `min_x`, to tell a grid card
-    /// from the folder of the same name in the tree.
     fn center_of(shapes: &[egui::epaint::ClippedShape], text: &str, min_x: f32) -> Option<Pos2> {
         shapes.iter().find_map(|s| match &s.shape {
             Shape::Text(t) if t.galley.text() == text => {
@@ -337,16 +325,12 @@ mod shots {
         })
     }
 
-    /// The drive pane starts here; the folder tree ends here.
     const DRIVE_X: f32 = 240.0;
 
-    /// One row of the passwords pane: the 320 px it is given, its 16/14 insets,
-    /// and the 20 px the page keeps for its bar whether or not the bar is up.
     const ROW: f32 = 270.0;
 
-    /// Nothing may paint past the window's own width — the floor is 380pt
-    /// (`main.rs`). An empty shape (a reservation nothing filled, a no-op) paints
-    /// nothing and carries no bounds.
+    /// Nothing may paint past the window's own width (floor 380pt, `main.rs`); an empty
+    /// shape paints nothing and carries no bounds.
     fn fits_window(shapes: &[egui::epaint::ClippedShape], width: f32) {
         for s in shapes {
             let r = s.shape.visual_bounding_rect();
@@ -437,10 +421,8 @@ mod shots {
         app
     }
 
-    /// The body never widens the dialog it sits in. A row that runs past the band
-    /// the modal gives it — a picker as wide as its own text, a field's margin —
-    /// grows the modal's own box, and the cross the header laid on the gutter is
-    /// left short of it.
+    /// The body never widens the dialog it sits in: a row past the band grows the
+    /// modal's box and leaves the header cross short of it.
     #[test]
     fn the_entry_modal_keeps_the_width_it_was_given() {
         let ctx = egui::Context::default();
@@ -478,8 +460,7 @@ mod shots {
                 _ => None,
             })
             .expect("the entry modal is up");
-        // 520 of content and the frame's 20 px a side, plus the stroke the frame
-        // paints a pixel out on either side.
+        // 520 of content and the frame's 20 px a side, plus the stroke a pixel out either side.
         assert!(
             (panel.width() - 560.0).abs() < 3.0,
             "the body widened the dialog, so the header is off its own gutter: {panel:?}"
@@ -1405,6 +1386,16 @@ mod shots {
         theme::apply(&ctx);
         let mut app = demo(&ctx, Tab::Settings, None);
         shot(&ctx, "tabs-settings-compact", &mut app, 420, 780, None);
+
+        // The app's own settings, not the box's: no box is open behind the dialog.
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = App::blank(&ctx);
+        app.prefs_open = true;
+        shot::png(&ctx, "app-settings", 420, 520, None, |ui| {
+            let ctx = ui.ctx().clone();
+            crate::features::settings::ui::general(&ctx, &mut app);
+        });
 
         let ctx = egui::Context::default();
         theme::apply(&ctx);

@@ -10,6 +10,7 @@ pub enum Icon {
     LockKeyhole,
     LockKeyholeOpen,
     Settings,
+    Sliders,
     Search,
     Eye,
     EyeOff,
@@ -57,6 +58,7 @@ const ICON_FILES: &[(Icon, &str)] = &[
     (Icon::LockKeyhole, "lock-keyhole"),
     (Icon::LockKeyholeOpen, "lock-keyhole-open"),
     (Icon::Settings, "settings"),
+    (Icon::Sliders, "sliders-horizontal"),
     (Icon::Search, "search"),
     (Icon::Eye, "eye"),
     (Icon::EyeOff, "eye-off"),
@@ -99,9 +101,7 @@ const ICON_FILES: &[(Icon, &str)] = &[
     (Icon::Mute, "volume-x"),
 ];
 
-/// Side every [`Icons::button`] frames square under a pointer. A phone asks for
-/// [`responsive::target`] instead: a finger needs the whole 48, not the 28 a
-/// mouse aims at.
+/// 28 px under a pointer; a phone asks for [`responsive::target`] instead.
 pub const ICON: f32 = 28.0;
 
 pub struct Icons {
@@ -191,8 +191,7 @@ impl Icons {
         .tint(color)
     }
 
-    /// The response is returned whole so chrome that marks the button (the window
-    /// bar) can reach its rect.
+    /// The whole response, so chrome that marks the button (the window bar) reaches its rect.
     pub fn button(
         &self,
         ui: &mut egui::Ui,
@@ -213,21 +212,16 @@ impl Icons {
         tooltip: &str,
         side: f32,
     ) -> egui::Response {
-        // A finger lands on the whole square, so on a narrow screen neither the
-        // glyph nor the slot it sits in is allowed to stay pointer-sized. Every
-        // caller that drew a tighter mark keeps its own shape; it only grows.
+        // A finger gets the whole square; a tighter mark keeps its size and only grows.
         let size = responsive::grow(ui.ctx(), size);
         let side = responsive::grow_target(ui.ctx(), side);
         let Some(img) = self.image(icon, size, color) else {
             return ui.allocate_response(egui::Vec2::ZERO, egui::Sense::hover());
         };
-        // Whole pixels, or the button's own margin rounds up and every square
-        // comes out a pixel wider than `side`: the rows that give an icon its
-        // 28 px then run over what the dialog gave them.
+        // Whole pixels, or the margin rounds up and every square comes out a pixel
+        // wider than `side`, overflowing the row that gave it room.
         let pad = ((side - size) / 2.0).floor().max(0.0);
-        // The tooltip is the button's only text, so it is also what a screen
-        // reader has to announce: an icon-only button carries the name on the
-        // image's alt text.
+        // A screen reader announces the tooltip, so an icon-only button needs it as alt text.
         let img = if tooltip.is_empty() {
             img
         } else {
@@ -236,10 +230,8 @@ impl Icons {
         let mut resp = ui
             .allocate_ui_with_layout(
                 egui::vec2(side, side),
-                // egui aligns a button's content by the layout it is standing in, so
-                // a row that puts its buttons at the top also pinned their icons
-                // there. The square is fixed and the icon belongs in the middle of
-                // it, whatever the row asks for.
+                // egui aligns content by the ambient layout, so a row pinned to the top
+                // would pin the icon; the square is fixed and the icon stays centred.
                 egui::Layout::centered_and_justified(egui::Direction::TopDown),
                 |ui| {
                     ui.spacing_mut().button_padding = egui::vec2(pad, pad);
@@ -268,8 +260,7 @@ impl Icons {
         let mut atoms = egui::Atoms::new(
             RichText::new(crate::shared::i18n::text(text).into_owned()).color(color),
         );
-        // Only the glyph follows the phone's target: the button's own height is
-        // egui's to round, and `min_size` is what holds it open.
+        // Only the glyph follows the target; `min_size` holds the button's height open.
         let glyph = responsive::grow(ui.ctx(), size);
         if let Some(img) = self.image(icon, glyph, color) {
             atoms.push_left(img);
@@ -296,8 +287,8 @@ impl Icons {
     }
 }
 
-/// OS window and taskbar icon: the white mark already composited on the accent
-/// tile by `scripts/build-logo.sh` (a window manager cannot tint it).
+/// OS window and taskbar icon: the white mark already composited on the accent tile
+/// by `scripts/build-logo.sh`, because a window manager cannot tint it.
 pub fn window_icon() -> egui::IconData {
     let img = image::load_from_memory(include_bytes!("../../../assets/icon.png"))
         .expect("bundled app icon")
@@ -325,6 +316,7 @@ fn load_sprite(name: &str) -> Result<egui::ColorImage, image::ImageError> {
         "lock-keyhole" => include_bytes!("../../../assets/icons/lock-keyhole.png"),
         "lock-keyhole-open" => include_bytes!("../../../assets/icons/lock-keyhole-open.png"),
         "settings" => include_bytes!("../../../assets/icons/settings.png"),
+        "sliders-horizontal" => include_bytes!("../../../assets/icons/sliders-horizontal.png"),
         "search" => include_bytes!("../../../assets/icons/search.png"),
         "eye" => include_bytes!("../../../assets/icons/eye.png"),
         "eye-off" => include_bytes!("../../../assets/icons/eye-off.png"),
@@ -409,23 +401,8 @@ fn load_brand_sprite(slug: &str) -> Result<egui::ColorImage, image::ImageError> 
     decode(bytes)
 }
 
-/// Bytes of any supported image (png, jpeg, webp) → a texture, decoded
-/// once: the handle is kept in the frame cache under `id`, so a repaint re-uses
-/// it instead of decoding the image again. `None` for bytes that are not an
-/// image — a download that came back wrong, not a broken screen.
-pub fn texture(ctx: &egui::Context, id: egui::Id, bytes: &[u8]) -> Option<egui::TextureHandle> {
-    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
-        return Some(tex);
-    }
-    let image = decode(bytes).ok()?;
-    let tex = ctx.load_texture(format!("{id:?}"), image, egui::TextureOptions::LINEAR);
-    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
-    Some(tex)
-}
-
-/// A frame of live video → the same texture slot every time, so a picture that
-/// changes as often as it is drawn costs no allocation per frame. The pane draws
-/// it with [`live_frame`], which is the read half of this.
+/// A frame of live video reuses one texture slot, so a picture redrawn every frame
+/// costs no allocation.
 pub fn live_texture(
     ctx: &egui::Context,
     id: egui::Id,
