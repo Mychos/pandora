@@ -8,6 +8,7 @@ use crate::shared::i18n::{t, tf};
 use crate::vault::crypto::{self, MIN_PASSWORD_LEN};
 use crate::vault::model::Vault;
 use crate::vault::store::{self, Credentials};
+use crate::vault::Failure;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -286,11 +287,11 @@ impl App {
 
     /// Only a wrong password is a guess and costs an attempt; an unreadable box
     /// (a wrong path, a missing keyfile) does not. A missing keyfile now answers
-    /// with the same `WRONG` a bad password does — the box stopped saying which
-    /// one it needs — so it costs an attempt too, and the form says so by
+    /// with the same `Failure::Wrong` a bad password does — the box stopped saying
+    /// which one it needs — so it costs an attempt too, and the form says so by
     /// offering the keyfile field on every unlock.
     fn failed_unlock(&mut self, kind: OpKind, err: String) {
-        if kind != OpKind::Unlock || err != crypto::WRONG {
+        if kind != OpKind::Unlock || Failure::of(&err) != Some(Failure::Wrong) {
             self.shell.fail(err);
             return;
         }
@@ -299,11 +300,7 @@ impl App {
         prefs::save(&self.prefs);
         let max = self.prefs.max_attempts;
         let fails = self.prefs.tries.get(&key).map_or(0, |t| t.fails);
-        let err = if err == crypto::WRONG {
-            t("wrong master password or corrupt box").to_owned()
-        } else {
-            err
-        };
+        let err = t(Failure::Wrong.text()).to_owned();
         self.shell.fail(match (max, fails) {
             (0, _) => err,
             (_, 0) => tf("too many attempts — wait {wait} s", &[("wait", &wait)]),

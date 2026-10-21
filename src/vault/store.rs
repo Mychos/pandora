@@ -5,6 +5,7 @@ use crate::vault::container::{self, Kind, CHUNK, HEADER_BLOCK, MAGIC};
 use crate::vault::crypto::{self, KdfParams, Key};
 use crate::vault::model::{BlobRecord, ChunkRef, Deleted, Entry, File, Note, PendingFile, Vault};
 use crate::vault::reader::BoxReader;
+use crate::vault::Failure;
 use blake2::{Blake2b512, Digest as _};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -338,7 +339,7 @@ pub fn open(
             ));
         }
     }
-    Err(crypto::WRONG.to_owned())
+    Err(Failure::Wrong.to_string())
 }
 
 /// Open with a key derived earlier, for biometric unlock: no KDF runs, and the
@@ -902,7 +903,7 @@ pub fn adopt(
     };
     if floor.is_some_and(|floor| vault.seq < floor) {
         let _ = fs::remove_file(&candidate);
-        return Err(ROLLED_BACK.to_owned());
+        return Err(Failure::RolledBack.to_string());
     }
     let dir = parent_of(path);
     stash(path);
@@ -927,10 +928,6 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| format!("cannot finalize: {e}"))?;
     sync_dir(dir)
 }
-
-/// What a rewound copy is refused with; callers match on it to tell it apart from
-/// a copy that does not open.
-pub const ROLLED_BACK: &str = "the copy is older than this box";
 
 /// Keep the version a box is about to lose in one slot beside it, overwritten each
 /// time: a copy, not a link, and never a growing history.
@@ -1666,7 +1663,7 @@ mod tests {
         let refused = open(&p, "pw", None).err().expect("no keyfile, no key");
         assert_eq!(
             refused,
-            crypto::WRONG,
+            Failure::Wrong.to_string(),
             "the same words a wrong password gets: the box does not say"
         );
         assert!(open(&p, "pw", Some(b"other")).is_err());
@@ -1718,7 +1715,7 @@ mod tests {
 
         let refused =
             adopt(&p, &older, &creds, Some(vault.seq)).expect_err("a rewound copy is not taken");
-        assert_eq!(refused, ROLLED_BACK);
+        assert_eq!(refused, Failure::RolledBack.to_string());
         assert_eq!(load(&p, &creds).unwrap().seq, 3, "the box is untouched");
         assert!(
             !p.with_extension(format!("{EXT}.candidate")).exists(),

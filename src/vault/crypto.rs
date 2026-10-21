@@ -1,5 +1,6 @@
 //! Key derivation, authenticated encryption and the master-password policy; no egui.
 
+use crate::vault::Failure;
 use argon2::{Algorithm, Argon2, Params, Version};
 use blake2::{Blake2b512, Digest};
 use chacha20poly1305::{
@@ -101,9 +102,7 @@ pub fn encrypt_in_place(
     Ok(nonce.into())
 }
 
-/// Exact text the unlock limit matches to tell a wrong password from an unreadable box.
-pub const WRONG: &str = "wrong master password or corrupt box";
-
+/// The AEAD tag is the whole check: a failure is the same one a wrong password gives.
 pub fn decrypt(nonce: &[u8], ciphertext: &[u8], key: &Key, aad: &[u8]) -> Result<Vec<u8>, String> {
     let k: &[u8] = key.as_ref();
     let key = ChaChaKey::try_from(k).map_err(|_| String::from("bad key length"))?;
@@ -117,7 +116,7 @@ pub fn decrypt(nonce: &[u8], ciphertext: &[u8], key: &Key, aad: &[u8]) -> Result
                 aad,
             },
         )
-        .map_err(|_| String::from(WRONG))
+        .map_err(|_| Failure::Wrong.to_string())
 }
 
 pub const MIN_PASSWORD_LEN: usize = 12;

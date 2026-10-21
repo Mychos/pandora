@@ -7,6 +7,7 @@ use crate::features::sync::github::{self as sync, Fingerprint};
 use crate::features::sync::remember;
 use crate::shared::i18n::tf;
 use crate::vault::store;
+use crate::vault::Failure;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -1018,7 +1019,7 @@ impl App {
                         }
                         // Older than what is on screen (rewound, or raced a push): taking it
                         // would undo what happened since.
-                        Err(e) if e == store::ROLLED_BACK => {
+                        Err(e) if Failure::of(&e) == Some(Failure::RolledBack) => {
                             refused = true;
                             note = Some((
                                 "the repo copy is older than this box — nothing replaced"
