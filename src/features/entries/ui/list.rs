@@ -636,8 +636,7 @@ fn row(
         |ui| {
             record::glyph(ui, icons, Kind::Login, brand, 15.0);
             // The marks keep their own square, so the text gives up what they take.
-            let taken = 2.0 * responsive::target(ui.ctx()) + 2.0 * ui.spacing().item_spacing.x;
-            let w = (ui.available_width() - taken).max(0.0);
+            let w = record::width(ui, 2, 0.0);
             // An explicit height, or the row's cross alignment has nothing to centre.
             let name_h = ui.text_style_height(&egui::TextStyle::Body);
             let user_h = ui.text_style_height(&egui::TextStyle::Small);

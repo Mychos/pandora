@@ -3,7 +3,7 @@ mod icons;
 mod style;
 
 pub use brands::{brand_of, Brand, Pick};
-pub use icons::{kind_icon, live_frame, live_texture, texture, window_icon, Icon, Icons, ICON};
+pub use icons::{decode, kind_icon, live_frame, live_texture, window_icon, Icon, Icons, ICON};
 pub use style::*;
 
 #[cfg(test)]
@@ -33,8 +33,6 @@ mod tests {
             .collect();
         assert_eq!(order, ["label", "icon"]);
     }
-    /// A full-width button must centre its own label: a left-aligned ambient
-    /// layout (a settings column) would pin it to the edge.
     #[test]
     fn the_primary_button_centres_its_label() {
         let ctx = egui::Context::default();
@@ -72,9 +70,6 @@ mod tests {
             label.center(),
         );
     }
-    /// An icon button is a square with a picture in the middle of it, and the row
-    /// it stands in must not move the picture: `Align::Min` puts a row's buttons on
-    /// its first line and so pinned every icon to the same corner.
     #[test]
     fn an_icon_button_centres_its_icon_whatever_the_row_asks_for() {
         let ctx = egui::Context::default();
@@ -92,7 +87,7 @@ mod tests {
             out.textures_delta.clear();
             out.shapes
         };
-        draw(&ctx); // first frame of a fresh ctx: fonts are laid out lazily
+        draw(&ctx);
         let shapes = draw(&ctx);
         drop(draw);
 
@@ -111,10 +106,7 @@ mod tests {
             icon.center(),
         );
     }
-    /// The accent button must deepen on hover and again on press. It cannot come
-    /// from `Button::fill`, which pins every state to one colour, so the fills ride
-    /// the widget visuals. egui also reads a widget's state from the previous
-    /// frame's response, hence the third frame before a change shows up.
+    // egui reads a widget's state from the previous frame, hence the third frame before a change shows.
     #[test]
     fn the_primary_button_deepens_on_hover_and_press() {
         let ctx = egui::Context::default();
@@ -235,9 +227,8 @@ mod tests {
         );
     }
 
-    /// Holding the keyboard is not pressing: egui paints a focused widget with the
-    /// `active` visuals, so the safe answer of a dialog would wear the accent fill
-    /// and read as the primary action. It keeps its quiet fill instead.
+    /// Focused is not pressed: egui paints focus with the `active` visuals, so the
+    /// safe answer would wear the accent fill and read as the primary action.
     #[test]
     fn the_safe_answer_keeps_its_quiet_fill_while_focused() {
         let ctx = egui::Context::default();
@@ -259,7 +250,7 @@ mod tests {
             out.textures_delta.clear();
             out.shapes
         };
-        draw(&ctx); // first frame of a fresh ctx: fonts are laid out lazily
+        draw(&ctx);
         let shapes = draw(&ctx);
         drop(draw);
 
@@ -285,10 +276,7 @@ mod tests {
         );
     }
 
-    /// The two schemes are the same map with different values, and the text has to
-    /// stay readable on every surface either one paints. `text` and `muted` are the
-    /// ones the app writes in, so they are held to AA; `faint` is for hints and only
-    /// has to stay lighter than `muted` and darker than the surface behind it.
+    /// `text` and `muted` hold AA on every surface; `faint` is only for hints.
     #[test]
     fn both_schemes_keep_their_text_readable() {
         for scheme in Scheme::ALL {
@@ -315,8 +303,6 @@ mod tests {
         }
     }
 
-    /// The surfaces are ordered, not just different: a card sits on the page and a
-    /// field sits on the card.
     #[test]
     fn a_scheme_keeps_its_surfaces_apart() {
         for scheme in Scheme::ALL {
@@ -333,8 +319,6 @@ mod tests {
         }
     }
 
-    /// WCAG relative luminance, and the ratio between two colours: the test above
-    /// is only worth something if it measures the way the guideline does.
     fn contrast(a: Color32, b: Color32) -> f32 {
         fn luminance(c: Color32) -> f32 {
             fn channel(v: u8) -> f32 {
@@ -352,8 +336,6 @@ mod tests {
         (high + 0.05) / (low + 0.05)
     }
 
-    /// A scheme reaches egui's own widgets, not only the colours the app paints by
-    /// hand: the base visuals and the fills both come from the chosen one.
     #[test]
     fn a_scheme_reaches_the_widgets_it_did_not_paint() {
         let light = visuals(Scheme::Light);
@@ -367,8 +349,7 @@ mod tests {
         assert_eq!(dark.window_fill, palette_of(Scheme::Dark).panel);
     }
 
-    /// The accent hex is duplicated in `scripts/build-logo.sh` (the OS icon tile
-    /// is baked). Drifting breaks the icon.
+    /// The accent hex is duplicated in `scripts/build-logo.sh`; drifting breaks the icon.
     #[test]
     fn accent_hex_matches_the_logo_script() {
         let script = include_str!("../../../scripts/build-logo.sh");
@@ -379,8 +360,7 @@ mod tests {
         );
     }
 
-    /// A regenerated logo with the wrong shape stretches the mark in the window
-    /// bar and the auth hero.
+    /// A regenerated logo with another shape stretches the mark; 137x128 is the asset contract.
     #[test]
     fn logo_asset_has_the_expected_shape() {
         let logo = icons::decode(include_bytes!("../../../assets/logo.png")).unwrap();

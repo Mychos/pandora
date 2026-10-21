@@ -131,6 +131,11 @@ impl Audio {
 /// Coarse seeking keeps mp3 usable — it lacks a time base, which the accurate mode
 /// refuses. `ponytail: coarse seek rounds to the keyframe; switch to accurate if a
 /// sample-exact position ever matters`.
+///
+/// The decoder owns its input (`Read + Seek + 'static`), so this is one copy of
+/// the document. It is capped by the drive's 8 MiB ceiling and dropped with the
+/// player; sharing the vault's buffer would mean making `File.data` an `Arc`, a
+/// larger change for a few megabytes.
 fn decode(bytes: &[u8]) -> Result<rodio::Decoder<Cursor<Vec<u8>>>, String> {
     rodio::Decoder::builder()
         .with_data(Cursor::new(bytes.to_vec()))

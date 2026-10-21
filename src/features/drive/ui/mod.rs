@@ -877,7 +877,13 @@ fn grid(ui: &mut Ui, app: &mut App) {
             .filter(|i| {
                 q.is_empty()
                     || i.name().to_lowercase().contains(&q)
-                    || matches!(i, Entry::Note(n) if n.body.to_lowercase().contains(&q))
+                    || matches!(
+                        i,
+                        Entry::Note(n)
+                            if s.vault
+                                .note_text(n)
+                                .is_ok_and(|body| body.to_lowercase().contains(&q))
+                    )
             })
             .map(|i| {
                 // The icon already carries the kind, so only a document's own size
@@ -888,7 +894,7 @@ fn grid(ui: &mut Ui, app: &mut App) {
                 };
                 let icon = match &i {
                     Entry::Note(_) => theme::kind_icon(Kind::Note),
-                    Entry::File(f) => preview::icon(preview::kind(ui.ctx(), f)),
+                    Entry::File(f) => preview::icon(preview::kind(ui.ctx(), &s.vault, f)),
                 };
                 (
                     i.id().to_owned(),

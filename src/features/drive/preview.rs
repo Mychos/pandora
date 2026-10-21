@@ -7,39 +7,43 @@ use crate::features::drive::player::Audio;
 use crate::features::drive::ui::board::Board;
 use crate::shared::i18n::t;
 use crate::shared::theme;
-use crate::vault::model::File;
+use crate::vault::model::{File, Vault};
 use egui::{Align, Color32, Layout, RichText, Ui};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// The most text a preview lays out. egui re-lays a label every frame, and a
-/// multi-megabyte log is not a preview; the tail is what the download is for.
+/// 128 KiB: egui re-lays a label every frame, and the tail is what the download is for.
 const TEXT: usize = 128 * 1024;
-/// The largest sheet a PDF page is rasterized into. A texture lives in memory,
-/// so a generous zoom stops at this many pixels on the long side.
-const PIXELS: f32 = 4096.0;
-/// A re-render waits for the zoom to settle: dragging the wheel is a gesture,
-/// not a request for one page per notch.
+/// 8192 px: a PNG bomb is refused before the bitmap is allocated.
+const MAX_IMAGE_SIDE: u32 = 8192;
+/// 512 MiB is the most a picture decode may allocate, on top of the dimension cap.
+const MAX_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
+/// 2048 px is the side the board's texture keeps while the entry is on screen.
+const PREVIEW_SIDE: u32 = 2048;
+/// 64 MiB: images, PDFs and audio need one contiguous buffer, and the box itself has no
+/// file-size limit.
+const MAX_PREVIEW: u64 = 64 * 1024 * 1024;
+/// 2048 px on the long side: 2048² RGBA is 16 MiB, where 4096² was 64 MiB.
+const PIXELS: f32 = 2048.0;
+/// A re-render waits for the zoom to settle: the wheel is a gesture, not one page per notch.
 const SHARPEN: Duration = Duration::from_millis(300);
-/// How far the zoom may drift from the texture already on screen before the
-/// page is worth rasterizing again.
+/// How far the zoom may drift before the page is worth rasterizing again.
 const STALE: f32 = 1.3;
 const MAX_SCALE: f32 = 8.0;
-/// Below this the board's controls and its pagination stop sharing a line and
-/// the pages drop to a row of their own.
+/// Below this the pagination drops to a row of its own.
 const WIDE: f32 = 340.0;
 /// The page field, wide enough for four digits.
 const PAGE: f32 = 34.0;
 /// How far a skip button moves the playhead.
 const SKIP: f32 = 15.0;
-/// The seek bar's hit height: enough for a finger, slim enough to read as a rail.
+/// The seek bar's hit height: a finger's, still reading as a rail.
 const SEEK: f32 = 24.0;
-/// The height the transport row takes: the play control's own hit target, its
-/// 26 px glyph plus the 14 px `control` keeps around it. Taking the room it was
-/// offered instead made the player as tall as the modal that holds it.
+/// The transport row's height: the play control's 26 px glyph plus the 14 px `control`
+/// keeps; the offered room made the player as tall as the modal.
 const TRANSPORT: f32 = 26.0 + 14.0;
-/// A drag seeks once the pointer has been still this long. Seeking decodes from a
-/// keyframe, so firing one per frame stalls the UI while the pointer moves.
+/// A drag seeks once the pointer has been still this long: seeking decodes from a
+/// keyframe, so one per frame stalls the UI.
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -54,19 +58,27 @@ pub enum Kind {
     Other,
 }
 
-/// Everything a preview keeps between frames: the open player, the last rendered
-/// PDF page, and the image's board. All of it is dropped or reset the moment the
-/// selected entry changes.
+/// The picture and its texture, released when the entry leaves.
+struct Picture {
+    entry: String,
+    /// The byte length it was decoded from, so a box replaced under an open entry re-decodes.
+    bytes: usize,
+    texture: egui::TextureHandle,
+}
+
+/// What a preview keeps between frames: player, PDF page, board picture; dropped when
+/// the selected entry changes.
 pub struct Preview {
     audio: Option<Audio>,
     pdf: Option<Pdf>,
+    picture: Option<Picture>,
+    loaded: Option<Loaded>,
     image: Board,
     /// How far the pointer has dragged the seek bar, 0..=1, until it commits.
     scrub: Option<f32>,
     /// When the pending scrub is worth seeking to: the drag has gone quiet.
     due: Option<Instant>,
-    /// The session's volume, 0..=1, and whether it is silenced. Held here so it
-    /// survives moving to another track.
+    /// The session's volume, 0..=1, and whether it is muted; survives another track.
     level: f32,
     muted: bool,
 }
@@ -76,6 +88,8 @@ impl Default for Preview {
         Self {
             audio: None,
             pdf: None,
+            picture: None,
+            loaded: None,
             image: Board::default(),
             scrub: None,
             due: None,
@@ -103,15 +117,85 @@ impl Preview {
         {
             self.pdf = None;
         }
+        if self
+            .picture
+            .as_ref()
+            .is_some_and(|p| Some(p.entry.as_str()) != entry)
+        {
+            self.picture = None;
+        }
+        if self
+            .loaded
+            .as_ref()
+            .is_some_and(|loaded| Some(loaded.entry.as_str()) != entry)
+        {
+            self.loaded = None;
+        }
+    }
+
+    /// Loaded once per entry: text, code and classification use the prefix, images, PDFs
+    /// and audio load the whole document when it fits under [`MAX_PREVIEW`].
+    fn load(&mut self, vault: &Vault, file: &File) -> &Loaded {
+        if self
+            .loaded
+            .as_ref()
+            .is_some_and(|loaded| loaded.entry == file.id)
+        {
+            return self.loaded.as_ref().expect("just checked");
+        }
+        let prefix = vault.read_prefix(file, TEXT).unwrap_or_default();
+        let kind = classify(file, &prefix);
+        let too_large = matches!(kind, Kind::Image | Kind::Pdf | Kind::Audio)
+            && file.bytes() as u64 > MAX_PREVIEW;
+        let bytes: Arc<Vec<u8>> = if too_large {
+            Arc::new(Vec::<u8>::new())
+        } else if matches!(kind, Kind::Image | Kind::Pdf | Kind::Audio) {
+            vault
+                .read_file(file)
+                .map(|bytes| Arc::new(bytes.to_vec()))
+                .unwrap_or_else(|_| Arc::new(Vec::<u8>::new()))
+        } else {
+            Arc::new(prefix.to_vec())
+        };
+        self.loaded = Some(Loaded {
+            entry: file.id.clone(),
+            kind,
+            bytes,
+            too_large,
+        });
+        self.loaded.as_ref().expect("just set")
     }
 }
 
-pub fn show(ui: &mut Ui, state: &mut Preview, file: &File, room: f32, icons: &theme::Icons) {
-    match kind(ui.ctx(), file) {
-        Kind::Image => image(ui, state, file, room),
-        Kind::Text | Kind::Code => text(ui, file, room),
-        Kind::Pdf => pdf(ui, state, file, room),
-        Kind::Audio => audio(ui, state, file, icons),
+struct Loaded {
+    entry: String,
+    kind: Kind,
+    bytes: Arc<Vec<u8>>,
+    too_large: bool,
+}
+
+pub fn show(
+    ui: &mut Ui,
+    state: &mut Preview,
+    file: &File,
+    vault: &Vault,
+    room: f32,
+    icons: &theme::Icons,
+) {
+    let (kind, bytes, too_large) = {
+        let loaded = state.load(vault, file);
+        (loaded.kind, loaded.bytes.clone(), loaded.too_large)
+    };
+    if too_large {
+        ui.add_space(16.0);
+        ui.vertical_centered(|ui| theme::hint(ui, t("too large to preview — save it to open")));
+        return;
+    }
+    match kind {
+        Kind::Image => image(ui, state, file, &bytes, room),
+        Kind::Text | Kind::Code => text(ui, file, &bytes, room),
+        Kind::Pdf => pdf(ui, state, file, bytes, room),
+        Kind::Audio => audio(ui, state, file, &bytes, icons),
         Kind::Video => {
             ui.add_space(16.0);
             ui.vertical_centered(|ui| theme::hint(ui, t("no video preview — save it to play")));
@@ -123,23 +207,24 @@ pub fn show(ui: &mut Ui, state: &mut Preview, file: &File, room: f32, icons: &th
     }
 }
 
-pub fn kind(ctx: &egui::Context, file: &File) -> Kind {
-    // Classifying a file may scan its bytes, so it is worth exactly one look per
+pub fn kind(ctx: &egui::Context, vault: &Vault, file: &File) -> Kind {
+    // Classifying a file may scan its prefix, so it is worth exactly one look per
     // file version: the drive grid asks for every card on every frame.
-    let id = egui::Id::new(("file-kind", file.id.as_str(), file.bytes()));
+    let id = egui::Id::new(("file-kind", file.id.as_str(), file.bytes(), file.modified));
     if let Some(kind) = ctx.data(|d| d.get_temp::<Kind>(id)) {
         return kind;
     }
-    let kind = classify(file);
+    let prefix = vault.read_prefix(file, TEXT).unwrap_or_default();
+    let kind = classify(file, &prefix);
     ctx.data_mut(|d| d.insert_temp(id, kind));
     kind
 }
 
-fn classify(file: &File) -> Kind {
-    if is_image(&file.data) {
+fn classify(file: &File, data: &[u8]) -> Kind {
+    if is_image(data) {
         return Kind::Image;
     }
-    if file.data.starts_with(b"%PDF-") {
+    if data.starts_with(b"%PDF-") {
         return Kind::Pdf;
     }
     let ext = extension(&file.name);
@@ -155,7 +240,7 @@ fn classify(file: &File) -> Kind {
     if is_code(&ext) {
         return Kind::Code;
     }
-    if as_text(&file.data).is_some() {
+    if as_text(data).is_some() {
         return Kind::Text;
     }
     Kind::Other
@@ -300,37 +385,84 @@ fn as_text(data: &[u8]) -> Option<(&str, bool)> {
     Some((text, data.len() > text.len()))
 }
 
+/// Decode a document's picture with the limits a preview can afford, then fit
+/// it to the largest texture the board uploads. `None` for bytes that are not an
+/// image, or that exceed the dimensions a preview will decode.
+fn decode_image(bytes: &[u8]) -> Option<egui::ColorImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
+    limits.max_alloc = Some(MAX_IMAGE_BYTES);
+    reader.limits(limits);
+    let image = reader.decode().ok()?;
+    let image = if image.width().max(image.height()) > PREVIEW_SIDE {
+        image.thumbnail(PREVIEW_SIDE, PREVIEW_SIDE)
+    } else {
+        image
+    };
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [width as usize, height as usize],
+        rgba.as_raw(),
+    ))
+}
+
 /// A picture on its own board: wheel and pinch zoom at the gesture, a drag pans,
 /// and a double click goes back to fit or on to 1:1.
-fn image(ui: &mut Ui, state: &mut Preview, file: &File, room: f32) {
-    let Some(texture) = texture(ui.ctx(), file) else {
-        ui.add_space(16.0);
-        ui.vertical_centered(|ui| theme::hint(ui, t("no preview for this file")));
+fn image(ui: &mut Ui, state: &mut Preview, file: &File, bytes: &[u8], room: f32) {
+    let Preview {
+        picture,
+        image: board,
+        ..
+    } = state;
+    if picture
+        .as_ref()
+        .is_none_or(|p| p.entry != file.id || p.bytes != file.bytes())
+    {
+        *picture = decode_image(bytes).map(|image| Picture {
+            entry: file.id.clone(),
+            bytes: file.bytes(),
+            texture: ui.ctx().load_texture(
+                format!("preview-{}", file.id),
+                image,
+                egui::TextureOptions::LINEAR,
+            ),
+        });
+        if picture.is_none() {
+            ui.add_space(16.0);
+            ui.vertical_centered(|ui| theme::hint(ui, t("no preview for this file")));
+            return;
+        }
+    }
+    let Some(picture) = picture.as_ref() else {
         return;
     };
-    let natural = texture.size_vec2();
+    let natural = picture.texture.size_vec2();
     if natural.x <= 0.0 || natural.y <= 0.0 {
         return;
     }
 
     let before = ui.cursor().top();
-    ui.horizontal(|ui| zoom_row(ui, &mut state.image));
+    ui.horizontal(|ui| zoom_row(ui, board));
     let used = ui.cursor().top() - before;
 
     let key = egui::Id::new(("image", file.id.as_str()));
-    state
-        .image
-        .show(ui, key, &texture, natural, (room - used).max(1.0));
+    board.show(ui, key, &picture.texture, natural, (room - used).max(1.0));
 }
 
 /// Text is shown, not edited: a document is read-only, and the download is the
 /// way out of the box.
-fn text(ui: &mut Ui, file: &File, room: f32) {
-    let Some((body, truncated)) = as_text(&file.data) else {
+fn text(ui: &mut Ui, file: &File, bytes: &[u8], room: f32) {
+    let Some((body, truncated)) = as_text(bytes) else {
         ui.add_space(16.0);
         ui.vertical_centered(|ui| theme::hint(ui, t("no preview for this file")));
         return;
     };
+    let truncated = truncated || file.bytes() > bytes.len();
     let hint = if truncated { 20.0 } else { 0.0 };
     let height = (room - hint).max(32.0);
     let width = ui.available_width();
@@ -362,21 +494,19 @@ fn text(ui: &mut Ui, file: &File, room: f32) {
     }
 }
 
-fn pdf(ui: &mut Ui, state: &mut Preview, file: &File, room: f32) {
+fn pdf(ui: &mut Ui, state: &mut Preview, file: &File, bytes: Arc<Vec<u8>>, room: f32) {
     if state.pdf.as_ref().is_none_or(|p| p.entry != file.id) {
         state.pdf = Some(Pdf::new(file.id.clone()));
     }
     let Some(pdf) = state.pdf.as_mut() else {
         return;
     };
+    if pdf.bytes.is_none() {
+        pdf.bytes = Some(bytes);
+    }
     pdf.poll(ui.ctx());
-    if pdf.texture.is_none() && pdf.failed.is_none() && pdf.job.is_none() {
-        pdf.start(
-            file,
-            room,
-            ui.available_width(),
-            ui.ctx().pixels_per_point(),
-        );
+    if pdf.texture.is_none() && pdf.failed.is_none() && !pdf.busy {
+        pdf.start(room, ui.available_width(), ui.ctx().pixels_per_point());
     }
 
     let before = ui.cursor().top();
@@ -416,7 +546,7 @@ fn pdf(ui: &mut Ui, state: &mut Preview, file: &File, room: f32) {
         let natural = pdf.natural;
         let key = egui::Id::new(("pdf", pdf.entry.as_str(), pdf.page));
         let scale = pdf.board.show(ui, key, texture, natural, room);
-        pdf.sharpen(file, scale, ui.ctx());
+        pdf.sharpen(scale, ui.ctx());
     } else if let Some(e) = &pdf.failed {
         ui.add_space(16.0);
         ui.vertical_centered(|ui| theme::hint(ui, e));
@@ -515,6 +645,9 @@ enum Nav {
 /// only ever draws the page it already has.
 struct Pdf {
     entry: String,
+    /// The document's bytes, shared with the worker; loaded once when the entry
+    /// opens and dropped with the preview.
+    bytes: Option<Arc<Vec<u8>>>,
     page: usize,
     pages: usize,
     /// What the page field holds while the user is editing it.
@@ -528,12 +661,23 @@ struct Pdf {
     dirty: Option<Instant>,
     failed: Option<String>,
     board: Board,
-    job: Option<Job>,
+    worker: Option<Worker>,
+    /// A render is out; the next one waits for it, so a zoom gesture does not
+    /// queue a page per frame.
+    busy: bool,
 }
 
-struct Job {
+/// The thread that owns the parsed PDF and its render cache for as long as the
+/// entry is on screen. One thread per open document, not one per page: the cache
+/// is not `Send`, and re-parsing the file per page would copy it again.
+struct Worker {
+    tx: mpsc::Sender<Request>,
+    rx: mpsc::Receiver<(usize, Result<Rendered, String>)>,
+}
+
+struct Request {
     page: usize,
-    rx: mpsc::Receiver<Result<Rendered, String>>,
+    target: Target,
 }
 
 struct Rendered {
@@ -555,6 +699,7 @@ impl Pdf {
     fn new(entry: String) -> Self {
         Self {
             entry,
+            bytes: None,
             page: 0,
             pages: 0,
             page_input: "1".to_owned(),
@@ -565,26 +710,52 @@ impl Pdf {
             dirty: None,
             failed: None,
             board: Board::default(),
-            job: None,
+            worker: None,
+            busy: false,
         }
     }
 
-    fn start(&mut self, file: &File, room: f32, width: f32, density: f32) {
+    fn start(&mut self, room: f32, width: f32, density: f32) {
         let max = (
             (width * density).clamp(64.0, PIXELS) as u32,
             (room * density).clamp(64.0, PIXELS) as u32,
         );
-        self.job = Some(spawn(file, self.page, Target::Fit(max)));
+        self.ask(Target::Fit(max));
     }
 
-    fn start_at(&mut self, file: &File, scale: f32) {
-        self.job = Some(spawn(file, self.page, Target::Scale(scale)));
+    fn start_at(&mut self, scale: f32) {
+        self.ask(Target::Scale(scale));
+    }
+
+    /// Put one page in the document's worker. The worker is built on the first
+    /// request and lives until the preview drops it, so its cache covers every
+    /// page of the open document.
+    fn ask(&mut self, target: Target) {
+        let Some(bytes) = self.bytes.clone() else {
+            self.failed = Some(t("could not preview this file").to_owned());
+            return;
+        };
+        if self.worker.is_none() {
+            self.worker = Some(Worker::spawn(bytes));
+        }
+        let page = self.page;
+        let sent = self
+            .worker
+            .as_ref()
+            .is_some_and(|w| w.tx.send(Request { page, target }).is_ok());
+        if sent {
+            self.busy = true;
+            self.failed = None;
+        } else {
+            self.failed = Some(t("could not preview this file").to_owned());
+            self.worker = None;
+        }
     }
 
     /// Once the gesture settles, a page zoomed past its texture is rasterized
     /// again at the size the board is showing. The old texture stays up while it
     /// happens, so the page never blinks.
-    fn sharpen(&mut self, file: &File, scale: f32, ctx: &egui::Context) {
+    fn sharpen(&mut self, scale: f32, ctx: &egui::Context) {
         let wanted = scale * ctx.pixels_per_point();
         if wanted <= 0.0 || self.natural.x <= 0.0 {
             return;
@@ -606,34 +777,46 @@ impl Pdf {
             ctx.request_repaint_after(left);
             return;
         }
-        if self.job.is_none() {
-            self.start_at(file, self.wanted);
+        if !self.busy {
+            self.start_at(self.wanted);
             self.dirty = None;
         }
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
-        let Some(job) = self.job.take() else {
-            return;
+        let recv = match self.worker.as_mut() {
+            Some(worker) => worker.rx.try_recv(),
+            None => return,
         };
-        match job.rx.try_recv() {
-            Ok(Ok(rendered)) => {
+        match recv {
+            Ok((page, Ok(rendered))) if page == self.page => {
                 self.pages = rendered.pages;
                 self.natural = rendered.natural;
                 self.rendered = rendered.scale;
                 self.texture = Some(ctx.load_texture(
-                    format!("pdf-{}-{}", self.entry, job.page),
+                    format!("pdf-{}-{page}", self.entry),
                     rendered.image,
                     egui::TextureOptions::LINEAR,
                 ));
+                self.busy = false;
+                self.failed = None;
             }
-            Ok(Err(e)) => self.failed = Some(e),
+            Ok((page, Err(e))) if page == self.page => {
+                self.failed = Some(e);
+                self.busy = false;
+            }
+            Ok(_) => {
+                // An answer for a page the user has already left: the next
+                // frame asks for the page that is on screen.
+                self.busy = false;
+            }
             Err(mpsc::TryRecvError::Empty) => {
-                self.job = Some(job);
                 ctx.request_repaint_after(Duration::from_millis(80));
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.failed = Some(t("could not preview this file").to_owned());
+                self.worker = None;
+                self.busy = false;
             }
         }
     }
@@ -673,29 +856,49 @@ impl Pdf {
         self.dirty = None;
         self.failed = None;
         self.board.fit();
-        self.job = None;
+        // The worker stays: its cache covers the next page too. A render still
+        // out for the page just left lands as a stale answer and is ignored.
     }
 }
 
-fn spawn(file: &File, page: usize, target: Target) -> Job {
-    let bytes = file.data.to_vec();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(render(&bytes, page, target));
-    });
-    Job { page, rx }
+impl Worker {
+    fn spawn(bytes: Arc<Vec<u8>>) -> Self {
+        let (tx, requests) = mpsc::channel::<Request>();
+        let (results, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let pdf = match hayro::hayro_syntax::Pdf::new(bytes) {
+                Ok(pdf) => pdf,
+                // Dropping `results` is what tells the UI the document cannot be
+                // read; there is no page to report an error for.
+                Err(_) => return,
+            };
+            let cache = hayro::RenderCache::new();
+            while let Ok(request) = requests.recv() {
+                let rendered = render_page(&pdf, &cache, request.page, request.target);
+                if results.send((request.page, rendered)).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { tx, rx }
+    }
 }
 
-/// Rasterize one page. `WHITE` keeps the pixmap opaque, so its premultiplied
-/// buffer is also a plain RGBA one and egui can take it as is.
-fn render(bytes: &[u8], page: usize, target: Target) -> Result<Rendered, String> {
-    let pdf = hayro::hayro_syntax::Pdf::new(bytes.to_vec())
-        .map_err(|_| t("could not preview this file").to_owned())?;
-    let pages = pdf.pages().len();
-    if pages == 0 {
+/// Rasterize one page with the document's own cache. `WHITE` keeps the pixmap
+/// opaque, so its premultiplied buffer is also a plain RGBA one and egui can
+/// take it as is.
+fn render_page<'a>(
+    pdf: &'a hayro::hayro_syntax::Pdf,
+    cache: &hayro::RenderCache<'a>,
+    page: usize,
+    target: Target,
+) -> Result<Rendered, String> {
+    let pages = pdf.pages();
+    let count = pages.len();
+    if count == 0 {
         return Err(t("could not preview this file").to_owned());
     }
-    let page = &pdf.pages()[page.min(pages - 1)];
+    let page = &pages[page.min(count - 1)];
     let (width, height) = page.render_dimensions();
     let natural = egui::vec2(width, height);
     let mut scale = match target {
@@ -705,7 +908,7 @@ fn render(bytes: &[u8], page: usize, target: Target) -> Result<Rendered, String>
     scale = scale.min(PIXELS / width.max(height)).clamp(0.05, MAX_SCALE);
     let pixmap = hayro::render(
         page,
-        &hayro::RenderCache::new(),
+        cache,
         &hayro::hayro_interpret::InterpreterSettings::default(),
         &hayro::RenderSettings::default(),
         &hayro::PixmapSettings {
@@ -717,27 +920,28 @@ fn render(bytes: &[u8], page: usize, target: Target) -> Result<Rendered, String>
     let size = [pixmap.width() as usize, pixmap.height() as usize];
     let image = egui::ColorImage::from_rgba_unmultiplied(size, pixmap.data_as_u8_slice());
     Ok(Rendered {
-        pages,
+        pages: count,
         natural,
         scale,
         image,
     })
 }
 
-/// The decoded texture for a document, cached by the entry it belongs to:
-/// decoding on every repaint would be a decode per frame.
-fn texture(ctx: &egui::Context, file: &File) -> Option<egui::TextureHandle> {
-    let id = egui::Id::new(("file", file.id.as_str(), file.name.as_str(), file.bytes()));
-    theme::texture(ctx, id, &file.data)
+#[cfg(test)]
+fn render(bytes: Vec<u8>, page: usize, target: Target) -> Result<Rendered, String> {
+    let pdf = hayro::hayro_syntax::Pdf::new(bytes)
+        .map_err(|_| t("could not preview this file").to_owned())?;
+    let cache = hayro::RenderCache::new();
+    render_page(&pdf, &cache, page, target)
 }
 
-fn audio(ui: &mut Ui, state: &mut Preview, file: &File, icons: &theme::Icons) {
+fn audio(ui: &mut Ui, state: &mut Preview, file: &File, bytes: &[u8], icons: &theme::Icons) {
     if state.audio.as_ref().is_none_or(|a| a.entry != file.id) {
         state.scrub = None;
         state.due = None;
         state.audio = Some(Audio::open(
             file.id.clone(),
-            &file.data,
+            bytes,
             state.level,
             state.muted,
         ));
@@ -916,16 +1120,16 @@ fn audio(ui: &mut Ui, state: &mut Preview, file: &File, icons: &theme::Icons) {
         if ended {
             // The queue is drained: queueing it again is what starts it over, and
             // it keeps the same device instead of opening a second one.
-            audio.seek(&file.data, Duration::ZERO);
+            audio.seek(bytes, Duration::ZERO);
         } else {
             audio.toggle();
         }
     }
     if let Some(to) = seek {
-        audio.seek(&file.data, to);
+        audio.seek(bytes, to);
     }
     if skip != 0.0 {
-        audio.skip(&file.data, skip);
+        audio.skip(bytes, skip);
     }
     if playing {
         ui.ctx().request_repaint_after(Duration::from_millis(200));
@@ -1064,19 +1268,23 @@ mod tests {
         File::new(name.to_owned(), data.to_vec(), 0)
     }
 
+    fn kind(name: &str, data: &[u8]) -> Kind {
+        classify(&file(name, data), data)
+    }
+
     #[test]
     fn the_type_comes_from_the_bytes_not_the_name() {
         let png = include_bytes!("../../../assets/icon.png");
-        assert_eq!(classify(&file("report.pdf", png)), Kind::Image);
-        assert_eq!(classify(&file("shot", png)), Kind::Image);
-        assert_eq!(classify(&file("letter.pdf", b"%PDF-1.7\n...")), Kind::Pdf);
-        assert_eq!(classify(&file("notes.txt", b"hello\nworld")), Kind::Text);
-        assert_eq!(classify(&file("no-extension", b"plain text")), Kind::Text);
-        assert_eq!(classify(&file("binary", &[0, 1, 2, 3])), Kind::Other);
-        assert_eq!(classify(&file("song.mp3", b"ID3")), Kind::Audio);
-        assert_eq!(classify(&file("clip.MP4", b"...")), Kind::Video);
-        assert_eq!(classify(&file("backup.zip", b"PK...")), Kind::Archive);
-        assert_eq!(classify(&file("main.rs", b"fn main() {}")), Kind::Code);
+        assert_eq!(kind("report.pdf", png), Kind::Image);
+        assert_eq!(kind("shot", png), Kind::Image);
+        assert_eq!(kind("letter.pdf", b"%PDF-1.7\n..."), Kind::Pdf);
+        assert_eq!(kind("notes.txt", b"hello\nworld"), Kind::Text);
+        assert_eq!(kind("no-extension", b"plain text"), Kind::Text);
+        assert_eq!(kind("binary", &[0, 1, 2, 3]), Kind::Other);
+        assert_eq!(kind("song.mp3", b"ID3"), Kind::Audio);
+        assert_eq!(kind("clip.MP4", b"..."), Kind::Video);
+        assert_eq!(kind("backup.zip", b"PK..."), Kind::Archive);
+        assert_eq!(kind("main.rs", b"fn main() {}"), Kind::Code);
     }
 
     /// Every type the row can name wears a glyph of its own; plain text and a PDF
@@ -1140,6 +1348,7 @@ mod tests {
         theme::apply(&ctx);
         let icons = theme::Icons::load(&ctx);
         let song = file("song.mp3", b"ID3");
+        let vault = Vault::new("test");
         let mut state = Preview {
             audio: Some(Audio::detached(
                 song.id.clone(),
@@ -1149,7 +1358,7 @@ mod tests {
         };
         let mut draw = || {
             crate::shared::ui::shot::frame(&ctx, egui::vec2(600.0, 300.0), Vec::new(), |ui| {
-                show(ui, &mut state, &song, 260.0, &icons)
+                show(ui, &mut state, &song, &vault, 260.0, &icons)
             })
         };
         draw();
@@ -1171,6 +1380,7 @@ mod tests {
         theme::apply(&ctx);
         let icons = theme::Icons::load(&ctx);
         let song = file("song.mp3", b"ID3");
+        let vault = Vault::new("test");
         let mut state = Preview {
             audio: Some(Audio::detached(
                 song.id.clone(),
@@ -1180,7 +1390,7 @@ mod tests {
         };
         let shapes =
             crate::shared::ui::shot::frame(&ctx, egui::vec2(600.0, 600.0), Vec::new(), |ui| {
-                show(ui, &mut state, &song, 520.0, &icons)
+                show(ui, &mut state, &song, &vault, 520.0, &icons)
             });
         let player = shapes
             .iter()
@@ -1238,20 +1448,135 @@ mod tests {
         );
     }
 
-    /// The modal repaints ~60x/s, so the texture must be reused across frames.
+    /// A preview owns its picture: a repaint reuses the texture, another entry
+    /// replaces it, and leaving the entry frees it. The old frame-cache version
+    /// kept every image ever opened until the box locked.
     #[test]
-    fn an_image_decodes_once_and_is_cached() {
+    fn an_image_preview_keeps_only_the_picture_on_screen() {
         let ctx = egui::Context::default();
+        theme::apply(&ctx);
         let png = include_bytes!("../../../assets/icon.png");
-        let shot = file("shot.png", png);
-        let first = texture(&ctx, &shot).unwrap();
-        let again = texture(&ctx, &shot).unwrap();
-        assert_eq!(first.id(), again.id(), "the same entry reuses its texture");
-        let other = file("other.png", png);
+        let one = file("one.png", png);
+        let two = file("two.png", png);
+        let mut state = Preview::default();
+
+        let paint = |ctx: &egui::Context, state: &mut Preview, file: &File| {
+            crate::shared::ui::shot::frame(ctx, egui::vec2(800.0, 600.0), Vec::new(), |ui| {
+                image(ui, state, file, png, 500.0);
+            });
+        };
+
+        paint(&ctx, &mut state, &one);
+        let base = ctx.tex_manager().read().num_allocated();
+        let first = state
+            .picture
+            .as_ref()
+            .expect("the picture is on screen")
+            .texture
+            .id();
+        assert_eq!(
+            state.picture.as_ref().unwrap().entry,
+            one.id,
+            "the texture belongs to the entry on screen"
+        );
+
+        paint(&ctx, &mut state, &one);
+        assert_eq!(
+            ctx.tex_manager().read().num_allocated(),
+            base,
+            "a repaint reuses the texture"
+        );
+        assert_eq!(
+            state.picture.as_ref().unwrap().texture.id(),
+            first,
+            "the same entry keeps its texture"
+        );
+
+        paint(&ctx, &mut state, &two);
+        assert_eq!(
+            ctx.tex_manager().read().num_allocated(),
+            base,
+            "the previous picture is released, not cached"
+        );
         assert_ne!(
-            first.id(),
-            texture(&ctx, &other).unwrap().id(),
-            "one texture per entry"
+            state.picture.as_ref().unwrap().texture.id(),
+            first,
+            "another entry gets its own texture"
+        );
+
+        state.sync(None);
+        assert!(
+            state.picture.is_none(),
+            "leaving the entry drops the picture"
+        );
+        assert_eq!(
+            ctx.tex_manager().read().num_allocated(),
+            base - 1,
+            "the texture is freed, not left in the frame cache"
+        );
+    }
+
+    /// Browsing many images must not grow the texture manager: each one
+    /// replaces the last, and closing the preview frees the one left.
+    #[test]
+    fn browsing_many_images_keeps_one_texture() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let png = include_bytes!("../../../assets/icon.png");
+        let mut state = Preview::default();
+        let paint = |ctx: &egui::Context, state: &mut Preview, file: &File| {
+            crate::shared::ui::shot::frame(ctx, egui::vec2(800.0, 600.0), Vec::new(), |ui| {
+                image(ui, state, file, png, 500.0);
+            });
+        };
+
+        let first = file("browse-0.png", png);
+        paint(&ctx, &mut state, &first);
+        let base = ctx.tex_manager().read().num_allocated();
+        for i in 1..10 {
+            let next = file(&format!("browse-{i}.png"), png);
+            paint(&ctx, &mut state, &next);
+            assert_eq!(
+                ctx.tex_manager().read().num_allocated(),
+                base,
+                "image {i} left its texture behind"
+            );
+        }
+
+        state.sync(None);
+        assert_eq!(
+            ctx.tex_manager().read().num_allocated(),
+            base - 1,
+            "closing the preview frees the last texture"
+        );
+    }
+
+    /// A picture larger than the texture cap is fitted to it, and one past the
+    /// decode cap is refused before it can allocate the bitmap.
+    #[test]
+    fn a_large_picture_is_fitted_and_a_bomb_is_refused() {
+        let encode = |w: u32, h: u32| {
+            let image = image::RgbImage::from_pixel(w, h, image::Rgb([12, 34, 56]));
+            let mut png = Vec::new();
+            image::DynamicImage::ImageRgb8(image)
+                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .expect("encode png");
+            png
+        };
+
+        let wide = decode_image(&encode(3000, 1000)).expect("a 3000 px picture decodes");
+        assert_eq!(wide.size[0], PREVIEW_SIDE as usize);
+        assert!(wide.size[1] <= PREVIEW_SIDE as usize);
+        assert!(
+            (wide.size[1] as i32 - 683).abs() <= 1,
+            "the aspect ratio is kept: {:?}",
+            wide.size
+        );
+
+        let bomb = encode(MAX_IMAGE_SIDE + 1, 1);
+        assert!(
+            decode_image(&bomb).is_none(),
+            "a picture past the decode cap is refused"
         );
     }
 
@@ -1278,15 +1603,46 @@ mod tests {
     #[test]
     fn a_pdf_page_renders_to_pixels() {
         let pdf = include_bytes!("../../../tests/preview.pdf");
-        let out = render(pdf, 0, Target::Fit((200, 100))).expect("the fixture renders");
+        let out = render(pdf.to_vec(), 0, Target::Fit((200, 100))).expect("the fixture renders");
         assert_eq!(out.pages, 1);
         assert_eq!(out.natural, egui::vec2(200.0, 100.0));
         assert!((out.scale - 1.0).abs() < 0.01, "{}", out.scale);
         assert_eq!(out.image.size, [200, 100]);
+
+        let sharp = render(pdf.to_vec(), 0, Target::Scale(100.0)).expect("the fixture renders");
+        assert!(
+            sharp.image.size[0] <= PIXELS as usize && sharp.image.size[1] <= PIXELS as usize,
+            "a zoom target past the cap stays under {PIXELS} px: {:?}",
+            sharp.image.size
+        );
     }
 
     #[test]
     fn a_broken_pdf_reports_instead_of_panicking() {
-        assert!(render(b"%PDF-1.7\nbroken", 0, Target::Fit((100, 100))).is_err());
+        assert!(render(b"%PDF-1.7\nbroken".to_vec(), 0, Target::Fit((100, 100))).is_err());
+    }
+
+    /// The UI path, not just the rasterizer: the document's own worker parses the
+    /// file once, renders the page and stays alive for the next one.
+    #[test]
+    fn a_pdf_preview_renders_through_its_worker() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let doc = file("doc.pdf", include_bytes!("../../../tests/preview.pdf"));
+        let mut state = Preview::default();
+
+        for _ in 0..200 {
+            crate::shared::ui::shot::frame(&ctx, egui::vec2(800.0, 600.0), Vec::new(), |ui| {
+                pdf(ui, &mut state, &doc, Arc::new(doc.data.to_vec()), 500.0);
+            });
+            if state.pdf.as_ref().is_some_and(|it| it.texture.is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let open = state.pdf.as_ref().expect("a PDF preview is open");
+        assert!(open.texture.is_some(), "the worker rendered the page");
+        assert!(open.worker.is_some(), "the worker stays for the next page");
     }
 }

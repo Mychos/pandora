@@ -225,10 +225,6 @@ fn shift<T>(
     true
 }
 
-/// A file this app pulls into memory as a document. No mirror carries a box
-/// anywhere near this, and an unbounded read is one stray drop away from an OOM.
-const MAX_FILE: u64 = 8 * 1024 * 1024;
-
 impl App {
     /// Attach files dropped on the window; the accessible path is [`Boxes::pick_files`].
     pub fn handle_dropped(&mut self, ctx: &egui::Context) {
@@ -241,20 +237,32 @@ impl App {
         if drops.is_empty() {
             return;
         }
-        let mut loaded: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut loaded: Vec<File> = Vec::new();
+        let now = now_secs();
         for d in drops {
             let name = file_name(d.path());
-            // A file dropped on the desktop carries an absolute path, and asking
-            // its size first is what keeps a huge one out of memory. The web only
-            // hands over bytes, so those are checked on the way in.
-            let read = if d.path().is_absolute() {
-                read_file(d.path())
+            // A drop on the desktop keeps the user's file where it is and only
+            // remembers its path; the bytes are read when the box is saved. The
+            // web hands over bytes instead, which are already ours.
+            if d.path().is_absolute() {
+                match fs::metadata(d.path()) {
+                    Ok(meta) => loaded.push(File::new_pending(
+                        name,
+                        d.path().to_path_buf(),
+                        meta.len(),
+                        false,
+                        now,
+                    )),
+                    Err(e) => self.shell.fail(tf(
+                        "could not read {name}: {error}",
+                        &[("name", &name), ("error", &e)],
+                    )),
+                }
             } else {
-                d.bytes().map_err(|e| e.to_string()).and_then(under_limit)
-            };
-            match read {
-                Ok(b) => loaded.push((name, b)),
-                Err(e) => self.shell.fail(e),
+                match d.bytes() {
+                    Ok(bytes) => loaded.push(File::new(name, bytes, now)),
+                    Err(e) => self.shell.fail(e.to_string()),
+                }
             }
         }
         if loaded.is_empty() {
@@ -311,12 +319,16 @@ impl Boxes {
         let Some(paths) = rfd::FileDialog::new().pick_files() else {
             return;
         };
-        let mut loaded: Vec<(String, Vec<u8>)> = Vec::new();
+        let now = now_secs();
+        let mut loaded: Vec<File> = Vec::new();
         for p in paths {
             let name = file_name(&p);
-            match read_file(&p) {
-                Ok(b) => loaded.push((name, b)),
-                Err(e) => shell.fail(e),
+            match fs::metadata(&p) {
+                Ok(meta) => loaded.push(File::new_pending(name, p, meta.len(), false, now)),
+                Err(e) => shell.fail(tf(
+                    "could not read {name}: {error}",
+                    &[("name", &name), ("error", &e)],
+                )),
             }
         }
         if !loaded.is_empty() {
@@ -329,31 +341,45 @@ impl Boxes {
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     fn land_copy(&mut self, path: &std::path::Path, shell: &mut Shell) {
         let name = file_name(path);
-        let read = read_file(path);
-        // The copy is ours whatever happened: the file the user picked is theirs,
-        // and it was never touched.
-        let _ = fs::remove_file(path);
-        match read {
-            Ok(bytes) => {
-                self.add_files(vec![(name, bytes)], self.target_folder().flatten(), shell);
+        let size = match fs::metadata(path) {
+            Ok(meta) => meta.len(),
+            Err(e) => {
+                let _ = fs::remove_file(path);
+                return shell.fail(tf(
+                    "could not read {name}: {error}",
+                    &[("name", &name), ("error", &e)],
+                ));
             }
-            Err(e) => shell.fail(e),
+        };
+        // The picker copy is ours: move it out of the picker's temporary spot
+        // and keep it until the save has written its chunks. The user's own file
+        // is never touched.
+        let staging = store::data_dir().join("staging");
+        if let Err(e) = fs::create_dir_all(&staging) {
+            let _ = fs::remove_file(path);
+            return shell.fail(e.to_string());
         }
+        let staged = staging.join(format!("pandora-{}.pending", uuid::Uuid::new_v4()));
+        let moved = fs::rename(path, &staged)
+            .or_else(|_| fs::copy(path, &staged).and_then(|_| fs::remove_file(path)));
+        if let Err(e) = moved {
+            let _ = fs::remove_file(&staged);
+            let _ = fs::remove_file(path);
+            return shell.fail(e.to_string());
+        }
+        self.add_files(
+            vec![File::new_pending(name, staged, size, true, now_secs())],
+            self.target_folder().flatten(),
+            shell,
+        );
     }
 
-    fn add_files(
-        &mut self,
-        loaded: Vec<(String, Vec<u8>)>,
-        folder: Option<String>,
-        shell: &mut Shell,
-    ) {
+    fn add_files(&mut self, loaded: Vec<File>, folder: Option<String>, shell: &mut Shell) {
         let Some(s) = self.session.as_mut() else {
             return;
         };
-        let now = now_secs();
         let count = loaded.len();
-        for (name, data) in loaded {
-            let mut it = File::new(name, data, now);
+        for mut it in loaded {
             it.folder = folder.clone();
             s.vault.drive.push(Entry::File(it));
         }
@@ -387,7 +413,10 @@ impl Boxes {
             if let Some(parent) = out.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            store::write_private(&out, it.data.as_slice())?;
+            let mut file = store::private_sink(&out)?;
+            s.vault.copy_file_to(it, &mut file)?;
+            file.sync_all()
+                .map_err(|e| format!("cannot write {out:?}: {e}"))?;
             Ok(out)
         })();
         match ok {
@@ -404,48 +433,6 @@ fn file_name(path: &std::path::Path) -> String {
     path.file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".to_owned())
-}
-
-/// Read a file, refusing one bigger than a box carries. The size is asked
-/// for before the bytes, so a huge file never lands in memory in the first place.
-fn read_file(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    let name = file_name(path);
-    let len = fs::metadata(path)
-        .map_err(|e| {
-            tf(
-                "could not read {name}: {error}",
-                &[("name", &name), ("error", &e)],
-            )
-        })?
-        .len();
-    if len > MAX_FILE {
-        return Err(too_big(&name, len));
-    }
-    fs::read(path).map_err(|e| {
-        tf(
-            "could not read {name}: {error}",
-            &[("name", &name), ("error", &e)],
-        )
-    })
-}
-
-/// The same ceiling for bytes that already arrived, with no path to check first.
-fn under_limit(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
-    if bytes.len() as u64 > MAX_FILE {
-        return Err(too_big("that file", bytes.len() as u64));
-    }
-    Ok(bytes)
-}
-
-fn too_big(name: &str, len: u64) -> String {
-    tf(
-        "{name} is {size} — more than a box carries ({max})",
-        &[
-            ("name", &name),
-            ("size", &store::human_size(len as usize)),
-            ("max", &store::human_size(MAX_FILE as usize)),
-        ],
-    )
 }
 
 #[cfg(test)]
@@ -546,8 +533,22 @@ mod tests {
             panic!("the copy became a file: {:?}", v.drive);
         };
         assert_eq!(file.name, "pandora-picked-copy");
-        assert_eq!(file.data.as_slice(), b"document");
+        let pending = file.pending.as_ref().expect("the copy waits for the save");
+        assert!(pending.owned, "the staged copy belongs to the app");
+        let staged = pending.path.clone();
+        assert_eq!(
+            v.read_file(file).unwrap().as_slice(),
+            b"document",
+            "the box can read the pending copy"
+        );
         assert!(!p.exists(), "the picker's copy is gone");
+        assert!(staged.exists(), "the staged copy waits for the save");
+
+        app.boxes.persist(&mut app.shell);
+        assert!(
+            !staged.exists(),
+            "the staging copy is removed after the save"
+        );
     }
 
     /// A drag reorders within one parent; next to a stranger or itself, nothing moves.
@@ -575,24 +576,5 @@ mod tests {
             ["b", "c", "a", "d"],
             "a refused move changes nothing"
         );
-    }
-
-    /// The guard is asked before the read, so the file never lands in memory.
-    #[test]
-    fn a_file_over_the_ceiling_is_refused_not_read() {
-        let p = std::env::temp_dir().join("pandora-huge-file");
-        std::fs::write(&p, vec![0u8; (MAX_FILE + 1) as usize]).unwrap();
-
-        let err = read_file(&p).unwrap_err();
-        assert!(err.contains("more than a box carries"), "{err}");
-        assert!(under_limit(vec![0u8; 4]).is_ok());
-        assert!(under_limit(vec![0u8; (MAX_FILE + 1) as usize]).is_err());
-
-        let small = std::env::temp_dir().join("pandora-small-file");
-        std::fs::write(&small, b"hello").unwrap();
-        assert_eq!(read_file(&small).unwrap(), b"hello");
-
-        let _ = fs::remove_file(p);
-        let _ = fs::remove_file(small);
     }
 }

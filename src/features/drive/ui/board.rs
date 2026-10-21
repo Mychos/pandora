@@ -346,7 +346,8 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let png = include_bytes!("../../../../assets/icon.png");
-        let texture = theme::texture(&ctx, egui::Id::new("wheel-test"), png).unwrap();
+        let image = theme::decode(png).unwrap();
+        let texture = ctx.load_texture("wheel-test", image, egui::TextureOptions::LINEAR);
         let mut b = Board::default();
         let size = egui::vec2(400.0, 300.0);
         let over = egui::pos2(200.0, 150.0);
