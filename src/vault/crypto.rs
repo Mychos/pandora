@@ -66,8 +66,28 @@ pub fn derive_key(secret: &[u8], salt: &[u8], params: &KdfParams) -> Result<Key,
 /// 128 bits of BLAKE2b in hex: a label for something whose real name must not be
 /// written down, not a key.
 pub fn digest(bytes: &[u8]) -> String {
-    let full = Blake2b512::digest(bytes);
-    full[..16].iter().map(|b| format!("{b:02x}")).collect()
+    let mut hasher = Hasher::new();
+    hasher.update(bytes);
+    hasher.finish()
+}
+
+/// The same digest, fed a piece at a time: a file is named without holding it all.
+#[derive(Default)]
+pub struct Hasher(Blake2b512);
+
+impl Hasher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    pub fn finish(self) -> String {
+        let full = self.0.finalize();
+        full[..16].iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
 
 /// `aad` is authenticated, not encrypted: the vault binds its header and chunks this way.
@@ -249,6 +269,17 @@ mod tests {
         assert!(one.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(!one.contains("divorce") && !one.contains("home"));
         assert_ne!(one, digest(b"/home/ana/Documents/work.pandora"));
+    }
+
+    /// A file is named while it streams past, so the pieces must add up to the
+    /// same digest as the whole.
+    #[test]
+    fn a_streamed_digest_matches_the_whole_one() {
+        let whole = b"the first piece and the second piece";
+        let mut hasher = Hasher::new();
+        hasher.update(&whole[..18]);
+        hasher.update(&whole[18..]);
+        assert_eq!(hasher.finish(), digest(whole));
     }
 
     #[test]

@@ -6,7 +6,6 @@ use crate::vault::crypto::{self, KdfParams, Key};
 use crate::vault::model::{BlobRecord, ChunkRef, Deleted, Entry, File, Note, PendingFile, Vault};
 use crate::vault::reader::BoxReader;
 use crate::vault::Failure;
-use blake2::{Blake2b512, Digest as _};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -422,14 +421,6 @@ fn note_mut<'a>(vault: &'a mut Vault, id: &str) -> Option<&'a mut Note> {
         })
 }
 
-fn digest_hex(hasher: Blake2b512) -> String {
-    let digest = hasher.finalize();
-    digest[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn chunk_count(size: u64) -> Result<u32, String> {
     if size == 0 {
         return Ok(0);
@@ -515,7 +506,7 @@ fn write_blob_from_path(
         .map_err(|e| format!("cannot read {path:?}: {e}"))?
         .len();
     let count = chunk_count(size)?;
-    let mut hasher = Blake2b512::new();
+    let mut hasher = crypto::Hasher::new();
     let mut input = fs::File::open(path).map_err(|e| format!("cannot read {path:?}: {e}"))?;
     let mut chunks = Vec::with_capacity(count as usize);
     for index in 0..count {
@@ -532,7 +523,7 @@ fn write_blob_from_path(
     }
     Ok(BlobRecord {
         size,
-        digest: digest_hex(hasher),
+        digest: hasher.finish(),
         chunks,
     })
 }
