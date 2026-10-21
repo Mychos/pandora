@@ -204,12 +204,12 @@ opt-level = "s"
 # in `lib.rs` still logs before the abort, which is the whole diagnosis a phone
 # gets. The desktop reaps the same numbers.
 panic = "abort"
-# `thin` y no `fat`: con `codegen-units = 1` los dos hacen la misma
-# optimización entre crates, y `fat` sale 3,5 KB *más grande* en el APK
-# (8.211.624 contra 8.208.068). El viejo temor — que contra el clang del NDK
-# `fat` dejara el `.symtab` puesto — no se reproduce: con `strip = true`,
-# `llvm-nm` responde "no symbols" y pasarle un `llvm-strip --strip-unneeded`
-# después no cambia un byte. `thin` se queda por peso, no por miedo.
+# `thin` and not `fat`: with `codegen-units = 1` both do the same cross-crate
+# optimization, and `fat` comes out 3.5 KB *larger* in the APK (8,211,624 against
+# 8,208,068). The old fear — that against the NDK's clang `fat` would leave the
+# `.symtab` in place — does not reproduce: with `strip = true`, `llvm-nm` answers
+# "no symbols", and running an `llvm-strip --strip-unneeded` over it afterwards
+# changes not one byte. `thin` stays for weight, not for fear.
 lto = "thin"
 codegen-units = 1
 # Worth 4.7 MB of `.symtab` and `.strtab` on the phone. It has to stay a
