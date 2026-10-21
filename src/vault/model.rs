@@ -1,15 +1,17 @@
+use crate::vault::crypto;
 use crate::vault::matching::{Rule, Uri};
+use crate::vault::reader::BoxReader;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 pub const VAULT_VERSION: u32 = 1;
 
-/// What a row holds, for the screen and the interchange file. The vault stores
-/// four collections and no tag at all, so this is a projection of a record's own
-/// type, never something written down: a note cannot be saved as a login, and a
-/// drive entry is a document exactly while it carries one.
+/// What a row holds, for the screen and the CSV: a projection of the record's
+/// type, never something written down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Login,
@@ -29,8 +31,7 @@ impl Kind {
     }
 }
 
-/// A login: the credentials handed to a site. Its own type, so a note cannot
-/// carry a password and the paths that hand one over cannot reach anything else.
+/// A login's own type, so a note cannot carry a password.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Login {
     pub id: String,
@@ -38,8 +39,7 @@ pub struct Login {
     pub username: String,
     #[serde(with = "zstr")]
     pub password: Zeroizing<String>,
-    /// Free text that goes with the login — a recovery hint, the note that came
-    /// with it from another manager.
+    /// Free text: a recovery hint, the note that came with it from another manager.
     #[serde(with = "zstr")]
     pub notes: Zeroizing<String>,
     pub url: String,
@@ -47,8 +47,7 @@ pub struct Login {
     pub url_match: Rule,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_urls: Vec<Uri>,
-    /// Brand icon slug (e.g. "github"). None keeps the kind icon, falling back
-    /// to a URL auto-suggest.
+    /// Brand icon slug; `None` keeps the kind icon, then the URL's suggestion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     pub created: u64,
@@ -76,9 +75,7 @@ impl Login {
         self.modified = now;
     }
 
-    /// Every address this login answers to, the main one first, each with the
-    /// rule it is matched by. The one reader of `url` + `extra_urls`, so nothing
-    /// else has to know both exist.
+    /// Main URL first, then the extras, each with its rule; the only reader of both.
     pub fn uris(&self) -> impl Iterator<Item = (&str, Rule)> + '_ {
         let primary = (!self.url.trim().is_empty()).then_some((self.url.as_str(), self.url_match));
         primary.into_iter().chain(
@@ -89,14 +86,47 @@ impl Login {
     }
 }
 
-/// A note: the text the user typed, and nothing else. A document is not this —
-/// it is a [`File`] beside it — so a note can never end up carrying one.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+/// One encrypted chunk. `nonce` is base64, `len` includes the AEAD tag, `offset`
+/// is absolute in the `.pandora` file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChunkRef {
+    pub offset: u64,
+    pub len: u64,
+    pub nonce: String,
+}
+
+/// Where a file or note lives. `digest` is the BLAKE2 of the plaintext, so
+/// equality never needs the bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlobRecord {
+    pub size: u64,
+    pub digest: String,
+    pub chunks: Vec<ChunkRef>,
+}
+
+/// A file picked or dropped but not yet written into the box; `owned` marks the
+/// picker copy removed after the save.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingFile {
+    pub path: PathBuf,
+    pub size: u64,
+    pub owned: bool,
+}
+
+/// A note: text and nothing else. A document is a [`File`], so a note can never
+/// carry one.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Note {
     pub id: String,
     pub name: String,
-    #[serde(with = "zstr")]
+    #[serde(default, with = "zstr")]
     pub body: Zeroizing<String>,
+    /// Where the body lives in a v4 box; `None` until saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<BlobRecord>,
+    /// The body is in `body` and may be edited. Not persisted.
+    #[serde(skip)]
+    pub loaded: bool,
     /// Folder this entry lives in. None is the drive root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
@@ -110,10 +140,29 @@ impl Note {
             id: uuid::Uuid::new_v4().to_string(),
             name: "New note".to_owned(),
             body: Zeroizing::new(String::new()),
+            record: None,
+            loaded: true,
             folder: None,
             created: now,
             modified: now,
         }
+    }
+
+    pub fn bytes(&self) -> u64 {
+        if self.loaded || self.record.is_none() {
+            return self.body.len() as u64;
+        }
+        self.record.as_ref().map_or(0, |record| record.size)
+    }
+
+    pub fn digest(&self) -> String {
+        if self.loaded || self.record.is_none() {
+            return crypto::digest(self.body.as_bytes());
+        }
+        self.record.as_ref().map_or_else(
+            || crypto::digest(self.body.as_bytes()),
+            |r| r.digest.clone(),
+        )
     }
 
     pub fn touched(&mut self, now: u64) {
@@ -125,9 +174,20 @@ impl Note {
     }
 }
 
-/// A file: one document the drive holds, bytes and all. Its own type, so a
-/// document cannot be edited as text and a note cannot carry one.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+impl PartialEq for Note {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.name == other.name
+            && self.folder == other.folder
+            && self.created == other.created
+            && self.modified == other.modified
+            && self.bytes() == other.bytes()
+            && self.digest() == other.digest()
+    }
+}
+
+/// One document the drive holds; its own type, so a note cannot carry one.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct File {
     pub id: String,
     pub name: String,
@@ -136,6 +196,12 @@ pub struct File {
     pub folder: Option<String>,
     #[serde(with = "b64")]
     pub data: Zeroizing<Vec<u8>>,
+    /// Where the bytes live in a v4 box; `None` until an inline file is saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<BlobRecord>,
+    /// Picked or dropped, not yet read into the box.
+    #[serde(skip)]
+    pub pending: Option<PendingFile>,
     pub created: u64,
     pub modified: u64,
 }
@@ -147,13 +213,46 @@ impl File {
             name,
             folder: None,
             data: Zeroizing::new(data),
+            record: None,
+            pending: None,
+            created: now,
+            modified: now,
+        }
+    }
+
+    /// Stays on disk until the save chunks it; `owned` marks a picker copy the app
+    /// removes after writing it into the box.
+    pub fn new_pending(name: String, path: PathBuf, size: u64, owned: bool, now: u64) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            folder: None,
+            data: Zeroizing::new(Vec::new()),
+            record: None,
+            pending: Some(PendingFile { path, size, owned }),
             created: now,
             modified: now,
         }
     }
 
     pub fn bytes(&self) -> usize {
-        self.data.len()
+        match &self.pending {
+            Some(pending) => pending.size as usize,
+            None => self
+                .record
+                .as_ref()
+                .map_or(self.data.len(), |record| record.size as usize),
+        }
+    }
+
+    pub fn digest(&self) -> Option<String> {
+        if let Some(record) = &self.record {
+            return Some(record.digest.clone());
+        }
+        if self.pending.is_some() {
+            return None;
+        }
+        Some(crypto::digest(&self.data))
     }
 
     pub fn touched(&mut self, now: u64) {
@@ -165,9 +264,19 @@ impl File {
     }
 }
 
-/// What the drive holds: a note or a file, in one ordered list, so the two sit
-/// wherever the user dragged them. The type is what the entry is, never a field
-/// the app has to keep in step with the content.
+impl PartialEq for File {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.name == other.name
+            && self.folder == other.folder
+            && self.created == other.created
+            && self.modified == other.modified
+            && self.bytes() == other.bytes()
+            && self.digest() == other.digest()
+    }
+}
+
+/// A note or a file in one ordered list; the type is what it is, never a field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Entry {
@@ -226,9 +335,7 @@ impl Entry {
         }
     }
 }
-/// A seed for a one-time code. Never handed over: the code is derived from it, so
-/// nothing copies it to a clipboard, autofills it or overwrites it with a
-/// generated password.
+/// A one-time seed: never handed over, only the derived code is.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Otp {
     pub id: String,
@@ -255,23 +362,17 @@ impl Otp {
     }
 }
 
-/// A record that left its collection. It is not a registration any more — the
-/// panes, the lookup by id and the CSV never see it — but it stays in the box
-/// until the trash is emptied, which is the one thing that erases it for good.
+/// Deleted but not erased; emptying the trash is the only erase.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Trashed {
-    /// Unix seconds it was deleted, so the list can say how long ago.
     pub deleted: u64,
-    /// Where it sat in its collection, so a restore puts it back. `None` is the
-    /// end: a record that was never placed anywhere in particular.
+    /// Where it sat, so a restore puts it back; `None` is the end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<usize>,
     #[serde(flatten)]
     pub record: Deleted,
 }
 
-/// What the trash holds: the owned mirror of [`Any`], one variant per collection
-/// of the box, so nothing has to ask "is this a password?" to put it back.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Deleted {
@@ -306,8 +407,7 @@ impl Deleted {
     }
 }
 
-/// Put a restored record back in its own collection: where it sat when it could,
-/// at the end when the place is unknown or the list has shrunk past it.
+/// Where it sat, or at the end when the place is gone or the list shrank.
 fn put<T>(list: &mut Vec<T>, it: T, at: Option<usize>) {
     match at {
         Some(i) => list.insert(i.min(list.len()), it),
@@ -315,9 +415,7 @@ fn put<T>(list: &mut Vec<T>, it: T, at: Option<usize>) {
     }
 }
 
-/// One record of any kind, borrowed. The operations that are blind to what a
-/// record is — selecting, dragging, moving, deleting, committing, exporting — go
-/// through here, so nothing has to ask "is this a password?" to reach a name.
+/// Any kind, borrowed; the kind-blind operations go through here.
 pub enum Any<'a> {
     Login(&'a Login),
     Drive(&'a Entry),
@@ -389,8 +487,7 @@ impl<'a> AnyMut<'a> {
         }
     }
 
-    /// Whether this record is the one sitting in `parent` — the drive root when
-    /// that is None. Only a drive entry answers yes.
+    /// Whether this record sits in `parent` (the drive root when None).
     pub fn sits_in(&self, parent: Option<&str>) -> bool {
         match self {
             AnyMut::Drive(it) => it.folder() == parent,
@@ -414,8 +511,7 @@ impl<'a> AnyMut<'a> {
     }
 }
 
-/// A secret reads as `[REDACTED]` in `Debug`: a panic or a log line is plaintext
-/// the box was meant to keep shut.
+/// A secret reads as `[REDACTED]` in `Debug`, so a panic or a log cannot print it.
 struct Redacted;
 
 impl fmt::Debug for Redacted {
@@ -461,7 +557,7 @@ impl fmt::Debug for File {
             .field("id", &self.id)
             .field("name", &self.name)
             .field("folder", &self.folder)
-            .field("data", &format_args!("{} bytes", self.data.len()))
+            .field("data", &format_args!("{} bytes", self.bytes()))
             .field("created", &self.created)
             .field("modified", &self.modified)
             .finish()
@@ -503,16 +599,12 @@ impl Folder {
     }
 }
 
-/// One portable box: the folders of the drive, and one collection per kind of
-/// record. The shape of the file is the shape of the app.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One portable box: the drive's folders and one collection per kind of record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vault {
     pub version: u32,
-    /// The generation of what this box holds: `store::save` bumps it on every
-    /// write. It is inside the box and never in the header, so it costs an
-    /// attacker nothing to read — it is here so a copy *older* than the one on
-    /// screen can be told apart from a newer one, which is what a rewound repo
-    /// hands over. A box written before this field reads as 0.
+    /// Generation, bumped by `store::save`; 0 reads as absent in older boxes. It
+    /// lives inside the payload so a rewound copy can be told from a newer one.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub seq: u64,
     pub name: String,
@@ -526,10 +618,25 @@ pub struct Vault {
     pub drive: Vec<Entry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub otps: Vec<Otp>,
-    /// The records deleted but not yet erased. It is part of the box and travels
-    /// with it; nothing else reads it, and an empty trash writes no key at all.
+    /// Deleted but not erased; it travels inside the box, and empty writes no key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trash: Vec<Trashed>,
+    /// The v4 reader for the chunks on disk; not part of the manifest.
+    #[serde(skip)]
+    pub(crate) reader: Option<Arc<BoxReader>>,
+}
+
+impl PartialEq for Vault {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.seq == other.seq
+            && self.name == other.name
+            && self.folders == other.folders
+            && self.logins == other.logins
+            && self.drive == other.drive
+            && self.otps == other.otps
+            && self.trash == other.trash
+    }
 }
 
 impl Vault {
@@ -543,11 +650,134 @@ impl Vault {
             drive: Vec::new(),
             otps: Vec::new(),
             trash: Vec::new(),
+            reader: None,
         }
     }
 
-    /// Every record of the box, in the order the panes show them. Folders are not
-    /// records: they organise the drive.
+    /// Inline, pending path or chunks on disk; check `file.bytes()` against the
+    /// caller's limit first.
+    pub fn read_file(&self, file: &File) -> Result<Zeroizing<Vec<u8>>, String> {
+        if let Some(pending) = &file.pending {
+            let bytes = std::fs::read(&pending.path)
+                .map_err(|e| format!("cannot read {}: {e}", file.name))?;
+            return Ok(Zeroizing::new(bytes));
+        }
+        if let Some(record) = &file.record {
+            let reader = self
+                .reader
+                .as_ref()
+                .ok_or_else(|| "the box is no longer open".to_owned())?;
+            return reader.read_record(crate::vault::container::Kind::File, &file.id, record);
+        }
+        Ok(file.data.clone())
+    }
+
+    /// The first `len` bytes; never reads more than the box holds.
+    pub fn read_prefix(&self, file: &File, len: usize) -> Result<Zeroizing<Vec<u8>>, String> {
+        if let Some(pending) = &file.pending {
+            let mut out = vec![0u8; len.min(pending.size as usize)];
+            let mut input = std::fs::File::open(&pending.path)
+                .map_err(|e| format!("cannot read {}: {e}", file.name))?;
+            use std::io::Read as _;
+            input
+                .read_exact(&mut out)
+                .map_err(|e| format!("cannot read {}: {e}", file.name))?;
+            return Ok(Zeroizing::new(out));
+        }
+        if let Some(record) = &file.record {
+            let reader = self
+                .reader
+                .as_ref()
+                .ok_or_else(|| "the box is no longer open".to_owned())?;
+            return reader.read_range(
+                crate::vault::container::Kind::File,
+                &file.id,
+                record,
+                0,
+                len as u64,
+            );
+        }
+        Ok(Zeroizing::new(
+            file.data[..len.min(file.data.len())].to_vec(),
+        ))
+    }
+
+    /// Stream a file to a writer without assembling it in memory.
+    pub fn copy_file_to(&self, file: &File, out: &mut impl std::io::Write) -> Result<(), String> {
+        if let Some(pending) = &file.pending {
+            let mut input = std::fs::File::open(&pending.path)
+                .map_err(|e| format!("cannot read {}: {e}", file.name))?;
+            std::io::copy(&mut input, out)
+                .map_err(|e| format!("cannot write {}: {e}", file.name))?;
+            return Ok(());
+        }
+        if let Some(record) = &file.record {
+            let reader = self
+                .reader
+                .as_ref()
+                .ok_or_else(|| "the box is no longer open".to_owned())?;
+            return reader.copy_record_to(
+                crate::vault::container::Kind::File,
+                &file.id,
+                record,
+                out,
+            );
+        }
+        out.write_all(&file.data)
+            .map_err(|e| format!("cannot write {}: {e}", file.name))
+    }
+
+    /// A note's text, loading its chunks when the note is record-backed.
+    pub fn note_text(&self, note: &Note) -> Result<Zeroizing<String>, String> {
+        if note.loaded || note.record.is_none() {
+            return Ok(note.body.clone());
+        }
+        let reader = self
+            .reader
+            .as_ref()
+            .ok_or_else(|| "the box is no longer open".to_owned())?;
+        let bytes = reader.read_record(
+            crate::vault::container::Kind::Note,
+            &note.id,
+            note.record.as_ref().expect("checked above"),
+        )?;
+        let text = String::from_utf8(bytes.to_vec())
+            .map_err(|_| "the note is not valid text".to_owned())?;
+        Ok(Zeroizing::new(text))
+    }
+
+    /// Bring a record-backed note into memory for the editor. Idempotent.
+    pub fn ensure_note(&mut self, id: &str) -> Result<(), String> {
+        let Some(reader) = self.reader.clone() else {
+            return Ok(());
+        };
+        let Some(note) = self.drive.iter_mut().find_map(|entry| match entry {
+            Entry::Note(note) if note.id == id => Some(note),
+            _ => None,
+        }) else {
+            return Ok(());
+        };
+        if note.record.is_none() {
+            note.loaded = true;
+            return Ok(());
+        }
+        if note.loaded {
+            return Ok(());
+        }
+        let bytes = reader.read_record(
+            crate::vault::container::Kind::Note,
+            &note.id,
+            note.record.as_ref().expect("checked above"),
+        )?;
+        note.body = Zeroizing::new(
+            String::from_utf8(bytes.to_vec())
+                .map_err(|_| "the note is not valid text".to_owned())?,
+        );
+        note.loaded = true;
+        Ok(())
+    }
+
+    /// Every record in pane order; folders are not records.
     pub fn records(&self) -> impl Iterator<Item = Any<'_>> {
         self.logins
             .iter()
@@ -556,8 +786,8 @@ impl Vault {
             .chain(self.otps.iter().map(Any::Otp))
     }
 
-    /// The one lookup by id: ids are unique across the collections, so a click,
-    /// a drag or a commit never has to know which collection it came from.
+    /// The one lookup by id: ids are unique across collections, so callers never
+    /// ask which collection a record came from.
     pub fn any(&self, id: &str) -> Option<Any<'_>> {
         self.records().find(|record| record.id() == id)
     }
@@ -584,8 +814,7 @@ impl Vault {
         self.any(id).is_some()
     }
 
-    /// Take a record out, wherever it lives. True when something came out. A
-    /// permanent erase: the trash goes through [`Vault::take`] instead.
+    /// Permanent erase; the trash goes through [`Vault::take`].
     pub fn remove(&mut self, id: &str) -> bool {
         let before = self.logins.len() + self.drive.len() + self.otps.len();
         self.logins.retain(|it| it.id != id);
@@ -594,9 +823,8 @@ impl Vault {
         self.logins.len() + self.drive.len() + self.otps.len() != before
     }
 
-    /// Take a record out of its collection and into the trash, remembering where
-    /// it sat. `None` when the id names nothing — the caller must not mark the
-    /// box dirty for a click that hit no record.
+    /// Take a record into the trash, remembering where it sat; `None` when the id
+    /// names nothing, and the caller must not mark the box dirty.
     pub fn take(&mut self, id: &str, now: u64) -> Option<Trashed> {
         let (record, at) = if let Some(i) = self.logins.iter().position(|it| it.id == id) {
             (Deleted::Login(self.logins.remove(i)), i)
@@ -615,9 +843,8 @@ impl Vault {
         Some(trashed)
     }
 
-    /// Put a record back from the trash and say what it was. A drive entry whose
-    /// folder is gone lands at the root: the folder is not part of the record and
-    /// was not restored with it.
+    /// Put a record back and say what it was; a drive entry whose folder is gone
+    /// lands at the root, since the folder was not restored with it.
     pub fn restore(&mut self, id: &str) -> Option<Kind> {
         let i = self.trash.iter().position(|t| t.record.id() == id)?;
         let Trashed { at, record, .. } = self.trash.remove(i);
@@ -637,8 +864,7 @@ impl Vault {
         Some(kind)
     }
 
-    /// Erase everything the trash holds. The only place a deleted file's bytes
-    /// leave the box.
+    /// The only place a deleted file's bytes leave the box.
     pub fn empty_trash(&mut self) -> usize {
         std::mem::take(&mut self.trash).len()
     }
@@ -651,8 +877,7 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// serde helper: a generation of 0 is the field's absence, so a box that was
-/// never written twice carries nothing extra.
+/// serde helper: generation 0 is the field's absence.
 fn is_zero(value: &u64) -> bool {
     *value == 0
 }
@@ -664,7 +889,7 @@ mod b64 {
     use zeroize::Zeroizing;
 
     pub fn serialize<S: Serializer>(bytes: &Zeroizing<Vec<u8>>, ser: S) -> Result<S::Ok, S::Error> {
-        ser.serialize_str(&codec::encode(bytes.as_ref()))
+        ser.collect_str(&codec::display(bytes.as_ref()))
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Zeroizing<Vec<u8>>, D::Error> {
@@ -734,8 +959,6 @@ mod tests {
         assert_eq!(vault.records().count(), 2);
     }
 
-    /// A delete is a move, not a loss: the record leaves the box the panes see
-    /// and waits in the trash with the place it held.
     #[test]
     fn a_trashed_record_leaves_the_box_but_keeps_its_place() {
         let mut vault = Vault::new("Box");
@@ -771,8 +994,6 @@ mod tests {
         assert_eq!(vault.restore("two"), None, "once");
     }
 
-    /// The folder is not restored with the entry: one that is gone leaves the
-    /// entry at the drive root instead of pointing at nothing.
     #[test]
     fn a_restore_whose_folder_is_gone_lands_at_the_root() {
         let mut vault = Vault::new("Box");
@@ -786,8 +1007,6 @@ mod tests {
         assert_eq!(vault.drive[0].folder(), None, "`docs` was never there");
     }
 
-    /// Empting the trash is the one erase: what it held is gone from the box and
-    /// writes nothing more.
     #[test]
     fn emptying_the_trash_erases_what_it_held() {
         let mut vault = Vault::new("Box");
@@ -806,16 +1025,12 @@ mod tests {
         assert!(!round.contains("trash"), "and nothing to write: {round}");
     }
 
-    /// An older box knows nothing of the trash, and a box nobody deleted from
-    /// writes no key at all.
     #[test]
     fn an_old_box_reads_with_an_empty_trash() {
         let v: Vault = serde_json::from_str(r#"{"version":1,"name":"Old"}"#).unwrap();
         assert!(v.trash.is_empty());
     }
 
-    /// The trash is part of the encrypted payload, so it round-trips like every
-    /// other record — and the seed of a trashed code stays hidden.
     #[test]
     fn trash_round_trips() {
         let mut vault = Vault::new("Box");
@@ -856,8 +1071,6 @@ mod tests {
         assert_eq!(vault.drive[0].folder(), Some("docs"));
     }
 
-    /// An empty box writes none of the four collections, so a box nobody put a
-    /// note in is not a box with an empty note list.
     #[test]
     fn an_empty_box_writes_no_empty_collection() {
         let round = serde_json::to_string(&Vault::new("Box")).unwrap();
@@ -866,8 +1079,6 @@ mod tests {
         }
     }
 
-    /// A note and a file are two types, and the list they share says which one
-    /// each entry is: a note cannot carry a document, a file cannot carry text.
     #[test]
     fn a_drive_entry_says_what_it_is() {
         let mut note = Note::new(1);

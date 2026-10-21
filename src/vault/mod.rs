@@ -1,7 +1,9 @@
 pub mod codec;
+pub(crate) mod container;
 pub mod crypto;
 pub mod matching;
 pub mod model;
+pub(crate) mod reader;
 pub mod search;
 pub mod store;
 pub mod totp;
