@@ -639,6 +639,19 @@ impl PartialEq for Vault {
     }
 }
 
+/// A record-backed note's text, read out of the box: the one place the note's
+/// chunks are decrypted and decoded.
+fn load_note(reader: &BoxReader, note: &Note) -> Result<Zeroizing<String>, String> {
+    let record = note
+        .record
+        .as_ref()
+        .ok_or_else(|| "the note has no chunks to read".to_owned())?;
+    let bytes = reader.read_record(crate::vault::container::Kind::Note, &note.id, record)?;
+    let text =
+        String::from_utf8(bytes.to_vec()).map_err(|_| "the note is not valid text".to_owned())?;
+    Ok(Zeroizing::new(text))
+}
+
 impl Vault {
     pub fn new(name: &str) -> Self {
         Self {
@@ -736,14 +749,7 @@ impl Vault {
             .reader
             .as_ref()
             .ok_or_else(|| "the box is no longer open".to_owned())?;
-        let bytes = reader.read_record(
-            crate::vault::container::Kind::Note,
-            &note.id,
-            note.record.as_ref().expect("checked above"),
-        )?;
-        let text = String::from_utf8(bytes.to_vec())
-            .map_err(|_| "the note is not valid text".to_owned())?;
-        Ok(Zeroizing::new(text))
+        load_note(reader, note)
     }
 
     /// Bring a record-backed note into memory for the editor. Idempotent.
@@ -764,15 +770,7 @@ impl Vault {
         if note.loaded {
             return Ok(());
         }
-        let bytes = reader.read_record(
-            crate::vault::container::Kind::Note,
-            &note.id,
-            note.record.as_ref().expect("checked above"),
-        )?;
-        note.body = Zeroizing::new(
-            String::from_utf8(bytes.to_vec())
-                .map_err(|_| "the note is not valid text".to_owned())?,
-        );
+        note.body = load_note(&reader, note)?;
         note.loaded = true;
         Ok(())
     }
