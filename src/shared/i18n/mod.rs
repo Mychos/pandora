@@ -1,9 +1,12 @@
+//! The two catalogs and the one lookup that reads them. A key is the English
+//! sentence itself, so a missing translation is visible in the source.
+
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
@@ -24,22 +27,10 @@ impl Lang {
         }
     }
 
-    pub fn tr(self, key: &str) -> &'static str {
-        let catalogs = catalogs();
-        catalogs[self as usize]
-            .get(key)
-            .or_else(|| catalogs[Lang::En as usize].get(key))
-            .copied()
-            .unwrap_or_else(|| {
-                static MISSING: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
-                let mut missing = MISSING
-                    .get_or_init(|| Mutex::new(HashMap::new()))
-                    .lock()
-                    .expect("translation cache lock");
-                *missing
-                    .entry(key.to_owned())
-                    .or_insert_with(|| Box::leak(key.to_owned().into_boxed_str()))
-            })
+    /// The catalog's own words for a key in this language, the English ones when it
+    /// does not carry it, and the key itself when no catalog does.
+    pub fn tr(self, key: &str) -> &str {
+        entry(self, key).unwrap_or(key)
     }
 
     pub fn tf(self, key: &str, args: &[(&str, &dyn Display)]) -> String {
@@ -48,6 +39,16 @@ impl Lang {
                 text.replace(&format!("{{{name}}}"), &value.to_string())
             })
     }
+}
+
+/// One key in one language: the only lookup, so the fallback order lives in one
+/// place. `None` when no catalog carries the key at all.
+fn entry(lang: Lang, key: &str) -> Option<&'static str> {
+    let catalogs = catalogs();
+    catalogs[lang as usize]
+        .get(key)
+        .or_else(|| catalogs[Lang::En as usize].get(key))
+        .copied()
 }
 
 static LANG: AtomicU8 = AtomicU8::new(Lang::En as u8);
@@ -63,16 +64,15 @@ pub fn lang() -> Lang {
     }
 }
 
-pub fn t(key: &str) -> &'static str {
+/// The text for a key in the language on screen, borrowed from the catalog — or the
+/// key itself, which is a sentence, when nothing carries it.
+pub fn t(key: &str) -> &str {
     lang().tr(key)
 }
 
-pub fn text(key: &str) -> Cow<'static, str> {
-    let catalogs = catalogs();
-    catalogs[lang() as usize]
-        .get(key)
-        .or_else(|| catalogs[Lang::En as usize].get(key))
-        .map_or_else(|| Cow::Owned(key.to_owned()), |text| Cow::Borrowed(*text))
+/// The same text for a caller that has to keep it.
+pub fn text(key: &str) -> Cow<'_, str> {
+    Cow::Borrowed(t(key))
 }
 
 pub fn tf(key: &str, args: &[(&str, &dyn Display)]) -> String {
@@ -89,17 +89,10 @@ fn catalogs() -> &'static [HashMap<&'static str, &'static str>; 2] {
     })
 }
 
-fn parse(json: &str) -> HashMap<&'static str, &'static str> {
-    serde_json::from_str::<HashMap<String, String>>(json)
-        .expect("valid translation catalog")
-        .into_iter()
-        .map(|(key, value)| {
-            (
-                Box::leak(key.into_boxed_str()) as &'static str,
-                Box::leak(value.into_boxed_str()) as &'static str,
-            )
-        })
-        .collect()
+/// Both catalogs are `include_str!`d, so every key and value is a slice of the
+/// binary: nothing is copied and nothing leaks.
+fn parse(json: &'static str) -> HashMap<&'static str, &'static str> {
+    serde_json::from_str(json).expect("valid translation catalog")
 }
 
 #[cfg(test)]
@@ -133,6 +126,21 @@ mod tests {
             "3 minutos"
         );
         assert_eq!(tf("{count} minutes", &[("count", &3)]), "3 minutes");
+    }
+
+    /// A key no catalog carries comes back as itself: a sentence on screen, and
+    /// nothing allocated or leaked to say so.
+    #[test]
+    fn a_key_with_no_translation_reads_as_itself() {
+        assert_eq!(
+            t("a sentence nobody translated"),
+            "a sentence nobody translated"
+        );
+        assert_eq!(
+            Lang::Es.tr("a sentence nobody translated"),
+            "a sentence nobody translated"
+        );
+        assert_eq!(entry(Lang::En, "a sentence nobody translated"), None);
     }
 
     fn placeholders(text: &str) -> std::collections::HashSet<&str> {
