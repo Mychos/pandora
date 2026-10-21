@@ -26,9 +26,28 @@ pub fn hold_at(dir: &std::path::Path) -> std::io::Result<std::fs::File> {
     Ok(lock)
 }
 
+/// How long a starting build waits for the lock, and how often it asks.
+const HOLD_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+const HOLD_STEP: std::time::Duration = std::time::Duration::from_millis(25);
+
 pub fn hold() -> std::io::Result<std::fs::File> {
     let _ = std::fs::create_dir_all(store::data_dir());
-    hold_at(&store::data_dir())
+    hold_within(&store::data_dir(), HOLD_WAIT)
+}
+
+/// Hold the lock, outwaiting the build this one replaced: an update starts the new
+/// process before the old one has finished exiting, and a lock taken instantly
+/// would turn that into a window that closes itself. A second launch by hand waits
+/// the same and then says the same thing it always did.
+fn hold_within(dir: &std::path::Path, wait: std::time::Duration) -> std::io::Result<std::fs::File> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match hold_at(dir) {
+            Ok(lock) => return Ok(lock),
+            Err(why) if std::time::Instant::now() >= deadline => return Err(why),
+            Err(_) => std::thread::sleep(HOLD_STEP),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -45,6 +64,74 @@ mod tests {
         assert!(second.is_err(), "one lock per data dir");
         drop(first);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The update path starts the new build before the old one is gone, so the new
+    /// one has to outwait the lock rather than exit with no window.
+    #[test]
+    fn a_hold_outwaits_the_build_that_is_still_exiting() {
+        let dir = std::env::temp_dir().join("pandora-lock-wait-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let held = hold_at(&dir).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            drop(held);
+        });
+        let waited = hold_within(&dir, std::time::Duration::from_millis(2000));
+        release.join().unwrap();
+        assert!(
+            waited.is_ok(),
+            "the replacement has to take the lock, not give up on it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And it gives up on a lock that never comes, with the error the app reports.
+    #[test]
+    fn a_hold_that_is_never_released_still_fails() {
+        let dir = std::env::temp_dir().join("pandora-lock-giveup-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _held = hold_at(&dir).unwrap();
+        let refused = hold_within(&dir, std::time::Duration::from_millis(80));
+        assert!(refused.is_err(), "a running instance still wins");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A new release is announced on whatever screen the app is on, not only once a
+    /// box is open: the notice is not about the box.
+    #[test]
+    fn a_new_release_is_announced_with_no_box_open() {
+        use crate::shared::ui::shot;
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = App::blank(&ctx);
+        app.update.info = Some(crate::features::update::model::Info {
+            latest: "9.9.9".to_owned(),
+            url: "https://example.invalid/releases".to_owned(),
+            installable: false,
+        });
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(shot::input(egui::vec2(420.0, 780.0), Vec::new()), |ui| {
+                app.run_ui(ui)
+            });
+            out.textures_delta.clear();
+            shapes = out.shapes;
+        }
+        let drawn = shot::words(&shapes);
+        assert!(
+            drawn.iter().any(|word| word.contains("9.9.9")),
+            "the version is named with no box open: {drawn:?}"
+        );
+        assert!(
+            drawn
+                .iter()
+                .any(|word| word.starts_with("Open release page")),
+            "a build that cannot replace itself is offered the page: {drawn:?}"
+        );
+        assert!(!app.update.busy(), "no check was asked of the network");
     }
 
     /// The app's settings dialog over whatever screen is behind it; the whole loop
@@ -156,6 +243,9 @@ pub struct App {
     pub auth: Auth,
     pub boxes: Boxes,
     pub sync: Sync,
+    /// The one thing this app asks the network without an account: is there a
+    /// newer Pandora than this one?
+    pub update: crate::features::update::Update,
     /// Settings from the app data dir; `prefs.lock_after` is the system-idle timeout.
     pub prefs: Prefs,
     pub generate: GenerateForm,
@@ -239,13 +329,14 @@ impl App {
             ..Auth::default()
         };
         let screen = auth.landing();
-        Self {
+        let mut app = Self {
             screen,
             icons,
             shell,
             auth,
             boxes: Boxes::default(),
             sync,
+            update: crate::features::update::Update::default(),
             prefs,
             generate: GenerateForm::default(),
             preview: crate::features::drive::preview::Preview::default(),
@@ -264,7 +355,13 @@ impl App {
             #[cfg(not(target_os = "android"))]
             wgpu: cc.wgpu_render_state.is_some(),
             nav: Nav::default(),
+        };
+        // One look at startup, and only when the switch allows it: a vault that
+        // phones home on its own is the thing this app promises not to be.
+        if app.prefs.update_check {
+            app.update.check(&cc.egui_ctx);
         }
+        app
     }
 
     /// Lock every vault and land on Unlock; unsaved edits are written first.
@@ -561,6 +658,7 @@ impl App {
         self.pump();
         self.pump_bridge(&ctx);
         self.pump_sync(&ctx);
+        self.pump_update(&ctx);
         // A preview belongs to its entry: closing the modal, changing pane or locking
         // puts the player and the PDF away.
         let watching = self.screen == Screen::Main
@@ -632,6 +730,8 @@ impl App {
         // modal cannot cover them.
         crate::features::shell::windowbar::show(ui, self);
         self.shell.draw(ui);
+        // An available release rides every screen: it is not about the open box.
+        crate::features::update::ui::strip(ui, self);
         match self.screen {
             Screen::Welcome => crate::features::auth::ui::welcome(ui, self),
             Screen::Unlock => crate::features::auth::ui::unlock(ui, self),
@@ -767,6 +867,7 @@ impl App {
             auth: Auth::default(),
             boxes: Boxes::default(),
             sync: Sync::default(),
+            update: crate::features::update::Update::default(),
             prefs: Prefs::default(),
             generate: GenerateForm::default(),
             preview: crate::features::drive::preview::Preview::default(),

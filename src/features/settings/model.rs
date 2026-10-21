@@ -93,6 +93,16 @@ pub struct Prefs {
     /// Which way the app is painted. Missing in a file written before the choice
     /// existed, and then the default — dark — is what it reads as.
     pub theme: crate::shared::theme::Scheme,
+    /// Whether the app may ask GitHub for a newer release on its own — once at
+    /// startup and again when the window comes back. On by default, because a
+    /// vault nobody is told about is a vault left with a fixed bug unfixed; the
+    /// switch in the settings turns it off.
+    #[serde(skip_serializing_if = "is_true")]
+    pub update_check: bool,
+    /// The release the user answered "Later" to, so the notice does not come back
+    /// every launch for a version they already decided against.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub skip: String,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -163,6 +173,8 @@ impl Default for Prefs {
             axis: Axis::Target,
             lang: Lang::En,
             theme: crate::shared::theme::Scheme::Dark,
+            update_check: true,
+            skip: String::new(),
         }
     }
 }

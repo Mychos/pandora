@@ -648,6 +648,7 @@ fn footer(ui: &mut egui::Ui, app: &mut App) {
                 &[("version", &env!("CARGO_PKG_VERSION"))],
             ),
         );
+        crate::features::update::ui::row(ui, app);
     });
 }
 

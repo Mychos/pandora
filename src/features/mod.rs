@@ -9,3 +9,4 @@ pub mod generator;
 pub mod settings;
 pub mod shell;
 pub mod sync;
+pub mod update;

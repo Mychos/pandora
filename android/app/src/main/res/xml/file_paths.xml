@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- The release APK the updater stages, handed to the system package installer.
+         `crate::vault::store::data_dir()` is this app's files dir on Android. -->
+    <files-path name="updates" path="updates/" />
+</paths>

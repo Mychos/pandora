@@ -27,6 +27,7 @@ import android.os.HandlerThread;
 import android.os.PersistableBundle;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.provider.Settings;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
@@ -34,6 +35,7 @@ import android.util.Log;
 import android.util.Size;
 
 import androidx.core.app.ActivityCompat;
+import androidx.core.content.FileProvider;
 
 import androidx.biometric.BiometricManager;
 import androidx.biometric.BiometricPrompt;
@@ -672,6 +674,44 @@ public final class Pandora {
                 } catch (Exception ignored) {
                     // And with nothing to take it either, the page stays on screen.
                 }
+            }
+        });
+    }
+
+    /**
+     * Hand the staged APK to the system's package installer. The file sits under
+     * `filesDir/updates`, which `res/xml/file_paths.xml` declares: a private file
+     * reaches another process only as a `content://` URI. From Android 8 the user
+     * also has to allow "install unknown apps" for Pandora, so when that is still
+     * off this opens the screen that turns it on instead.
+     */
+    static void installApk(String path) {
+        Activity current = activity;
+        if (current == null) {
+            return;
+        }
+        File apk = new File(path);
+        current.runOnUiThread(() -> {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                        && !current.getPackageManager().canRequestPackageInstalls()) {
+                    current.startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                            .setData(Uri.parse("package:" + current.getPackageName()))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                    return;
+                }
+                if (!apk.isFile()) {
+                    Log.e(TAG, "installApk: the staged APK is gone: " + apk.getAbsolutePath());
+                    return;
+                }
+                Uri uri = FileProvider.getUriForFile(
+                        current, current.getPackageName() + ".fileprovider", apk);
+                current.startActivity(new Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(uri, "application/vnd.android.package-archive")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (Exception e) {
+                Log.e(TAG, "installApk: the installer refused the APK", e);
             }
         });
     }
