@@ -23,6 +23,18 @@ impl fmt::Debug for BoxReader {
     }
 }
 
+/// A record's chunk count as the `u32` the AAD binds, refused rather than wrapped.
+fn chunks(record: &BlobRecord) -> Result<u32, String> {
+    u32::try_from(record.chunks.len())
+        .map_err(|_| "corrupt box: more chunks than a record can hold".to_owned())
+}
+
+/// A byte count as this machine's size: a value that does not fit is a corrupt box,
+/// never a read that quietly shrinks to nothing.
+fn fit(bytes: u64) -> Result<usize, String> {
+    usize::try_from(bytes).map_err(|_| "corrupt box: larger than this machine holds".to_owned())
+}
+
 impl BoxReader {
     pub(crate) fn new(path: PathBuf, key: Key, box_id: String) -> Self {
         Self { path, key, box_id }
@@ -56,20 +68,18 @@ impl BoxReader {
         id: &str,
         record: &BlobRecord,
     ) -> Result<Zeroizing<Vec<u8>>, String> {
-        let mut out = Zeroizing::new(Vec::with_capacity(
-            usize::try_from(record.size).unwrap_or(0),
-        ));
         if record.size == 0 {
-            return Ok(out);
+            return Ok(Zeroizing::new(Vec::new()));
         }
+        let mut out = Zeroizing::new(Vec::with_capacity(fit(record.size)?));
         let mut file = File::open(&self.path).map_err(|e| format!("cannot open the box: {e}"))?;
-        let count = u32::try_from(record.chunks.len()).map_err(|_| "too many chunks")?;
+        let count = chunks(record)?;
         for (index, chunk) in record.chunks.iter().enumerate() {
             let index = u32::try_from(index).map_err(|_| "too many chunks")?;
             let plain_len = (record.size - u64::from(index) * container::CHUNK as u64)
                 .min(container::CHUNK as u64);
             let plain = self.chunk(&mut file, kind, id, chunk, index, count, plain_len)?;
-            out.extend_from_slice(&plain[..usize::try_from(plain_len).unwrap_or(0)]);
+            out.extend_from_slice(&plain[..fit(plain_len)?]);
         }
         Ok(out)
     }
@@ -84,7 +94,7 @@ impl BoxReader {
         index: usize,
     ) -> Result<Zeroizing<Vec<u8>>, String> {
         let mut file = File::open(&self.path).map_err(|e| format!("cannot open the box: {e}"))?;
-        let count = u32::try_from(record.chunks.len()).map_err(|_| "too many chunks")?;
+        let count = chunks(record)?;
         let chunk = record
             .chunks
             .get(index)
@@ -100,7 +110,7 @@ impl BoxReader {
             count,
             plain_len,
         )?;
-        plain.truncate(usize::try_from(plain_len).unwrap_or(0));
+        plain.truncate(fit(plain_len)?);
         Ok(plain)
     }
 
@@ -116,11 +126,9 @@ impl BoxReader {
             return Ok(Zeroizing::new(Vec::new()));
         }
         let end = start.saturating_add(len).min(record.size);
-        let mut out = Zeroizing::new(Vec::with_capacity(
-            usize::try_from(end - start).unwrap_or(0),
-        ));
+        let mut out = Zeroizing::new(Vec::with_capacity(fit(end - start)?));
         let mut file = File::open(&self.path).map_err(|e| format!("cannot open the box: {e}"))?;
-        let count = u32::try_from(record.chunks.len()).map_err(|_| "too many chunks")?;
+        let count = chunks(record)?;
         let chunk_size = container::CHUNK as u64;
         let first = start / chunk_size;
         let last = (end.saturating_sub(1)) / chunk_size;
@@ -133,9 +141,9 @@ impl BoxReader {
             let plain = self.chunk(&mut file, kind, id, chunk, index_u32, count, plain_len)?;
             let from = start.saturating_sub(index * chunk_size).min(plain_len);
             let to = (end - index * chunk_size).min(plain_len);
-            out.extend_from_slice(
-                &plain[usize::try_from(from).unwrap_or(0)..usize::try_from(to).unwrap_or(0)],
-            );
+            let from = fit(from)?;
+            let to = fit(to)?;
+            out.extend_from_slice(&plain[from..to]);
         }
         Ok(out)
     }
@@ -151,13 +159,13 @@ impl BoxReader {
             return Ok(());
         }
         let mut file = File::open(&self.path).map_err(|e| format!("cannot open the box: {e}"))?;
-        let count = u32::try_from(record.chunks.len()).map_err(|_| "too many chunks")?;
+        let count = chunks(record)?;
         let chunk_size = container::CHUNK as u64;
         for (index, chunk) in record.chunks.iter().enumerate() {
             let index = u32::try_from(index).map_err(|_| "too many chunks")?;
             let plain_len = (record.size - u64::from(index) * chunk_size).min(chunk_size);
             let plain = self.chunk(&mut file, kind, id, chunk, index, count, plain_len)?;
-            out.write_all(&plain[..usize::try_from(plain_len).unwrap_or(0)])
+            out.write_all(&plain[..fit(plain_len)?])
                 .map_err(|e| format!("cannot write the file: {e}"))?;
         }
         Ok(())
