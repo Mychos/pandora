@@ -31,11 +31,12 @@ pub fn run() -> std::io::Result<()> {
     let mut output = BufWriter::new(std::io::stdout().lock());
     let mut current: Option<Session> = None;
     let caller = caller();
-    // Read once: whether a browser may open a box decides how this host answers.
-    let prefs = crate::features::settings::model::load();
 
     while let Some(bytes) = protocol::read(&mut input)? {
         let envelope = protocol::parse(&bytes);
+        // Read per request: the switch the user just flipped decides this answer, not
+        // the one the file held when the browser started this host.
+        let prefs = crate::features::settings::model::load();
         // The app first when present: it already holds the key for the open box.
         let response = match relay(&bytes, &envelope, &caller) {
             Some(response) => response,
@@ -62,8 +63,10 @@ fn caller() -> String {
     }
 }
 
-/// Hand the message to the app, or `None` with no bridge. Two requests never leave here:
-/// listing boxes (the recents are ours) and unlocking (the window's job).
+/// Hand the message to the app. `None` means nothing is listening and the host
+/// answers on its own; an error response means the app was there and failed, which is
+/// not the host's to paper over. Two requests never leave here: listing boxes (the
+/// recents are ours) and unlocking (the window's job).
 fn relay(bytes: &[u8], envelope: &Envelope, caller: &str) -> Option<Response> {
     let Ok(request) = &envelope.request else {
         return None;
@@ -74,18 +77,52 @@ fn relay(bytes: &[u8], envelope: &Envelope, caller: &str) -> Option<Response> {
 
     let mut stream = socket::connect().ok()?;
     // The app cannot see the browser's process table, so it is told what the browser said.
-    let mut message: Value = serde_json::from_slice(bytes).ok()?;
-    message
-        .as_object_mut()?
-        .insert("caller".to_owned(), Value::from(caller));
-    protocol::write(&mut stream, &serde_json::to_vec(&message).ok()?).ok()?;
+    let forwarded = serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|mut message| {
+            message
+                .as_object_mut()?
+                .insert("caller".to_owned(), Value::from(caller));
+            serde_json::to_vec(&message).ok()
+        });
+    let Some(forwarded) = forwarded else {
+        log::warn!("pandora: a request the host could not forward");
+        return Some(Response::Error {
+            message: "the request could not be read".to_owned(),
+        });
+    };
+    if protocol::write(&mut stream, &forwarded).is_err() {
+        return Some(app_failed());
+    }
 
     // The wait must outlast the app's approval prompt.
-    stream
+    if stream
         .set_read_timeout(Some(Duration::from_secs(35)))
-        .ok()?;
-    let reply = protocol::read(&mut stream).ok()??;
-    serde_json::from_slice(&reply).ok()
+        .is_err()
+    {
+        return Some(app_failed());
+    }
+    let reply = match protocol::read(&mut stream) {
+        Ok(Some(reply)) => reply,
+        Ok(None) | Err(_) => return Some(app_failed()),
+    };
+    match serde_json::from_slice(&reply) {
+        Ok(response) => Some(response),
+        Err(e) => {
+            log::warn!("pandora: the app answered with something unreadable: {e}");
+            Some(Response::Error {
+                message: "the app answered with something Pandora does not understand".to_owned(),
+            })
+        }
+    }
+}
+
+/// The app took the connection and then failed. Saying so beats answering in its
+/// place: the host does not know what the app's own state is.
+fn app_failed() -> Response {
+    Response::Error {
+        message: "the app did not answer".to_owned(),
+    }
 }
 
 fn handle(current: &mut Option<Session>, request: Request, prefs: &Prefs) -> Response {

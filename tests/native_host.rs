@@ -313,6 +313,57 @@ fn the_host_hands_the_request_to_the_app_when_it_is_listening() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An app that takes the connection and then fails is not the same as no app at all:
+/// the host says so, instead of answering out of its own (locked) box as if the app
+/// had never been there.
+#[cfg(unix)]
+#[test]
+fn an_app_that_fails_is_reported_and_not_answered_in_its_place() {
+    use pandora::bridge::protocol;
+    use std::os::unix::net::UnixListener;
+
+    let dir = std::env::temp_dir().join(format!("pandora-bridge-bad-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("bridge.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let app = std::thread::spawn(move || {
+        for (index, stream) in listener.incoming().take(2).enumerate() {
+            let mut stream = stream.unwrap();
+            protocol::read(&mut stream).unwrap().unwrap();
+            // The first caller gets an answer that is not one; the second is left
+            // to close without answering at all.
+            if index == 0 {
+                protocol::write(&mut stream, b"not a response").unwrap();
+            }
+        }
+    });
+
+    let mut host = Host::spawned(
+        &[],
+        &[
+            ("PANDORA_DATA_DIR", dir.to_string_lossy().into_owned()),
+            (
+                "PANDORA_BRIDGE_SOCKET",
+                socket.to_string_lossy().into_owned(),
+            ),
+        ],
+    );
+    let reply = host.call(json!({ "_id": 1, "type": "status" }));
+    assert_eq!(reply["type"], "error");
+    assert_eq!(
+        reply["message"],
+        "the app answered with something Pandora does not understand"
+    );
+
+    let reply = host.call(json!({ "_id": 2, "type": "status" }));
+    assert_eq!(reply["type"], "error");
+    assert_eq!(reply["message"], "the app did not answer");
+
+    app.join().unwrap();
+    drop(host);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Opening a box from the browser is off unless the user turns it on. That is the one
 /// thing that would put a master password inside a browser, and with the app open
 /// there is nothing to ask for — so the default is to refuse and say where to open it.
