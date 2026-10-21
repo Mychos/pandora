@@ -62,6 +62,9 @@ pub struct Sync {
     /// Each owner's avatar, by login, as it came back with the repos. Only what
     /// the picker draws: a missing one falls back to the owner's name.
     pub avatars: Avatars,
+    /// The textures decoded from `avatars`. Owned here so a refresh replaces the
+    /// set instead of leaving every old avatar in egui's frame cache.
+    pub avatar_textures: HashMap<String, egui::TextureHandle>,
     /// Whether the repo picker's list has been fetched at all, so an empty answer
     /// is not asked for again every frame.
     pub repo_loaded: bool,

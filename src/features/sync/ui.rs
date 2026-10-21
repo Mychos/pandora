@@ -1,76 +1,45 @@
-//! The boxes this app knows about, in three views the picker switches between:
-//! the files on this machine, GitHub's repos, and the recents — every box opened
-//! before, wherever it lives, each carrying the mark of where that is. Every
-//! `.pandora` file in a repo is a box. The disk keeps a working copy of each one
-//! under the app's data dir, which is what lets the app work offline and keeps
-//! GitHub's commit budget for edits, not keystrokes.
-//!
-//! **The words**, so the copy this file draws does not drift back into jargon: a
-//! **box** is one encrypted file, always and only that; a **repo** is the private
-//! GitHub repository assigned to the app, never "a folder" (folders live inside a
-//! box); a **copy** is the version of a box the repo holds; a box is **sent** to
-//! the repo and **got** from it — never mirrored, pushed or landed; `GitHub` keeps
-//! its capital everywhere. A **hint** is one lowercase line under the thing it
-//! explains, with no full stop; a **status** or an **error** is a whole sentence,
-//! capitalised and ended.
+//! The box picker in three views: recents, this machine, GitHub. Each `.pandora` file
+//! in a repo is a box, and its working copy under the data dir is what works offline.
 
 use crate::app::{App, Screen, Side, StatusKind};
 use crate::features::auth::ui as auth;
 use crate::features::settings::model::Source;
 use crate::shared::i18n::t;
 use crate::shared::theme;
+use crate::shared::ui::entry as record;
 use crate::shared::ui::responsive;
 use crate::vault::store;
 use egui::{Layout, RichText, TextEdit};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// Air left under the sources card so it never touches the window floor.
 const BOTTOM: f32 = 24.0;
 
-/// The room a value keeps over and under the square that copies it, inside the
-/// field it is read in.
 const AIR: f32 = 4.0;
 
-/// The inset a value keeps off its field's rounded edge: the one every list row
-/// keeps (`shared::ui::entry::row`).
 const INSET: f32 = 14.0;
 
-/// The code's own size: the heading's, so the one value the flow asks the user
-/// to carry reads as the view's subject and not as a field's text.
 const CODE: f32 = 22.0;
 
-/// The air between the code's characters. A block of monospace spaced a pixel
-/// apart reads as a code — something to carry over — instead of as a word.
 const CODE_TRACK: f32 = 1.0;
 
-/// Vertical gap between recents rows.
 const GAP: f32 = 8.0;
 
-/// The recents always hold this many rows, whatever the list holds; past it they
-/// scroll, so the card keeps one height instead of chasing the window floor.
 const ROWS: f32 = 7.0;
 
-/// The rows alone: what the recents scroll, their search field holding its place
-/// above them, the way the passwords pane keeps its own header still.
 const BOXES: f32 = ROWS * (ROW + GAP);
 
-/// The band a source view keeps for its boxes: `BOXES`, plus the room the recents'
-/// search field holds above them. The other two views keep that room too, so the
-/// card is one height wherever it is shown.
 fn recents_rows(ui: &egui::Ui) -> f32 {
     BOXES + search_rows(ui)
 }
 
-/// The search field: its own height and the gap under it.
 fn search_rows(ui: &egui::Ui) -> f32 {
     ui.text_style_height(&egui::TextStyle::Body) + 14.0 + ui.spacing().item_spacing.y
 }
 
 pub fn run(ui: &mut egui::Ui, app: &mut App) {
-    // The repos keep themselves current only while this view is on screen: one
-    // read at a time, at most one per window, and nothing at all on the other
-    // views. The wait arms the frame egui would otherwise sleep through.
+    // Repos refresh only while this view is on screen: one read, at most one per window.
     if side(app) == Side::Github {
         if let Some(wait) = app.sources_load(Instant::now()) {
             if app.shell.focused {
@@ -78,9 +47,6 @@ pub fn run(ui: &mut egui::Ui, app: &mut App) {
             }
         }
     }
-    // The same pane the other two ways in wear (`auth::welcome`, `auth::unlock`):
-    // the wordmark has to stand at one height across the three, and the frame's own
-    // margin is what says where the page starts.
     egui::CentralPanel::default()
         .frame(theme::pane(responsive::compact(ui.ctx())))
         .show(ui, |ui| {
@@ -91,28 +57,19 @@ pub fn run(ui: &mut egui::Ui, app: &mut App) {
                 picker(ui, app);
                 ui.add_space(2.0);
                 let card = theme::card(ui, "", |ui| {
-                    // The recents carry one fixed band of rows; the other two views
-                    // fill the room they are given, minus the floor gap.
+                    // The recents carry one fixed band; the other two fill what they are given.
                     if side(app) == Side::Machine {
-                        // The two ways in hold their place: only the files scroll.
                         machine(ui, app);
                         return;
                     }
                     if side(app) == Side::Github {
-                        // GitHub keeps its own band: the picker and the way to
-                        // create a box hold their place and only the boxes scroll.
                         github(ui, app);
                         return;
                     }
-                    // Nothing opened before: the card holds the two places a first
-                    // box can start from, and the picker above keeps its three views
-                    // one click away.
                     if app.auth.recents.is_empty() {
                         start(ui, app);
                         return;
                     }
-                    // The search holds its place above the band, as the passwords pane
-                    // keeps its own header still: only the boxes scroll.
                     theme::search(
                         ui,
                         &app.icons,
@@ -120,11 +77,7 @@ pub fn run(ui: &mut egui::Ui, app: &mut App) {
                         crate::features::boxes::logic::search_id(Screen::Sources),
                         "search",
                     );
-                    // The field is already drawn: the band takes what is left of
-                    // the room, so the card keeps the same floor gap as Local.
                     let band = BOXES.min((ui.available_height() - BOTTOM).max(0.0));
-                    // Capped only by a window too short to hold it, so the card
-                    // keeps one height and a long list scrolls inside it.
                     theme::band(
                         ui,
                         egui::ScrollArea::vertical()
@@ -134,23 +87,18 @@ pub fn run(ui: &mut egui::Ui, app: &mut App) {
                         |ui| recent(ui, app),
                     );
                 });
-                // Painted over the card, after it, so the wait never writes a row
-                // into the list: the rows keep the place they already hold.
+                // After the card: the wait must not write a row into the list.
                 if side(app) == Side::Github && reading(app) {
                     veil(ui, card.response.rect);
                 }
             });
         });
-    // After the list, so a repo added this frame is already shown under it.
     modal(ui.ctx(), app);
     new_box_modal(ui.ctx(), app);
 }
 
-/// The three views as icon buttons, in the order the boxes arrive: what was
-/// opened before, this machine, GitHub. Their names ride the tooltips, since
-/// three words do not fit a narrow window and their icons say enough — and the
-/// GitHub one carries the model with it, because a repo is the one place the
-/// app's words can be read as something they are not.
+/// The three views as icon buttons, in the order the boxes arrive; their names ride
+/// the tooltips because three words do not fit a narrow window.
 fn picker(ui: &mut egui::Ui, app: &mut App) {
     let icons = &app.icons;
     let now = side(app);
@@ -191,10 +139,8 @@ fn picker(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-/// One view button: an icon and nothing else. Its name is its screen-reader
-/// label, its tooltip is the name or, where the view has one, a line saying what
-/// it is; and the view on show wears the accent fill under a light icon, which
-/// stays legible where the accent tint would sink into it.
+/// One view button: an icon, its name as screen-reader label and tooltip, and the
+/// accent fill on show under a light icon.
 fn view_button(
     ui: &mut egui::Ui,
     icons: &theme::Icons,
@@ -232,17 +178,13 @@ fn view_button(
     resp.clicked()
 }
 
-/// Which view is on show, until the user picks another: the recents first, which
-/// is where the boxes opened before are waiting to be reopened.
+/// Which view is on show; the recents first, where the boxes opened before wait.
 fn side(app: &App) -> Side {
     app.auth.side.unwrap_or(Side::Recents)
 }
 
-/// Whether the GitHub view is still reading repos nobody has read once: the card
-/// is veiled for that first pass, and only for it. A re-read of repos already on
-/// screen leaves the rows where the user is reading them, and so does one of a
-/// repo that answered with a failure — that one has been read, and what it says
-/// is the reason, not a wait.
+/// Whether the GitHub view is still reading repos nobody read once: only that first
+/// pass is veiled, never a re-read or a repo that answered with a failure.
 fn reading(app: &App) -> bool {
     app.sync
         .repo_job
@@ -257,13 +199,10 @@ fn reading(app: &App) -> bool {
         })
 }
 
-/// The scrim's own strength: the wait dims the card without hiding what is
-/// under it.
+/// The wait's scrim: dims without hiding what is under it.
 const VEIL: f32 = 0.86;
 
-/// The modal's, lighter: a dialog still has to read as itself under the wait —
-/// its title, its field, the shapes the answer will take — where the card is
-/// just rows, and dark enough to step back.
+/// Lighter than the card's: a dialog still has to read as itself under the wait.
 const SCRIM: f32 = 0.55;
 
 const SPIN: f32 = 22.0;
@@ -286,17 +225,14 @@ fn spinner(ui: &egui::Ui, rect: egui::Rect) {
         .paint_at(ui, at);
 }
 
-/// The card while its repos are being read: a spinner riding a scrim over it.
-/// Nothing is reserved, so the list below the veil never shifts, and nothing is
-/// swallowed — the working copies under it still open.
+/// The card while its repos are read: a spinner over a scrim, with nothing reserved,
+/// so the list never shifts and the working copies under it still open.
 fn veil(ui: &mut egui::Ui, rect: egui::Rect) {
     scrim(ui, rect, VEIL);
     spinner(ui, rect);
 }
 
-/// The ways into a local file: one opened from anywhere on the disk, or a new one
-/// with a path of its own. Stacked in a narrow window, where a wrapped button
-/// label reads like a mistake. It navigates on its own.
+/// The ways into a local file, stacked in a narrow window.
 fn file_actions(ui: &mut egui::Ui, app: &mut App) {
     let icons = &app.icons;
     let mut open = false;
@@ -321,10 +257,7 @@ fn file_actions(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-/// The files on this machine: the boxes the app opened from somewhere off the
-/// disk. A working copy is not one of them — a repo owns it, and the GitHub half
-/// lists it. The band is the recents' own, so a long list scrolls inside the card
-/// while the two ways in above it hold their place.
+/// The files on this machine; a repo's working copy belongs to the GitHub view.
 fn machine(ui: &mut egui::Ui, app: &mut App) {
     file_actions(ui, app);
     ui.add_space(8.0);
@@ -366,14 +299,8 @@ fn aux_button(ui: &mut egui::Ui, icons: &theme::Icons, icon: theme::Icon, text: 
     theme::secondary_button(ui, icons, Some(icon), text).clicked()
 }
 
-/// GitHub's half: the repos assigned and the way to add one more. Without a
-/// session the repos and their working copies still show — the token is only
-/// what reaches GitHub to sync, so signing in is an action here, never a wall
-/// in front of a list the app already knows.
-///
-/// One repo at a time, picked from a select: its boxes are the only thing that
-/// scrolls, in the band the recents keep, and the picker above and the way to
-/// create a box below hold their place while it does.
+/// GitHub's half. Without a session the repos and their working copies still show:
+/// signing in reaches GitHub, it is never a wall. One repo at a time, from a select.
 fn github(ui: &mut egui::Ui, app: &mut App) {
     if app.auth.login.is_some() {
         login(ui, app);
@@ -398,7 +325,7 @@ fn github(ui: &mut egui::Ui, app: &mut App) {
         keep_toggle(ui, app);
         ui.add_space(10.0);
     } else {
-        // The way to add one more sits first, above the repo it will become.
+        // The add-repo action sits first, above the repo it will become.
         let add = github_atoms(ui, &app.icons, "Add a GitHub repo…");
         if secondary_button(ui, add).clicked() {
             app.sync.adding = true;
@@ -444,8 +371,7 @@ fn showing(app: &App) -> Option<Source> {
         .cloned()
 }
 
-/// Which repo is on show, as a select of everything assigned, with the two
-/// things you can do to it: read it again, or stop following it.
+/// The repo on show, as a select of everything assigned, with read-again and stop-following.
 fn repo_head(ui: &mut egui::Ui, app: &mut App, source: &Source, sources: &[Source]) {
     let mut choose: Option<Source> = None;
     let mut refresh = false;
@@ -456,14 +382,9 @@ fn repo_head(ui: &mut egui::Ui, app: &mut App, source: &Source, sources: &[Sourc
     let icons = &app.icons;
 
     ui.horizontal(|ui| {
-        // The row is one line: the marks take their own width and the gaps
-        // between, and the select fills what is left of it.
-        let taken = 2.0 * responsive::target(ui.ctx()) + 2.0 * ui.spacing().item_spacing.x;
-        let width = (ui.available_width() - taken).max(120.0);
-        // `ComboBox::width` is a floor, not a ceiling: a target long enough to
-        // outgrow it sizes its own button and pushes the two marks after it off
-        // the card. The scope is what caps the room the select may take, and
-        // `truncate` is what lets the name give up the rest.
+        let width = record::width(ui, 2, 120.0);
+        // `ComboBox::width` is a floor: scope the room and truncate the name, or it pushes
+        // the marks after it off the card.
         ui.scope(|ui| {
             ui.set_max_width(width);
             theme::combo(
@@ -534,10 +455,8 @@ fn repo_head(ui: &mut egui::Ui, app: &mut App, source: &Source, sources: &[Sourc
     }
 }
 
-/// The boxes of the repo on show. The listing is the repo read with a session;
-/// without one the working copies on disk are all there is — and enough to open
-/// a box. Its band is the recents' own, rounded down to what the card has left:
-/// the select above it and the create button below never move for it.
+/// The boxes of the repo on show: the repo read with a session, else the working copies;
+/// the band is the recents' own, with the select and create button held still.
 fn repo_boxes(ui: &mut egui::Ui, app: &mut App, source: &Source) {
     let live = app.boxes_of(source).is_some();
     let files: Vec<String> = app
@@ -545,17 +464,14 @@ fn repo_boxes(ui: &mut egui::Ui, app: &mut App, source: &Source) {
         .map(<[String]>::to_vec)
         .unwrap_or_else(|| crate::features::sync::logic::cached(source));
     let signed = app.sync.signed();
-    // Why the last read failed, if it did. The rows above it are still the
-    // copies on this machine, and still open.
+    // Why the last read failed; the rows still open from the local copies.
     let why = app
         .sync
         .failed
         .get(&crate::features::sync::logic::source_key(source))
         .cloned();
     let mut open: Option<String> = None;
-    // The recents' own band, rounded down to what the card can spare: the tail
-    // below the boxes and the air under the card are held back here, so nothing
-    // under them is ever pushed off, and the card never touches the floor.
+    // The local band: what is left after the tail and the floor gap.
     let band = recents_rows(ui)
         .min(ui.available_height() - TAIL - BOTTOM)
         .max(0.0);
@@ -616,8 +532,7 @@ fn repo_boxes(ui: &mut egui::Ui, app: &mut App, source: &Source) {
     }
 }
 
-/// A read that did not land, in the colour failures wear: it is the reason the
-/// boxes are the ones this machine already has, not the repo being empty.
+/// The reason the boxes are the local ones, in the colour failures wear.
 fn failure(ui: &mut egui::Ui, why: &str) {
     crate::shared::ui::balance::label(
         ui,
@@ -627,8 +542,7 @@ fn failure(ui: &mut egui::Ui, why: &str) {
     );
 }
 
-/// The "keep me signed in" choice. Turning it on hands the session to the system
-/// credential store as soon as there is one; turning it off takes it back out.
+/// The "keep me signed in" choice; off takes the session back out of the store.
 fn keep_toggle(ui: &mut egui::Ui, app: &mut App) {
     let resp = theme::check(ui, &mut app.prefs.remember, "Keep me signed in").on_hover_text(
         crate::shared::i18n::t(
@@ -643,10 +557,8 @@ fn keep_toggle(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-/// One value the flow asks the user to carry, as a field: the value at the
-/// left, the square that copies it at the right edge, and both centred in one
-/// row of the target's own height. Laid out through [`field`], which keeps that
-/// row on one height instead of on the 32 `ui.horizontal` assumes.
+/// One value to carry, as a field: value left, copy square right, both on the target's
+/// own height through [`field`], not the 32 `ui.horizontal` assumes.
 fn value(ui: &mut egui::Ui, app: &mut App, text: &str, what: &str) {
     field(ui, |ui| {
         ui.add_space(INSET);
@@ -657,8 +569,7 @@ fn value(ui: &mut egui::Ui, app: &mut App, text: &str, what: &str) {
                 .extra_letter_spacing(CODE_TRACK)
                 .color(theme::ACCENT),
         );
-        // The copy rides the right edge, so two values of different lengths
-        // still keep their squares on one line.
+        // The copy square rides the right edge, so different lengths keep their squares in line.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(INSET);
             copy(ui, app, text, what);
@@ -666,19 +577,15 @@ fn value(ui: &mut egui::Ui, app: &mut App, text: &str, what: &str) {
     });
 }
 
-/// The field a value is read in: one row at the target's own height, its content
-/// laid out on that same centre, and the surface painted behind it. It is also
-/// where the view waits, which is why it takes its content rather than a value.
+/// The field a value is read in, and where the view waits: one row at the target's
+/// height, the surface behind it.
 ///
-/// Not `ui.horizontal`: that reserves the 32 `spacing.interact_size.y` every
-/// control assumes, so a row that holds a taller square only grows downwards —
-/// on a phone, where the copy's square is 44, the value stayed centred in 32
-/// while the square sat six pixels lower. Laid out on one height, the two
-/// centres meet by construction, and every field of the view reads on one axis.
+/// Not `ui.horizontal`: it reserves 32 px and grows downwards, so a 44 px square beside
+/// it sank the value; one height keeps both centres on one axis.
 fn field(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     // The square's own height, never under the style's floor for a control.
     let side = responsive::target(ui.ctx()).max(ui.spacing().interact_size.y);
-    // Reserved first, painted last: the surface under the value, not over it.
+    // Reserved first, painted last: the surface under the value.
     let surface = theme::Surface::reserve(ui);
     let row = ui.allocate_ui_with_layout(
         egui::vec2(ui.available_width(), side + 2.0 * AIR),
@@ -694,16 +601,13 @@ fn field(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     );
 }
 
-/// The wait under the action: the worker is polling GitHub until the user
-/// authorises there, and saying so is all this line does. No bar, no countdown,
-/// nothing the app does not know.
+/// The wait under the action: the worker polls GitHub until the user authorises.
 fn waiting(ui: &mut egui::Ui) {
     wait(ui, "waiting for you to authorize…");
 }
 
-/// The code's own field before there is a code: the same row, held open with the
-/// wait inside it, so the row the user is watching fills in when the answer lands
-/// instead of resizing under the spinner.
+/// The code's field before there is a code: the same row, held open with the wait inside,
+/// so it fills in instead of resizing under the spinner.
 fn asking(ui: &mut egui::Ui) {
     field(ui, |ui| {
         ui.add_space(INSET);
@@ -720,8 +624,7 @@ fn wait(ui: &mut egui::Ui, text: &str) {
             .size(glyph)
             .color(theme::palette().muted)
             .paint_at(ui, rect);
-        // A spinner belongs to its line: the 12 a row keeps between widgets is
-        // the gap of two things that are not one.
+        // A spinner and its line are one thing, not two 12 px apart.
         ui.spacing_mut().item_spacing.x = 8.0;
         crate::shared::ui::balance::label(
             ui,
@@ -732,19 +635,10 @@ fn wait(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-/// The device flow as it goes: the code GitHub minted, the page that takes it,
-/// the action that opens it again, and the wait between. The code is the one
-/// value the flow asks the user to carry, so it leads — a sentence saying where
-/// it goes, then the code itself. The page opens by itself the moment the code
-/// lands (`App::open_page`), so the button under the code is the retry: what
-/// brings the page back when that window was closed, was covered up, or never
-/// came up at all — and it stays visible because the code may have to be typed
-/// somewhere else entirely.
+/// The device flow: the code GitHub minted, where it goes, the retry that reopens the
+/// page, and the wait. The page opens itself when the code lands.
 fn login(ui: &mut egui::Ui, app: &mut App) {
-    // The card hangs its hints centred — it lives in a centred column — but this
-    // is a form: the sentence, the field and the wait all read from the left, on
-    // the edge the field and its buttons start from. Only the button labels stay
-    // centred, which is their own shape.
+    // The card centres its hints, but this is a form: sentence, field and wait read left.
     ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
         // Taken out of the app first, so the rows below can borrow it.
         let held = app.auth.login.as_ref().and_then(|l| l.code.clone());
@@ -785,9 +679,7 @@ fn login(ui: &mut egui::Ui, app: &mut App) {
             None => asking(ui),
         }
         ui.add_space(14.0);
-        // The way out is a full-width quiet action, the shape every other action
-        // of the panel wears; a loose `ui.button` under the content read as an
-        // accident at the card's edge.
+        // A full-width quiet action, like every other action of the panel.
         if theme::secondary_button(ui, &app.icons, None, "Cancel").clicked() {
             // Cancelling aborts the device flow, and the repos come back with it.
             app.auth.login = None;
@@ -795,8 +687,7 @@ fn login(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-/// Every box opened before, whatever it came from. The row's mark says where it
-/// lives: the GitHub brand for a repo's working copy, a lock for a local file.
+/// Every box opened before; the mark says where it lives: a repo's brand or a local lock.
 fn recent(ui: &mut egui::Ui, app: &mut App) {
     let boxes: Vec<(PathBuf, String, bool)> = app
         .auth
@@ -828,10 +719,7 @@ fn recent(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-/// With nothing opened before the card holds the two places a first box can
-/// start from, and the picker above keeps the three views one click away. The
-/// ways to open or create a local box live one step deeper, in the Local view
-/// this leads to.
+/// With nothing opened before, the two places a first box starts from.
 fn start(ui: &mut egui::Ui, app: &mut App) {
     let icons = &app.icons;
     let mut pick = None;
@@ -863,8 +751,7 @@ fn start(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-/// One of the two ways into a first box: a square of its own, not a list row.
-/// The whole tile answers the click, so it reads as a choice and not as a record.
+/// One of the two ways into a first box: a tile that answers the click, not a row.
 fn start_tile(
     ui: &mut egui::Ui,
     icons: &theme::Icons,
@@ -903,10 +790,8 @@ fn start_tile(
     resp.clicked()
 }
 
-/// The rows of one box list: the mark says where each box lives — a repo's brand
-/// for a working copy, a lock for a file on this machine. `q` filters the names
-/// and the paths, and an empty one shows them all. What was clicked, and how many
-/// rows were drawn, so the caller can say when nothing matches.
+/// One box list: the mark says where each box lives, `q` filters names and paths.
+/// Returns what was clicked and how many rows were drawn.
 fn roster(
     ui: &mut egui::Ui,
     app: &App,
@@ -948,8 +833,7 @@ fn roster(
     (pick, shown)
 }
 
-/// Ask for a listed box's password: the Unlock screen, with the keyfile cleared.
-/// A keyfile belongs to the box being opened, never to the one before it.
+/// Ask for a listed box's password; the keyfile is cleared, since it belongs to another box.
 fn open(ui: &egui::Ui, app: &mut App, path: &Path) {
     app.auth.unlock_path = path.display().to_string();
     app.auth.unlock_keyfile.clear();
@@ -957,20 +841,17 @@ fn open(ui: &egui::Ui, app: &mut App, path: &Path) {
     ui.memory_mut(|mem| mem.request_focus(auth::password_id()));
 }
 
-/// A full-width quiet button. The caller hands its label and mark, so the same
-/// chrome serves a sprite icon and a brand.
+/// A full-width quiet button; the caller hands label and mark, sprite or brand.
 fn secondary_button(ui: &mut egui::Ui, atoms: egui::Atoms<'static>) -> egui::Response {
-    // Force the label+mark block to the middle: a column leaves the ambient
-    // layout left-aligned, which would pin the text to the edge.
+    // Force the label+mark block to the middle; the ambient layout is left-aligned.
     ui.with_layout(Layout::top_down(egui::Align::Center), |ui| {
         ui.add(egui::Button::new(atoms).min_size(egui::vec2(ui.available_width(), 40.0)))
     })
     .inner
 }
 
-/// Create a box in a repo, floating over the sources so it stays one small window
-/// instead of pushing the repo list around: the same form as the Welcome screen,
-/// without the path — the file goes where that source's working copies live.
+/// Create a box in a repo, floating over the sources: the Welcome form without the
+/// path, because the file goes where that source's copies live.
 pub fn new_box_modal(ctx: &egui::Context, app: &mut App) {
     let Some(source) = app.sync.new_in.clone() else {
         return;
@@ -1070,8 +951,7 @@ fn copy(ui: &mut egui::Ui, app: &mut App, text: &str, what: &str) {
     }
 }
 
-/// The window that puts a repo among the sources. Signing in is the GitHub half's
-/// own business; here is only the picking, and the token never leaves memory.
+/// The window that puts a repo among the sources; the token stays in memory.
 pub fn modal(ctx: &egui::Context, app: &mut App) {
     if !app.sync.adding {
         return;
@@ -1079,10 +959,7 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
     // Sized against the window, so it stays whole in a small one.
     let room = crate::shared::ui::chrome::body(ctx);
     let width = (room.width() - 56.0).clamp(240.0, 440.0);
-    // How tall the list may grow. A desk stops it well short of the body, so a
-    // handful of repos keeps the window small; a phone hands it the whole body
-    // and `pick` gives it what the chrome above and the action row below leave,
-    // because a band floating in the middle of a full card is not a list.
+    // A desk stops the list short of the body; a phone gives it what the chrome leaves.
     let list = if crate::shared::ui::responsive::compact(ctx) {
         room.height()
     } else {
@@ -1091,9 +968,7 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
 
     let open = theme::dialog(ctx, egui::Id::new("github-repo"), |ui| {
         theme::width(ui, width);
-        // A ceiling, not a size: on a phone the chrome and the action row are a
-        // thumb's, so the window gives way at the room the card keeps off the edge
-        // instead of growing past the body.
+        // A ceiling, not a size: the window gives way before the body does.
         theme::height(ui, room.height());
         let closed = theme::head(ui, &app.icons, "GitHub");
         if !app.sync.repo_loaded && app.sync.repo_job.is_none() {
@@ -1127,11 +1002,8 @@ fn pick(ui: &mut egui::Ui, app: &mut App, height: f32) {
     let mut reload = false;
     let mut out = false;
 
-    // The orgs come first — they pick the list, the search then narrows what is
-    // left of it — and their select is up from the first frame, disabled until
-    // GitHub answers. The list gives up the same room in every state, so the
-    // field under the select never moves and the window is one size while GitHub
-    // answers.
+    // The orgs select comes first and is disabled until GitHub answers; the field
+    // under it never moves.
     owners(ui, app);
 
     theme::search(
@@ -1143,9 +1015,8 @@ fn pick(ui: &mut egui::Ui, app: &mut App, height: f32) {
     );
     ui.add_space(10.0);
 
-    // The action row and the gap above it come after the list, so the list has
-    // to know they are coming before it takes its room; the ceiling set in the
-    // dialog then makes a short window shrink the list instead of overflowing.
+    // The action row is reserved before the list takes its room; the ceiling then
+    // shrinks the list in a short window instead of overflowing.
     let tail = 12.0 + ui.spacing().item_spacing.y + crate::shared::ui::responsive::target(ui.ctx());
     let band = (height - STRIP)
         .max(BAND_FLOOR.min(ui.available_height()))
@@ -1205,6 +1076,7 @@ fn pick(ui: &mut egui::Ui, app: &mut App, height: f32) {
         app.sync.repo_loaded = false;
         app.sync.repos.clear();
         app.sync.avatars.clear();
+        app.sync.avatar_textures.clear();
         app.repo_repos();
     }
     if let Some(repo) = chosen {
@@ -1346,8 +1218,9 @@ fn owners(ui: &mut egui::Ui, app: &mut App) {
                     }
                     for login in logins(app) {
                         let chosen = owner.as_deref() == Some(login.as_str());
-                        let face =
-                            avatar(ui.ctx(), &login, app.sync.avatars.get(&login)).map(|tex| {
+                        let bytes = app.sync.avatars.get(&login);
+                        let face = avatar(ui.ctx(), &login, bytes, &mut app.sync.avatar_textures)
+                            .map(|tex| {
                                 egui::Image::new(egui::load::SizedTexture::new(
                                     tex.id(),
                                     egui::vec2(AVATAR, AVATAR),
@@ -1394,15 +1267,28 @@ fn logins(app: &App) -> Vec<String> {
     logins
 }
 
-/// An owner's avatar as a texture, decoded once and kept across frames. None
-/// while none came back, which leaves the chip with its name alone.
+/// An owner's avatar as a texture, decoded once and kept with the sync state.
+/// None while none came back, which leaves the chip with its name alone. The
+/// map is cleared whenever the repo list is replaced, so the textures die with
+/// the avatars they belong to instead of accumulating in egui's frame cache.
 fn avatar(
     ctx: &egui::Context,
     login: &str,
     bytes: Option<&Vec<u8>>,
+    textures: &mut HashMap<String, egui::TextureHandle>,
 ) -> Option<egui::TextureHandle> {
     let bytes = bytes?;
-    theme::texture(ctx, egui::Id::new(("avatar", login, bytes.len())), bytes)
+    if let Some(texture) = textures.get(login) {
+        return Some(texture.clone());
+    }
+    let image = theme::decode(bytes).ok()?;
+    let texture = ctx.load_texture(
+        format!("avatar-{login}"),
+        image,
+        egui::TextureOptions::LINEAR,
+    );
+    textures.insert(login.to_owned(), texture.clone());
+    Some(texture)
 }
 
 fn gap(ui: &mut egui::Ui) {
@@ -1547,6 +1433,30 @@ mod tests {
     use crate::shared::ui::shot;
     use std::fs;
 
+    #[test]
+    fn avatar_textures_live_with_the_sync_state() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let png = include_bytes!("../../../assets/icon.png").to_vec();
+        let base = ctx.tex_manager().read().num_allocated();
+        let mut textures = std::collections::HashMap::new();
+
+        {
+            let first = avatar(&ctx, "octocat", Some(&png), &mut textures).expect("decodes");
+            let again = avatar(&ctx, "octocat", Some(&png), &mut textures).expect("reuses");
+            assert_eq!(first.id(), again.id(), "one texture per owner");
+            assert_eq!(ctx.tex_manager().read().num_allocated(), base + 1);
+        }
+
+        assert_eq!(textures.len(), 1);
+        textures.clear();
+        assert_eq!(
+            ctx.tex_manager().read().num_allocated(),
+            base,
+            "the refresh drops the old avatar texture"
+        );
+    }
+
     fn frame(
         app: &mut App,
         ctx: &egui::Context,
@@ -1555,8 +1465,6 @@ mod tests {
         shot::frame(ctx, egui::vec2(900.0, 700.0), events, |ui| run(ui, app))
     }
 
-    /// Press a painted string and release a frame later: egui resolves clicks
-    /// against the previous frame's widgets.
     fn click(app: &mut App, ctx: &egui::Context, text: &str) {
         let shapes = frame(app, ctx, Vec::new());
         let at = shapes
@@ -1619,8 +1527,6 @@ mod tests {
         }
     }
 
-    /// Without a session the repo's working copies still open: the click reads
-    /// the box off the disk instead of asking GitHub for it.
     #[test]
     fn a_working_copy_opens_without_a_session() {
         let ctx = egui::Context::default();
@@ -1650,9 +1556,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A read nobody answered is not an empty repo. The empty line is the one
-    /// thing the user reads there, and it has to say which state this is: the
-    /// reason, or the sign-in hint — never "this repo has no boxes yet".
     #[test]
     fn a_repo_that_did_not_answer_says_why_instead_of_looking_empty() {
         let ctx = egui::Context::default();
@@ -1693,8 +1596,6 @@ mod tests {
         );
     }
 
-    /// The machine view lists the local files: a working copy belongs to its repo,
-    /// so `source_of` keeps it out, and what is left opens like any other row.
     #[test]
     fn the_machine_view_lists_local_files_and_leaves_working_copies_alone() {
         let ctx = egui::Context::default();
@@ -1782,10 +1683,6 @@ mod tests {
         );
     }
 
-    /// The code and the square that copies it share one centre, on a phone as on
-    /// a desk. The row is laid out on the target's own height, so the 44 a phone
-    /// gives the square cannot leave the value centred in the 32 every control
-    /// assumes: under `ui.horizontal` the two were six pixels apart at 393.
     #[test]
     fn the_code_and_its_copy_sit_on_one_line() {
         for (w, h) in [(393.0, 851.0), (900.0, 700.0)] {
@@ -1804,12 +1701,6 @@ mod tests {
         }
     }
 
-    /// The sign-in view says where the code goes, and keeps saying it while the
-    /// code is still being minted: the field stays open with the wait inside it,
-    /// and no action appears until GitHub answers. Nothing here clicks `Open
-    /// GitHub`, and nothing has to: in a test build `browse` is compiled out, so
-    /// `App::open_page` — which that button and the auto-open both go through —
-    /// only writes the address down.
     #[test]
     fn the_sign_in_view_says_where_the_code_goes() {
         let ctx = egui::Context::default();
@@ -1868,7 +1759,6 @@ mod tests {
             .unwrap_or_else(|| panic!("{text:?} is on screen"))
     }
 
-    /// The row's own surface: the `ROW`-tall fill the name sits on.
     fn surface_of(shapes: &[egui::epaint::ClippedShape], name: egui::Rect) -> egui::Rect {
         shapes
             .iter()
@@ -1885,14 +1775,9 @@ mod tests {
             .unwrap_or_else(|| panic!("the row paints a surface under {name:?}"))
     }
 
-    /// The code a device flow minted, and the page that takes it: the pair the
-    /// sign-in view is drawn from.
     const DEVICE: &str = "WDJB-MJHT";
     const PAGE: &str = "https://github.com/login/device";
 
-    /// The sources screen as the device flow leaves it: GitHub's view on show and
-    /// the code already minted. Nothing here waits on an answer — drawing the view
-    /// never reads the channel, and the sign-in is not what these tests are about.
     fn login_app(ctx: &egui::Context) -> App {
         let mut app = App::blank(ctx);
         app.screen = Screen::Sources;
@@ -1905,8 +1790,6 @@ mod tests {
         app
     }
 
-    /// The glyph of the square that copies a value: the one image painted on the
-    /// value's own row, past its right edge.
     fn mark_beside(shapes: &[egui::epaint::ClippedShape], value: egui::Rect) -> egui::Rect {
         shapes
             .iter()
@@ -1923,9 +1806,6 @@ mod tests {
             .unwrap_or_else(|| panic!("the value carries a copy beside it: {value:?}"))
     }
 
-    /// A repo's boxes read like every other list in the app: a mark opening the
-    /// row, the name left-aligned beside it, not a label centred in the block.
-    /// Its own repo folder, so the working copies of the other tests are left be.
     #[test]
     fn a_repo_row_carries_its_mark_on_the_left() {
         let ctx = egui::Context::default();
@@ -1980,9 +1860,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A repo nobody has read yet veils the card instead of writing a line into
-    /// the list: the wait is painted over the rows, so nothing jumps when the
-    /// answer lands.
     #[test]
     fn a_first_read_veils_the_card_instead_of_pushing_a_row() {
         let ctx = egui::Context::default();
@@ -2037,8 +1914,6 @@ mod tests {
         assert!(spinner, "the spinner rides the veil over {veil:?}");
     }
 
-    /// The new-box form floats: opening it is one small window over the sources,
-    /// and closing it leaves no form behind in the repo row.
     #[test]
     fn the_new_box_form_floats_and_closes() {
         let ctx = egui::Context::default();
@@ -2099,8 +1974,6 @@ mod tests {
         assert_eq!(short_path(Path::new("/etc/x")), "/etc/x");
     }
 
-    /// A working copy is a recents row like any other: `source_of` is what tells
-    /// it from a local file, so the row can carry the repo's mark.
     #[test]
     fn a_working_copy_sits_in_the_recents_beside_a_local_file() {
         let ctx = egui::Context::default();
@@ -2128,16 +2001,11 @@ mod tests {
         );
     }
 
-    /// The pick window's own area, by the id `theme::dialog` was handed.
     fn picker_rect(ctx: &egui::Context) -> egui::Rect {
         ctx.memory(|mem| mem.area_rect(egui::Id::new("github-repo")))
             .expect("the picker is up")
     }
 
-    /// A phone's window is the whole screen: a dialog that asked for more than
-    /// the room left would sit flush against both sides, and the room belongs to
-    /// the card — the backdrop is painted through the modal's area and must still
-    /// cover the whole window.
     #[test]
     fn a_modal_keeps_off_the_screen_edges() {
         let ctx = egui::Context::default();
@@ -2201,10 +2069,6 @@ mod tests {
         );
     }
 
-    /// The pick window opens its final size and, more to the point, the field
-    /// under the chips never moves: the row they live in is allocated before
-    /// GitHub has answered, so the answer drops into its place instead of pushing
-    /// everything down a moment after the window was read.
     #[test]
     fn the_repo_picker_holds_its_size_while_loading() {
         let ctx = egui::Context::default();
@@ -2263,9 +2127,6 @@ mod tests {
         );
     }
 
-    /// A public repo is listed and out of reach: the row says why, and a press on
-    /// it picks nothing. The picker is one of the two places that keep a box out
-    /// of a repo anyone can read — the write itself is the other.
     #[test]
     fn a_public_repo_is_listed_but_cannot_be_picked() {
         let ctx = egui::Context::default();
@@ -2325,10 +2186,6 @@ mod tests {
         }
     }
 
-    /// The picker never grows past the body it was handed. It is the tallest dialog
-    /// in the app and the only one whose list is a formula, so a short window — a
-    /// phone with the keyboard up, or one held sideways — is where it used to walk
-    /// off the screen: the list scrolls and the frame may not.
     #[test]
     fn the_repo_picker_fits_the_body_it_is_given() {
         for (w, h) in [(360.0, 640.0), (360.0, 420.0), (800.0, 360.0)] {
@@ -2389,10 +2246,6 @@ mod tests {
         }
     }
 
-    /// The list is the one thing the picker lets grow: a phone's window is the
-    /// whole body, so the rows run from the search field to the action row and
-    /// the scroll is the card. They used to stop at a desktop band's height and
-    /// leave the bottom half of the card empty, which reads as a broken window.
     #[test]
     fn a_phones_repo_list_reaches_the_action_row() {
         let ctx = egui::Context::default();
@@ -2444,14 +2297,12 @@ mod tests {
         );
     }
 
-    /// The search field's own rect, by the id `pick` hands it.
     fn search_rect(ctx: &egui::Context) -> egui::Rect {
         ctx.read_response(egui::Id::new("repo-search"))
             .expect("the search field is up")
             .rect
     }
 
-    /// The text of every painted label, rows and chips alike.
     fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
         shapes
             .iter()
@@ -2462,9 +2313,6 @@ mod tests {
             .collect()
     }
 
-    /// The orgs are one select over the search field: opening it lists `All
-    /// repos` and one entry per owner, and picking one types `owner/` into the
-    /// field, which is the filter the list already reads.
     #[test]
     fn the_org_select_filters_the_list() {
         let ctx = egui::Context::default();
@@ -2542,8 +2390,6 @@ mod tests {
         assert!(widened.contains(&"octocat/one".to_owned()));
     }
 
-    /// Every painted label, and the largest rect under it: the card, and the
-    /// one button big enough to be the way to create a box.
     fn painted(shapes: &[egui::epaint::ClippedShape], fill: egui::Color32) -> egui::Rect {
         shapes
             .iter()
@@ -2555,9 +2401,6 @@ mod tests {
             .unwrap_or_else(|| panic!("a rect painted in {fill:?}"))
     }
 
-    /// The GitHub view is one card with one band that scrolls: the repo select
-    /// above it and the way to create a box below it stay on the card, and the
-    /// card itself stays inside the window.
     #[test]
     fn the_github_view_keeps_its_tail_inside_its_card() {
         let ctx = egui::Context::default();
@@ -2613,9 +2456,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The empty states write one faint line inside the band, and the longest of
-    /// them wraps on a phone: whatever it wraps to, the tail still holds — the
-    /// way to create a box, the keep toggle, and the card inside the window.
     #[test]
     fn a_wrapped_empty_hint_keeps_the_repo_tail_on_the_card() {
         let ctx = egui::Context::default();
@@ -2706,10 +2546,6 @@ mod tests {
         );
     }
 
-    /// A repo name is one line in the select, never the width of the card:
-    /// egui's combo width is a floor, so a name long enough used to grow the
-    /// select and push the two marks after it off the card — a phone's edge is
-    /// the first place that shows.
     #[test]
     fn a_long_repo_name_stays_inside_the_github_card() {
         let ctx = egui::Context::default();
@@ -2774,9 +2610,6 @@ mod tests {
         }
     }
 
-    /// The recents keep the same floor gap as the local view: the search field
-    /// above the band is room the card already spent, so the band takes what is
-    /// left and never pushes the card against the window floor.
     #[test]
     fn the_recents_card_keeps_the_floor_gap_of_the_local_view() {
         let ctx = egui::Context::default();
