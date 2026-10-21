@@ -240,14 +240,7 @@ impl App {
         match store::adopt(&s.path, &bytes, &s.creds, None) {
             Ok(vault) => {
                 s.vault = vault;
-                s.parked = false;
-                s.parked_seq = s.vault.seq;
-                s.sanitize();
-                s.dirty = false;
-                s.last_edit = None;
-                s.conflict = false;
-                s.ignore_mtime = None;
-                s.last_mtime = store::modified_time(&s.path);
+                s.settle();
                 s.baseline = Some(crate::features::sync::github::Fingerprint::of(&s.vault));
                 s.push_at = None;
                 self.shell
@@ -355,13 +348,7 @@ impl Boxes {
         match store::load(&s.path, &s.creds) {
             Ok(v) => {
                 s.vault = v;
-                s.parked = false;
-                s.parked_seq = s.vault.seq;
-                s.sanitize();
-                s.dirty = false;
-                s.last_edit = None;
-                s.conflict = false;
-                s.last_mtime = store::modified_time(&s.path);
+                s.settle();
                 s.push_at = None;
                 s.baseline = Some(crate::features::sync::github::Fingerprint::of(&s.vault));
                 shell.set_status("box reloaded — local changes discarded", StatusKind::Info);

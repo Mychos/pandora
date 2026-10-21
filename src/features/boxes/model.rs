@@ -212,14 +212,10 @@ impl Session {
         self.parked = true;
     }
 
-    /// Bring a parked tab back from its file. The key is the one the session
-    /// kept, so no password is asked; ids that no longer exist are dropped.
-    pub fn load_parked(&mut self) -> Result<(), String> {
-        if !self.parked {
-            return Ok(());
-        }
-        let vault = store::load(&self.path, &self.creds)?;
-        self.vault = vault;
+    /// A vault arrived from the file: what is on screen is now what the box holds,
+    /// with nothing pending. The modification time is read back, so the copy just
+    /// loaded is not mistaken for another device's.
+    pub fn settle(&mut self) {
         self.parked = false;
         self.parked_seq = self.vault.seq;
         self.sanitize();
@@ -228,6 +224,16 @@ impl Session {
         self.conflict = false;
         self.ignore_mtime = None;
         self.last_mtime = store::modified_time(&self.path);
+    }
+
+    /// Bring a parked tab back from its file. The key is the one the session
+    /// kept, so no password is asked; ids that no longer exist are dropped.
+    pub fn load_parked(&mut self) -> Result<(), String> {
+        if !self.parked {
+            return Ok(());
+        }
+        self.vault = store::load(&self.path, &self.creds)?;
+        self.settle();
         Ok(())
     }
 
