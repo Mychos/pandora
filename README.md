@@ -21,8 +21,8 @@ USB stick or mirror to a private GitHub repo. The app is a native desktop progra
   your settings live in the app data directory, not in the box.
 - **Offline by default.** The only network request the app can make is to GitHub,
   and only after you add a repo yourself.
-- **No lock-in.** A JSON container, plain Rust, and a plaintext CSV
-  import/export for when you want to leave.
+- **No lock-in.** An open container with a JSON manifest, plain Rust, and a
+  plaintext CSV import/export for when you want to leave.
 
 ## Features
 
@@ -48,7 +48,8 @@ USB stick or mirror to a private GitHub repo. The app is a native desktop progra
   app. Audio (MP3, WAV, FLAC, OGG) can be played. Video and archives get a card,
   not a player — save them out to open them.
 - Drag and drop onto the window on the desktop; the phone's own file picker on
-  Android. Each file is capped at 8 MiB.
+  Android. Documents are streamed into encrypted chunks, so there is no per-file
+  size ceiling; previews stop at 64 MiB and point you at Save.
 
 ### Codes
 
@@ -79,8 +80,9 @@ USB stick or mirror to a private GitHub repo. The app is a native desktop progra
   that asks for one. It never reads the vault and never runs the crypto.
 - **Fingerprint unlock** on Android: the device's reader unlocks the platform
   keystore, and the keystore holds a sealed copy of the box's derived key.
-- **Settings:** idle lock, clipboard countdown, unlock attempt limits, language
-  (English/Spanish), dark or light, browser access, and the GitHub session.
+- **Settings:** the box's own page — master password, idle lock, clipboard
+  countdown, unlock attempt limits, browser access, the trash — and a general one
+  for the app itself: English or Spanish, and dark or light.
 
 ## How it works
 
@@ -119,24 +121,26 @@ platform split in detail. `android/README.md` covers the phone, and
 
 - **Key derivation:** Argon2id, 64 MiB of memory, 3 passes, 4 lanes, 16-byte
   salt. Derivation runs on a worker thread, never the UI thread.
-- **Encryption:** XChaCha20-Poly1305 with a random 24-byte nonce.
+- **Encryption:** XChaCha20-Poly1305 with a random 24-byte nonce, for the
+  manifest and for each 1 MiB chunk. Chunk AAD binds the box id, the record id
+  and kind, the chunk index and the plaintext length.
 - **Header binding:** the header is authenticated as AEAD associated data, so
-  the KDF parameters cannot be changed under the ciphertext. v1 boxes open; v1
-  and v2 are read, and every save writes v3, which stopped writing the keyfile
-  flag in that header (its associated data is one field shorter, and the version
-  is what tells the two spellings apart).
-- **Size padding:** the payload is padded to a 4 KiB block with a 64 KiB floor,
-  so the file size does not reveal how much is inside and a small box is never
-  its own few hundred bytes.
+  the KDF parameters cannot be changed under the ciphertext. Only v4 boxes are
+  read; an older container is refused rather than migrated. The manifest
+  authenticates the header and the chunks stay outside it.
+- **Size padding:** each chunk pads its last plaintext block to 4 KiB, and the
+  whole file is rounded to a 4 KiB block with a 64 KiB floor, so the file size
+  does not reveal how much is inside and a small box is never its own few
+  hundred bytes.
 - **Atomic writes:** sibling temp file → `fsync` → rename → directory `fsync`. A
   half-written box is never left behind, and the previous version is kept in one
   `<box>.pandora.bak` slot — a password change drops it, because it is sealed
   with the key that change replaced.
 - **Keyfile (optional):** a BLAKE2b-512 digest of the file is appended to the
   password before derivation, so the file alone is never a key. The path is never
-  stored in the box, and since v3 the box does not say whether one was used
-  either: the app derives with the keyfile when one is handed over and the AEAD
-  tag says which key the box owns. Losing it loses the vault.
+  stored in the box, and the box does not say whether one was used either: the
+  app derives with the keyfile when one is handed over and the AEAD tag says
+  which key the box owns. Losing it loses the vault.
 - **Unlock limits:** failed attempts are counted per box file, with an optional
   delay and a configurable maximum. A successful unlock forgets the failures.
 - **In memory:** the master password is used only for derivation and dropped; the
@@ -164,29 +168,22 @@ of scope and why, and how to report something that looks wrong.
 
 ## The vault file
 
-A box is one JSON file: a plaintext header plus a base64-encoded encrypted
-payload.
+A box is one file. v4 writes a fixed 4 KiB header (`PANDORA4\n` plus JSON with
+the KDF, a random box id and the manifest's location), 1 MiB encrypted chunks for
+documents and notes, and an encrypted manifest at the end. This version only
+opens v4; an older JSON container is refused rather than migrated.
 
-```json
-{
-  "version": 3,
-  "kdf": {
-    "algorithm": "argon2id",
-    "m_cost": 65536,
-    "t_cost": 3,
-    "p_cost": 4,
-    "salt": "…base64…"
-  },
-  "nonce": "…base64…",
-  "ciphertext": "…base64…"
-}
-```
-
-The decrypted payload holds four collections — `folders`, `logins`, `drive`,
+The decrypted manifest holds four collections — `folders`, `logins`, `drive`,
 `otps` — plus `trash`, the records deleted but not erased. A drive entry is a
 tagged `Entry`: a `note` or a `file`. Records are addressed by id, so operations
 that do not care about the kind (select, drag, move, delete, export) never need
 to know which collection a record came from.
+
+A file's or note's bytes live in chunks outside the manifest; only the manifest
+is read when a box opens. A document is decrypted when it is previewed or
+exported, one chunk at a time, so the box does not carry every file in memory.
+Files picked or dropped on the desktop stay where they are until the save
+chunks them; a phone picker copy is staged, chunked and then removed.
 
 ## Where things live
 
@@ -417,12 +414,13 @@ platform split and the security rules.
 - iOS is not wired up yet; the icon assets exist, the entry point does not.
 - GitHub is the only mirror provider. A box is read through the Contents API, and
   past 1 MB through the Git Blobs API under the same sha; GitHub caps a blob at
-  100 MB, and each drive file at 8 MiB, so a box carrying a large attachment is
-  slower to sync but no longer refused.
+  100 MB, so a box carrying a very large attachment may be too big for GitHub;
+  local storage itself has no per-file ceiling.
 - A box that needs a keyfile cannot be opened from the browser.
 - No video preview, no auto-type, no server-side sync, no plugin API.
-- The vault format is not frozen: v1, v2 and v3 open, and a future version may add
-  fields (persisted fields must be optional).
+- The vault format is not frozen: v4 is the only format this version reads and
+  writes; an older container is refused, and a future version may add fields
+  (persisted fields must be optional).
 - Android packages only `arm64-v8a`, which is every phone that runs minSdk 29.
 
 ## License
@@ -433,8 +431,8 @@ MIT. See [`LICENSE`](LICENSE).
 
 Pandora stands on a lot of good Rust:
 
-- [egui / eframe](https://github.com/emilk/egui) for the immediate-mode UI, wgpu
-  on the desktop and glow on the phone.
+- [egui / eframe](https://github.com/emilk/egui) for the immediate-mode UI, glow
+  on the desktop (wgpu is the fallback) and glow on the phone.
 - [Argon2](https://github.com/RustCrypto/password-hashes) and
   [XChaCha20-Poly1305](https://github.com/RustCrypto/AEADs).
 - [rxing](https://github.com/rxing-core/rxing) (ZXing) for QR reading.

@@ -1,9 +1,9 @@
 # AGENTS.md
 
 Pandora — offline secrets vault stored in one portable encrypted file. Single Rust
-crate (no workspace): egui/eframe GUI — wgpu on the desktop, glow on the phone,
-where it is 1.2 MB of APK smaller. Android is wired up (`android/`, see its
-README); iOS is not.
+crate (no workspace): egui/eframe GUI — Glow on the desktop by default, with wgpu
+as the fallback, and glow on the phone, where it is 1.2 MB of APK smaller. Android
+is wired up (`android/`, see its README); iOS is not.
 
 A Linux build needs the ALSA headers the audio preview links against
 (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora).
@@ -11,7 +11,9 @@ A Linux build needs the ALSA headers the audio preview links against
 ## Commands
 
 ```bash
-cargo run                        # GUI; needs a display
+cargo run                        # GUI; needs a display (Glow by default)
+PANDORA_RENDERER=wgpu cargo run  # desktop wgpu fallback
+cargo run --no-default-features  # wgpu-only build, no Glow linked
 cargo test                       # full suite, ~25s
 cargo test vault::store          # single module / group
 cargo test create_open_roundtrip # single test by name
@@ -111,6 +113,13 @@ renderer is wgpu on the desktop and glow on the phone: `glow` is 1.2 MB of APK
 smaller there, and the case that kept it out — the locked phone — was re-run on
 a device and paints. `App::ui`'s swapchain knob is wgpu-only and compiled out
 on Android; the numbers and the way back are in `android/README.md`.
+
+The desktop defaults to Glow: eframe is built with both renderers and
+`PANDORA_RENDERER=wgpu` falls back at runtime; `--no-default-features` builds
+wgpu-only without linking Glow. On the measured NVIDIA machine Glow was ~95 MiB
+RSS / 60 MiB PSS / 26 MiB VRAM warm against wgpu's ~171 / 92 / 215; the first
+(cold) run is heavier because it compiles shaders. `App` keeps a runtime `wgpu`
+flag: the swapchain-latency call is wgpu-only and must not run under Glow.
 
 On Linux the desktop runs native Wayland when the session offers it: the
 compositor owns the resize gesture there. winit 0.30 only emits `DroppedFile`
@@ -257,13 +266,24 @@ keystore, and what the keystore holds is a box's **derived key** (see
 
 ## Vault format
 
-A vault is one portable JSON file: plaintext header + base64-encrypted payload.
+A vault is one portable file. v4 is a fixed 4 KiB header, 1 MiB encrypted chunks and
+an encrypted manifest at the end. Only v4 opens; an older container is refused.
 
-- `CURRENT_VERSION` is 3. v2 binds the header to the payload as AEAD associated data;
-  v3 stopped writing the keyfile flag in that header, so its associated data is one
-  field shorter and the version is what tells the two spellings apart. Changing what
-  the header covers means a new version, not an edit. v1 and v2 boxes still open, and
-  the next save writes v3.
+- `CURRENT_VERSION` is 4. The header is `PANDORA4\n` followed by JSON (KDF, a random
+  `box_id`, and the manifest's offset, length and nonce), padded to 4 KiB. The
+  manifest's AEAD tag authenticates the header fields, so the KDF parameters cannot
+  be changed under the ciphertext. Changing what the header covers means a new
+  version, not an edit. Only v4 boxes open; an older container is refused.
+- A file or note body lives in one or more chunks outside the manifest. Each chunk is
+  XChaCha20-Poly1305 with its own random nonce; its AAD binds the box id, the record
+  id and kind, the chunk index, the chunk count and the plaintext length, so a chunk
+  cannot be moved to another record or position. The manifest carries the index and
+  is the only thing decrypted on open: `File.data` and `Note.body` are read on demand
+  (`Vault::read_file`, `note_text`, `copy_file_to`).
+- A file picked or dropped on the desktop stays where it is as a pending path until the save chunks it; a phone picker copy is moved to the app's staging
+  folder, chunked on save and then removed. Nothing is read into memory whole.
+- Password rotation re-encrypts every chunk: the writer notices the KDF changed and
+  reads the old records through the old reader before writing with the new key.
 - The plaintext payload is **four collections**: `folders`, `logins`, `drive` and
   `otps` — plus `trash`, the records deleted but not erased. `trash` holds `Trashed`,
   the owned mirror of `Any` with the place each record held, so a restore puts a drive
@@ -274,9 +294,10 @@ A vault is one portable JSON file: plaintext header + base64-encrypted payload.
   type and not a field — a note cannot hold a password, a code cannot be handed to a
   login form, and a note cannot carry bytes. `Kind` is a projection of that for the
   screen and the interchange file, never a field.
-- A file's bytes travel inside the box, so a phone's picker copy (which `Pandora.java`
-  leaves in the app's own storage) is read and then deleted: the plaintext copy is not
-  the user's file.
+- A file's bytes travel inside the box as chunks, never as a separate clear file: a
+  phone's picker copy is staged, chunked on save and deleted. A document is read only
+  when it is previewed or exported; `MAX_PREVIEW` (64 MiB) is a preview ceiling, not a
+  storage limit.
 - **Leaving the box is never silent.** Both ways out — the CSV of the whole box
   (`export_csv`) and one document's bytes (`export_file`) — go through a `Confirm` that
   says it lands unencrypted in Downloads, names the exact file, and offers
@@ -295,9 +316,10 @@ A vault is one portable JSON file: plaintext header + base64-encrypted payload.
   renames or drops one. `url_match` on a login is the pattern: a vault nobody gave a
   rule to writes the JSON it always did, and
   `an_empty_box_writes_no_empty_collection` guards the rest.
-- Writes are atomic (`.tmp` + `fsync` + rename), and the payload is padded to a 4 KiB
-  block with a 64 KiB floor (`PAD_FLOOR`), so a small box is never its own few hundred
-  bytes and its size does not leak.
+- Writes are atomic (`.tmp` + `fsync` + rename). Chunks pad their last plaintext block
+  to 4 KiB, and the whole file is rounded to a 4 KiB block with a 64 KiB floor
+  (`PAD_FLOOR`), so a small box is never its own few hundred bytes and its size does
+  not leak.
 - Every write keeps the version it displaced in one `<box>.pandora.bak` beside the file:
   a sync, a save or a repo fetch is never the last word on a box. That copy is written
   through `private_file` (`store::stash` → `copy_private`) and not with `fs::copy`: a
@@ -309,8 +331,8 @@ A vault is one portable JSON file: plaintext header + base64-encrypted payload.
   is sealed with the key the change just replaced. Rotation does not reach further than
   this machine: see the mirror section for the repo's own history.
 - A keyfile is an optional second factor. Losing it loses the vault, so its path is
-  never stored inside the vault — and since v3 the box does not say whether one was
-  used either: `store::open` derives with the keyfile when one is handed over and then
+  never stored inside the vault — and the box does not say whether one was used
+  either: `store::open` derives with the keyfile when one is handed over and then
   with the password alone, and the AEAD tag says which key the box owns. One derivation
   in the usual case, two for a box that has a keyfile. A keyfile box opened without it
   answers with the same `crypto::WRONG` a bad password does, which is why the unlock
@@ -352,6 +374,11 @@ thing that should come back out of a log or a panel.
 - The light scheme is held to AA for `text` and `muted` on every surface, and the
   selected fill is held to AA behind `text` (`both_schemes_keep_their_text_readable`).
   `faint` is for hints and only has to stay lighter than `muted`.
+- The scheme and the language are the app's, not a box's: they are read before one
+  opens and outlive every one of them, so they live in `settings::ui::general` — the
+  bar's sliders, a dialog reachable with nothing unlocked. The gear on the box's strip
+  is the box's own page (`Tab::Settings`), and each is named for what it holds
+  ("General settings" against "Box settings").
 - No OS title bar: the shell paints the drag region, window buttons and resize edges.
   Invisible interactive regions must use the `Sense::CLICK`/`Sense::DRAG` consts, not
   `click()`/`drag()`, or they become dead tab stops.

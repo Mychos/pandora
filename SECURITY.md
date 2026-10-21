@@ -27,17 +27,20 @@ file leaving your control — a backup, a USB stick, a laptop that gets stolen, 
 private repo on somebody else's server — and remaining unreadable without the
 master password.
 
-- **At rest.** The payload is XChaCha20-Poly1305 with a random 24-byte nonce, under
-  a key derived with Argon2id (64 MiB, 3 passes, 4 lanes, 16-byte salt). Parameters
-  live in the plaintext header and are authenticated as AEAD associated data, so
-  they cannot be turned down under the ciphertext (`src/vault/crypto.rs`).
+- **At rest.** The manifest and every chunk are XChaCha20-Poly1305 with a random
+  24-byte nonce, under a key derived with Argon2id (64 MiB, 3 passes, 4 lanes,
+  16-byte salt). Header parameters are authenticated as the manifest's AEAD
+  associated data, so they cannot be turned down under the ciphertext
+  (`src/vault/crypto.rs`, `vault/store.rs`). Chunk AAD binds the box id, record id
+  and kind, chunk index and plaintext length, so chunks cannot be moved.
 - **The optional keyfile.** A second factor: the BLAKE2b-512 digest of the file is
   appended to the password before derivation, so the password alone is not enough
-  and the file alone is not either. Since v3 the box no longer records whether a
-  keyfile was used; the AEAD tag says which key the box owns. Losing the keyfile
-  loses the vault.
-- **Size.** The payload is padded to a 4 KiB block with a 64 KiB floor, so a box
-  with one login is not visibly smaller than a box with a hundred.
+  and the file alone is not either. The box does not record whether a keyfile
+  was used; the AEAD tag says which key the box owns. Losing the keyfile loses
+  the vault.
+- **Size.** Chunk plaintext is padded to a 4 KiB block and the whole file is
+  rounded to a 4 KiB block with a 64 KiB floor, so a box with one login is not
+  visibly smaller than a box with a hundred.
 - **In memory.** The master password is used only for derivation and dropped; the
   derived key and every secret field are `Zeroizing`. Record types hand-write
   `Debug` so a panic cannot print one. Errors never repeat what a caller sent, and
@@ -164,8 +167,8 @@ refused); `0` attempts never refuses. An unlock that works forgets the failures.
   documents it and offers the delete.
 - The extension seeing a site's entry names, usernames and URLs: that is what it
   is for, and no password rides on a listing.
-- Refusing to open a v1 box that predates a format change, or a copy older than the
-  one on screen (`store::ROLLED_BACK`) — both are the guard working.
+- Refusing a box that is not v4, or a copy older than the one on screen
+  (`store::ROLLED_BACK`) — that is the guard working.
 - The user's own lost keyfile or forgotten password. There is no recovery path, and
   that is the design.
 
@@ -175,8 +178,8 @@ refused); `0` attempts never refuses. An unlock that works forgets the failures.
 | --- | --- | --- |
 | Key derivation | Argon2id, 64 MiB, 3 passes, 4 lanes, 16-byte salt | `vault/crypto.rs` |
 | Keyfile | BLAKE2b-512 of the file, appended to the password before derivation | `vault/crypto.rs` |
-| Encryption | XChaCha20-Poly1305, random 24-byte nonce | `vault/crypto.rs` |
-| Header binding | header as AEAD associated data (v2, v3) | `vault/store.rs` |
+| Encryption | XChaCha20-Poly1305, random 24-byte nonce per chunk and manifest | `vault/crypto.rs`, `vault/store.rs` |
+| Header binding | header as the manifest's AEAD associated data (v4) | `vault/store.rs` |
 | Clipboard fingerprint | BLAKE2, never the text | `vault/crypto.rs`, `features/shell/clipboard.rs` |
 | Box key in prefs | 128-bit BLAKE2b digest of the canonical path | `vault/crypto.rs`, `crypto::digest` |
 | Phone seal | platform keystore (Keystore/Keychain) over the derived key | `features/auth/biometric/` |
@@ -186,7 +189,6 @@ well-known one from the RustCrypto crates, chosen for what it is.
 
 ## Supported versions
 
-The project is pre-1.0 and single-track: fixes land on `main`. A `.pandora` box
-written by any released version keeps opening — v1 and v2 are read and every save
-writes v3 — and the format is not frozen yet, so a new persisted field is always
-optional.
+The project is pre-1.0 and single-track: fixes land on `main`. This version only
+reads and writes v4; an older container is refused rather than migrated. The
+format is not frozen yet, so a new persisted field is always optional.
