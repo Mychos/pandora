@@ -1,7 +1,9 @@
 //! Which field of a record a query matches: never a password, a seed or a file's bytes.
 
-use crate::vault::model::{Any, Entry, Folder, Kind, Vault};
+use crate::vault::model::{Any, Entry, Folder, Kind, Note, Vault};
 use std::borrow::Cow;
+use std::collections::HashMap;
+use zeroize::Zeroizing;
 
 pub struct Hit<'a> {
     pub found: Found<'a>,
@@ -40,9 +42,56 @@ impl<'a> Hit<'a> {
     }
 }
 
+/// Note text a search has already decrypted, bound to the digest it came from: a
+/// closed note is read once instead of on every keystroke, and an edited one is read
+/// again because its digest no longer matches. It lives as long as the palette.
+#[derive(Default)]
+pub struct NoteCache(HashMap<String, (String, Zeroizing<String>)>);
+
+impl NoteCache {
+    /// Keep a closed note's text unless the digest says it is already there. An open
+    /// note needs no copy, and one that will not decrypt simply scores empty.
+    fn keep(&mut self, vault: &Vault, note: &Note) {
+        let Some(record) = note.record.as_ref() else {
+            return;
+        };
+        if note.loaded {
+            return;
+        }
+        if self
+            .0
+            .get(&note.id)
+            .is_some_and(|(kept, _)| kept == &record.digest)
+        {
+            return;
+        }
+        if let Ok(text) = vault.note_text(note) {
+            self.0
+                .insert(note.id.clone(), (record.digest.clone(), text));
+        }
+    }
+
+    /// The text to score a note by: its own body while it is open, else the copy
+    /// kept for the same digest, else nothing.
+    fn text<'a>(&'a self, note: &'a Note) -> &'a str {
+        if note.loaded || note.record.is_none() {
+            return note.body.as_str();
+        }
+        let digest = note
+            .record
+            .as_ref()
+            .map_or("", |record| record.digest.as_str());
+        match self.0.get(&note.id) {
+            Some((kept, text)) if kept == digest => text.as_str(),
+            _ => "",
+        }
+    }
+}
+
 /// Best first, stable within a score so the box's own order shows through a tie;
-/// an empty query matches nothing.
-pub fn find<'a>(vault: &'a Vault, query: &str) -> Vec<Hit<'a>> {
+/// an empty query matches nothing. Note text comes from `notes`, which spares the
+/// box a decrypt per keystroke.
+pub fn find<'a>(vault: &'a Vault, query: &str, notes: &mut NoteCache) -> Vec<Hit<'a>> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return Vec::new();
@@ -57,8 +106,8 @@ pub fn find<'a>(vault: &'a Vault, query: &str) -> Vec<Hit<'a>> {
                 &q,
             ),
             Any::Drive(Entry::Note(note)) => {
-                let body = vault.note_text(note).unwrap_or_default();
-                score(&note.name, [], [body.as_str()], &q)
+                notes.keep(vault, note);
+                score(&note.name, [], [notes.text(note)], &q)
             }
             Any::Drive(Entry::File(file)) => score(&file.name, [], [], &q),
             Any::Otp(otp) => score(&otp.name, [], [], &q),
@@ -166,10 +215,43 @@ mod tests {
         hits.iter().map(|h| h.name().to_owned()).collect()
     }
 
+    /// One search with a cold cache: what the palette gets on its first keystroke.
+    fn search<'a>(vault: &'a Vault, query: &str) -> Vec<Hit<'a>> {
+        find(vault, query, &mut NoteCache::default())
+    }
+
+    /// A closed note's text is kept for the digest it was read from, and a digest
+    /// that moved is never answered with the old text.
+    #[test]
+    fn a_closed_notes_text_survives_only_while_its_digest_does() {
+        let mut notes = NoteCache::default();
+        let mut note = Note::new(1);
+        note.loaded = false;
+        note.record = Some(crate::vault::model::BlobRecord {
+            size: 5,
+            digest: "old".to_owned(),
+            chunks: Vec::new(),
+        });
+        notes.0.insert(
+            note.id.clone(),
+            ("old".to_owned(), Zeroizing::new("alpha".to_owned())),
+        );
+        assert_eq!(notes.text(&note), "alpha", "the copy is the note's text");
+
+        let mut moved = note;
+        moved.record.as_mut().unwrap().digest = "new".to_owned();
+        notes.keep(&Vault::new("Box"), &moved);
+        assert_eq!(
+            notes.text(&moved),
+            "",
+            "a note that could not be read again is not answered from the old copy"
+        );
+    }
+
     #[test]
     fn an_empty_query_matches_nothing() {
-        assert!(find(&vault(), "").is_empty());
-        assert!(find(&vault(), "   ").is_empty());
+        assert!(search(&vault(), "").is_empty());
+        assert!(search(&vault(), "   ").is_empty());
     }
 
     #[test]
@@ -183,11 +265,11 @@ mod tests {
         v.otps.push(otp);
 
         assert!(
-            find(&v, "hunter2-unique").is_empty(),
+            search(&v, "hunter2-unique").is_empty(),
             "a password is not indexed"
         );
         assert!(
-            find(&v, "JBSWY3DPEHPK3PXP").is_empty(),
+            search(&v, "JBSWY3DPEHPK3PXP").is_empty(),
             "a seed is not indexed"
         );
     }
@@ -201,16 +283,16 @@ mod tests {
             1,
         )));
         assert!(
-            names(&find(&v, "inside")).is_empty(),
+            names(&search(&v, "inside")).is_empty(),
             "the bytes are not text"
         );
-        assert_eq!(names(&find(&v, "notes")), ["notes.txt"]);
+        assert_eq!(names(&search(&v, "notes")), ["notes.txt"]);
     }
 
     #[test]
     fn the_best_match_comes_first() {
         let v = vault();
-        let hits = names(&find(&v, "github"));
+        let hits = names(&search(&v, "github"));
         assert_eq!(
             hits,
             ["GitHub", "GitHub", "GitHub recovery", "github-backup.zip"],
@@ -221,10 +303,10 @@ mod tests {
 
     #[test]
     fn a_field_and_a_body_rank_under_the_name() {
-        let by_user = names(&find(&vault(), "octocat"));
+        let by_user = names(&search(&vault(), "octocat"));
         assert_eq!(by_user, ["GitHub"], "the username is searchable");
 
-        let by_notes = names(&find(&vault(), "recovery"));
+        let by_notes = names(&search(&vault(), "recovery"));
         assert_eq!(
             by_notes,
             ["GitHub recovery", "Correo"],
@@ -236,7 +318,7 @@ mod tests {
     fn every_kind_and_a_folder_are_reachable() {
         let mut v = vault();
         v.folders.push(Folder::new("GitHub Docs", None, 1));
-        let hits = find(&v, "github");
+        let hits = search(&v, "github");
         assert_eq!(
             hits.iter().filter(|h| h.kind() == Some(Kind::Otp)).count(),
             1
@@ -250,7 +332,7 @@ mod tests {
 
     #[test]
     fn a_match_ignores_case() {
-        assert_eq!(names(&find(&vault(), "GITHUB")).len(), 4);
-        assert_eq!(names(&find(&vault(), "OctoCat")).len(), 1);
+        assert_eq!(names(&search(&vault(), "GITHUB")).len(), 4);
+        assert_eq!(names(&search(&vault(), "OctoCat")).len(), 1);
     }
 }

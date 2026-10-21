@@ -24,25 +24,33 @@ impl App {
             query: String::new(),
             at: 0,
             needs_focus: true,
+            ..Find::default()
         };
     }
 
     /// What the query matches right now, owned so the caller may change the box
-    /// while it holds the rows.
-    pub fn find_rows(&self) -> Vec<Row> {
+    /// while it holds the rows. A frame that changes neither the query nor the
+    /// box's generation reuses the last list instead of searching again.
+    pub fn find_rows(&mut self) -> Vec<Row> {
         let Some(s) = self.boxes.session.as_ref() else {
             return Vec::new();
         };
-        search::find(&s.vault, &self.find.query)
-            .into_iter()
-            .take(SHOWN)
-            .map(|hit| Row {
-                id: hit.id().to_owned(),
-                name: hit.name().to_owned(),
-                kind: hit.kind(),
-                detail: hit.detail.into_owned(),
-            })
-            .collect()
+        let key = (self.find.query.clone(), s.vault.seq);
+        if self.find.searched.as_ref() != Some(&key) {
+            let rows: Vec<Row> = search::find(&s.vault, &self.find.query, &mut self.find.notes)
+                .into_iter()
+                .take(SHOWN)
+                .map(|hit| Row {
+                    id: hit.id().to_owned(),
+                    name: hit.name().to_owned(),
+                    kind: hit.kind(),
+                    detail: hit.detail.into_owned(),
+                })
+                .collect();
+            self.find.rows = rows;
+            self.find.searched = Some(key);
+        }
+        self.find.rows.clone()
     }
 
     /// Move the highlighted row, wrapping round the ends.
@@ -218,5 +226,25 @@ mod tests {
         assert!(app.find_rows().is_empty(), "the login is not a hit");
         app.find.query = "UNIQUESEED".to_owned();
         assert!(app.find_rows().is_empty(), "the seed is not a hit");
+    }
+
+    /// The same query is not searched again, and a new one is.
+    #[test]
+    fn a_row_list_is_reused_until_the_query_changes() {
+        let mut app = app();
+        app.open_find();
+        app.find.query = "github".to_owned();
+        let first = app.find_rows();
+        assert!(!first.is_empty());
+
+        app.boxes.session.as_mut().unwrap().vault.logins[0].name = "Renamed".to_owned();
+        assert_eq!(
+            app.find_rows().len(),
+            first.len(),
+            "an unchanged query reuses the rows it already has"
+        );
+
+        app.find.query = "renamed".to_owned();
+        assert_eq!(app.find_rows().len(), 1, "a new query searches again");
     }
 }
