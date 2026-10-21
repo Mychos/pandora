@@ -52,6 +52,10 @@ jobs:
         id: version
         env:
           REQUESTED_TAG: ${{ github.event.inputs.tag_name || (github.ref_type == 'tag' && github.ref_name) || '' }}
+          PANDORA_KEYSTORE_BASE64: ${{ secrets.PANDORA_KEYSTORE_BASE64 }}
+          PANDORA_KEYSTORE_PASSWORD: ${{ secrets.PANDORA_KEYSTORE_PASSWORD }}
+          PANDORA_KEY_ALIAS: ${{ secrets.PANDORA_KEY_ALIAS }}
+          PANDORA_KEY_PASSWORD: ${{ secrets.PANDORA_KEY_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -60,15 +64,37 @@ jobs:
 
           # Gradle carries its own versionName; a release where the APK and the
           # desktop binaries disagree is a release nobody can describe.
-          android_version=$(sed -n 's/.*versionName "\(.*\)"/\1/p' android/app/build.gradle | head -1)
+          android_version=$(sed -n 's/^def appVersion = "\(.*\)"/\1/p' android/app/build.gradle | head -1)
           if [ "$android_version" != "$version" ]; then
             echo "android versionName $android_version does not match Cargo.toml $version" >&2
+            exit 1
+          fi
+
+          # Gradle turns that name into the versionCode Android compares before it
+          # accepts an update; a name it cannot read would only surface there.
+          if ! printf '%s' "$android_version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "android versionName $android_version is not MAJOR.MINOR.PATCH" >&2
             exit 1
           fi
 
           if [ -n "$REQUESTED_TAG" ] && [ "$REQUESTED_TAG" != "v$version" ]; then
             echo "requested tag $REQUESTED_TAG does not match Cargo.toml version $version" >&2
             exit 1
+          fi
+
+          # A published release is the only one worth the keys, and the APK is
+          # signed with them or not at all: checked here, where it costs five
+          # minutes, instead of after the build that would have to be thrown away.
+          if [ -n "$REQUESTED_TAG" ]; then
+            missing=""
+            for key in PANDORA_KEYSTORE_BASE64 PANDORA_KEYSTORE_PASSWORD PANDORA_KEY_ALIAS PANDORA_KEY_PASSWORD; do
+              eval "set_value=\${$key:-}"
+              [ -n "$set_value" ] || missing="$missing $key"
+            done
+            if [ -n "$missing" ]; then
+              echo "::error::releasing $REQUESTED_TAG needs the Android signing key as repository secrets, and these are missing:$missing" >&2
+              exit 1
+            fi
           fi
 
           echo "value=$version" >> "$GITHUB_OUTPUT"
@@ -190,10 +216,17 @@ jobs:
           Compress-Archive -Path "$dir/*" -DestinationPath "dist/$name.zip" -Force
           Get-FileHash "dist/$name.zip" -Algorithm SHA256 | Format-List
 
+          # The in-app update replaces the executable itself, so the release has to
+          # carry one: a zip the updater would have to unpack is a dependency it
+          # does not need.
+          Copy-Item "target/release/pandora.exe" "dist/Pandora-$env:VERSION-windows-x86_64.exe"
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-zip
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.exe
           if-no-files-found: error
 
   macos:
@@ -261,6 +294,36 @@ jobs:
             "build-tools;35.0.0" \
             "ndk;26.3.11579264"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
+
+      - name: release keystore
+        env:
+          PANDORA_KEYSTORE_BASE64: ${{ secrets.PANDORA_KEYSTORE_BASE64 }}
+          PANDORA_KEYSTORE_PASSWORD: ${{ secrets.PANDORA_KEYSTORE_PASSWORD }}
+          PANDORA_KEY_ALIAS: ${{ secrets.PANDORA_KEY_ALIAS }}
+          PANDORA_KEY_PASSWORD: ${{ secrets.PANDORA_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PANDORA_KEYSTORE_BASE64:-}" ]; then
+            echo "::error::PANDORA_KEYSTORE_BASE64 is not set: an APK signed with the debug key is an APK no released install can take as an update" >&2
+            exit 1
+          fi
+
+          keystore="$PWD/android/pandora-release.jks"
+          printf '%s' "$PANDORA_KEYSTORE_BASE64" | base64 -d > "$keystore"
+          chmod 600 "$keystore"
+
+          # The bytes and the password are proven together now; otherwise the first
+          # sign that fails is Gradle's, forty minutes in.
+          keytool -list -keystore "$keystore" -alias "$PANDORA_KEY_ALIAS" \
+            -storepass:env PANDORA_KEYSTORE_PASSWORD > /dev/null
+
+          {
+            echo "PANDORA_KEYSTORE=$keystore"
+            echo "PANDORA_KEYSTORE_PASSWORD=$PANDORA_KEYSTORE_PASSWORD"
+            echo "PANDORA_KEY_ALIAS=$PANDORA_KEY_ALIAS"
+            echo "PANDORA_KEY_PASSWORD=$PANDORA_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
 
       - name: package
         env:

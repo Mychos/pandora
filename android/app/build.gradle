@@ -2,6 +2,30 @@ plugins {
     id 'com.android.application'
 }
 
+// The app's one version. `versionCode` is the number Android compares before it
+// takes a build as an update, so it is derived from this and never written by
+// hand: 0.1.1 ships as 101, and the old APK is replaceable.
+//
+// shortcut: two digits per part, so 0.99.99 is the ceiling — widen the strides
+// when a third digit is ever needed.
+def appVersion = "0.1.1"
+def digits = appVersion.tokenize('.').collect { it.toInteger() }
+assert digits.size() == 3, "the app version must be MAJOR.MINOR.PATCH: $appVersion"
+def appCode = digits[0] * 10000 + digits[1] * 100 + digits[2]
+
+// The key every released APK is signed with. It is a secret: `.gitignore` keeps
+// it out of the repository and CI decodes it from one, so a local build has none
+// and the release type below spends the debug key instead.
+def signingPath = System.getenv("PANDORA_KEYSTORE")?.trim()
+def signingFile = signingPath ? file(signingPath) : null
+if (signingFile != null && !signingFile.isFile()) {
+    logger.warn("PANDORA_KEYSTORE is set but ${signingFile} is not a file")
+    signingFile = null
+}
+if (signingFile == null) {
+    logger.warn("PANDORA_KEYSTORE is not set: this APK is signed with the debug key and cannot replace a released install")
+}
+
 android {
     // The Java package the Rust side calls into (`dev/pandora/Pandora`),
     // so a rename here is a rename there.
@@ -17,8 +41,22 @@ android {
         // Older phones get the master password, which is the way in anyway.
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName "0.1.0"
+        versionCode appCode
+        versionName appVersion
+    }
+
+    signingConfigs {
+        if (signingFile != null) {
+            release {
+                storeFile signingFile
+                // PKCS12, the only type `keytool` writes by default: it keeps
+                // nothing in the key password, so both are the store's.
+                storeType "pkcs12"
+                storePassword System.getenv("PANDORA_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("PANDORA_KEY_ALIAS") ?: "pandora"
+                keyPassword System.getenv("PANDORA_KEY_PASSWORD") ?: System.getenv("PANDORA_KEYSTORE_PASSWORD")
+            }
+        }
     }
 
     androidResources {
@@ -39,10 +77,10 @@ android {
             // `proguard-rules.pro` is what keeps them.
             minifyEnabled = true
             shrinkResources = true
-            // Signed with the debug key on purpose: the point of this build is
-            // to be installed over `adb` and weighed, and an unsigned APK cannot
-            // be. A store build gets its own keystore.
-            signingConfig = signingConfigs.getByName("debug")
+            // The release key when one was handed in — an APK signed with
+            // another key is an APK no user can install over the last one. Locally
+            // the debug key stands in, because an unsigned APK installs nowhere.
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
         debug {
