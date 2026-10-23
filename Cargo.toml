@@ -1,7 +1,10 @@
 [package]
 name = "pandora"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
+# What the pinned toolchain builds: `rust-toolchain.toml` is the exact compiler, this
+# is the oldest one the crate claims to work with.
+rust-version = "1.99"
 description = "Pandora — offline secrets vault, one portable encrypted file"
 license = "MIT"
 default-run = "pandora"
@@ -51,6 +54,21 @@ dirs = "7"
 # fall back on there (`android_logger`, `adb logcat -s pandora`) — but the shared
 # side needs the macros to say anything at all.
 log = "0.4"
+# The recovery code a user writes down: base32, so a printer and a person can tell an
+# O from a 0.
+data-encoding = "2"
+# The release's SHA256SUMS, signed: a hash says the download is intact, a signature
+# says who wrote it.
+minisign-verify = "0.3"
+# Sealed shares: one X25519 exchange, no certificate, no server.
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+# WebAuthn: the host signs, and nothing else in the app knows these crates.
+ciborium = "0.2"
+p256 = { version = "0.14", features = ["ecdsa"] }
+ed25519-dalek = "3"
+# Reading another manager's export: 1PUX is a zip, KeePass is XML, Bitwarden is JSON.
+zip = { version = "9", default-features = false, features = ["deflate"] }
+quick-xml = "0.41"
 # Icon sprites (lucide) rasterized to PNG; same image crate version eframe already pulls.
 # `png`/`jpeg`/`webp` only: a `.gif` or `.bmp` in the drive gets the generic
 # card instead of a preview, and `preview::is_image` lists the same three.
@@ -61,8 +79,8 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 # A URI calls an account `ACME%20Co`: the escape has to come off before it
 # names a row. Already in the tree inside `url`.
-percent-encoding = "2"
 url = "2.5.8"
+percent-encoding = "2"
 psl2 = "0.1.32"
 # Reading a one-time seed out of a QR image: pure Rust, no image backend of its
 # own — the bytes are already decoded by the `image` crate above.
@@ -93,6 +111,11 @@ rodio = { version = "0.23", default-features = false, features = [
     "vorbis",
     "wav",
 ] }
+
+# The YubiKey's HMAC-SHA1 challenge-response, desktop only: it needs USB HID, and a
+# phone does not have a port for one.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+yubikey-hmac-otp = "0.10"
 
 # Desktop only: the native file picker (xdg-desktop-portal on Linux, so no GTK)
 # and the clipboard egui copies through — the app reads it back so the countdown
@@ -168,6 +191,9 @@ android_logger = "0.15"
 # The other half of the QR test: one crate encodes, the other reads, so a round
 # trip proves the reader rather than a checked-in fixture nobody can inspect.
 qrcode = "0.14"
+# Two devices over one directory: the folder mirror's protocol is exercised on a
+# temp folder before any of it reaches a phone.
+tempfile = "3"
 
 # egui, winit and wgpu are heavy enough that unoptimized they make every frame of
 # `cargo run` — the resize gesture above all — visibly slower than the release
@@ -190,6 +216,9 @@ opt-level = 2
 [profile.dev.package.pandora]
 opt-level = 2
 
+# Two builds of one commit have to be the same bytes: the paths rustc embeds are
+# remapped by `scripts/appimage.sh`, and the binary is stripped (`strip = true`,
+# below). Nothing here needs a backtrace from a released binary.
 [profile.release]
 # `s`, and not the default `3` or `z`, is what the phone weighs: measured on the
 # Android `.so` (`target/apk-size/measure.sh`), `s` takes the APK from 9.28 MB

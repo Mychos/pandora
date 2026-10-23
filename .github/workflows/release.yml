@@ -104,7 +104,8 @@ jobs:
     needs: meta
     if: ${{ !github.event.inputs.jobs || github.event.inputs.jobs == 'all' || contains(github.event.inputs.jobs, 'linux') }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    # Packaging plus a second, independent build for the reproducibility check.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -122,7 +123,9 @@ jobs:
             libxkbcommon-dev \
             desktop-file-utils
 
-      - uses: dtolnay/rust-toolchain@stable
+      # The same pinned compiler `rust-toolchain.toml` names: a release built by a
+      # different rustc is a different binary, and this one is compared byte for byte.
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
 
       - name: pin build timestamp
@@ -134,6 +137,9 @@ jobs:
           # when the repository variable is absent instead of compiling in an
           # empty id, which would turn sign-in into a broken request.
           PANDORA_GITHUB_CLIENT_ID: ${{ vars.PANDORA_GITHUB_CLIENT_ID }}
+          # The public half of the release key, compiled in so the updater can check
+          # what it downloads. A repository variable, not a secret.
+          PANDORA_MINISIGN_PUBLIC_KEY: ${{ vars.PANDORA_MINISIGN_PUBLIC_KEY }}
         run: |
           if [ -z "${PANDORA_GITHUB_CLIENT_ID:-}" ]; then
             unset PANDORA_GITHUB_CLIENT_ID
@@ -174,6 +180,23 @@ jobs:
           (cd target/appimage && sha256sum "$(basename "$image")" > SHA256SUMS)
           cat target/appimage/SHA256SUMS
 
+      # Two clean builds of the same commit, the same pinned compiler, the same epoch
+      # and the same remapped paths: what a stranger would get has to be the file just
+      # built. The step is allowed to fail so the result is published rather than
+      # swallowed; the text it writes goes to the release beside the binaries.
+      - name: reproducible?
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          scripts/repro.sh | tee reproducible.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-repro
+          path: reproducible.txt
+          if-no-files-found: ignore
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
@@ -192,13 +215,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      # The same pinned compiler `rust-toolchain.toml` names: a release built by a
+      # different rustc is a different binary, and this one is compared byte for byte.
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
 
       - name: package
         shell: pwsh
         env:
           PANDORA_GITHUB_CLIENT_ID: ${{ vars.PANDORA_GITHUB_CLIENT_ID }}
+          # The public half of the release key, compiled in so the updater can check
+          # what it downloads. A repository variable, not a secret.
+          PANDORA_MINISIGN_PUBLIC_KEY: ${{ vars.PANDORA_MINISIGN_PUBLIC_KEY }}
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
           if ([string]::IsNullOrEmpty($env:PANDORA_GITHUB_CLIENT_ID)) {
@@ -241,7 +269,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      # The same pinned compiler `rust-toolchain.toml` names: a release built by a
+      # different rustc is a different binary, and this one is compared byte for byte.
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
@@ -249,6 +279,9 @@ jobs:
       - name: package
         env:
           PANDORA_GITHUB_CLIENT_ID: ${{ vars.PANDORA_GITHUB_CLIENT_ID }}
+          # The public half of the release key, compiled in so the updater can check
+          # what it downloads. A repository variable, not a secret.
+          PANDORA_MINISIGN_PUBLIC_KEY: ${{ vars.PANDORA_MINISIGN_PUBLIC_KEY }}
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
           if [ -z "${PANDORA_GITHUB_CLIENT_ID:-}" ]; then
@@ -275,7 +308,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      # The same pinned compiler `rust-toolchain.toml` names: a release built by a
+      # different rustc is a different binary, and this one is compared byte for byte.
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
@@ -328,6 +363,9 @@ jobs:
       - name: package
         env:
           PANDORA_GITHUB_CLIENT_ID: ${{ vars.PANDORA_GITHUB_CLIENT_ID }}
+          # The public half of the release key, compiled in so the updater can check
+          # what it downloads. A repository variable, not a secret.
+          PANDORA_MINISIGN_PUBLIC_KEY: ${{ vars.PANDORA_MINISIGN_PUBLIC_KEY }}
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
           if [ -z "${PANDORA_GITHUB_CLIENT_ID:-}" ]; then
@@ -368,11 +406,31 @@ jobs:
       - name: checksums
         run: |
           cd dist
-          find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+          # What the builds produced, not the report about them.
+          find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name reproducible.txt -print0 \
             | sort -z \
             | xargs -0 -r sha256sum \
             | sed 's#  \./#  #' > SHA256SUMS
           cat SHA256SUMS
+
+      # The hash says the download is intact; this says who wrote the hash. A run
+      # without the key still publishes, and the updater falls back to the hash —
+      # which is what a build with no public key compiled in does anyway.
+      - name: sign the checksums
+        env:
+          KEY: ${{ secrets.PANDORA_MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEY:-}" ]; then
+            echo "::warning::PANDORA_MINISIGN_SECRET_KEY is not set; publishing SHA256SUMS unsigned"
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          printf '%s' "$KEY" > "$RUNNER_TEMP/minisign.key"
+          trap 'rm -f "$RUNNER_TEMP/minisign.key"' EXIT
+          ( cd dist && minisign -Sm SHA256SUMS -s "$RUNNER_TEMP/minisign.key" )
+          head -2 dist/SHA256SUMS.minisig
 
       # `gh` is already on the runner, so publishing needs no third-party
       # action and no credential beyond the workflow's own token.

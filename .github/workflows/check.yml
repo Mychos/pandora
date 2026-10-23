@@ -16,13 +16,20 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # `rust-toolchain.toml` pins the compiler every build uses; the actions below name
+  # the same one so a job never installs two of them.
+  TOOLCHAIN: "1.99.0"
+  # The fuzzers build the whole crate under AddressSanitizer, and rustc compiling
+  # `ttf-parser` with those flags segfaults when several of them run at once. Two jobs
+  # is slow and reliable; the default is fast and not.
+  CARGO_BUILD_JOBS: "2"
 
 jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -43,7 +50,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - name: typecheck every target
         run: cargo check --all-targets
@@ -58,7 +65,50 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - name: typecheck every target
         run: cargo check --all-targets
+
+  # Nothing here reaches the network at runtime; this is about what the dependency
+  # tree brings with it. A finding fails the job on purpose: the fix is a bump, or an
+  # `audit.toml` entry that says why the advisory does not apply.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The prebuilt binary: building `cargo-audit` itself wants cmake and a C
+      # toolchain for `aws-lc-sys`, which is a minute of CI for nothing.
+      - uses: taiki-e/install-action@cargo-audit
+      - name: advisories in the lock file
+        run: cargo audit
+
+  # The parsers that take bytes from a stranger: the box's base64, the CSV reader,
+  # the three importers, and the share format. Sixty seconds per target on every PR:
+  # enough to find a panic in a parser that was changed, cheap enough to never be the
+  # reason a pull request waits.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Fuzzing needs nightly, and `libfuzzer-sys` wants a C++ toolchain.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: system libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libxkbcommon-dev
+      - name: fuzz every parser
+        working-directory: fuzz
+        run: |
+          for target in codec csv import share; do
+            cargo fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=4096
+          done
+      - name: keep what it found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

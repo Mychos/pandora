@@ -1,0 +1,7 @@
+# One compiler for every build of this repository: a pinned toolchain is what makes
+# two builds of the same commit comparable, and what keeps a release from changing
+# under a stable bump. Bump it on purpose, with the whole suite run.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

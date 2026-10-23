@@ -1,0 +1,49 @@
+# The fuzzers are their own package: `cargo test` at the root never builds them, and
+# `cargo fuzz run` builds one target at a time. Each target feeds bytes to a parser
+# that already takes bytes from a stranger — the box's base64, the CSV reader, the
+# three importers, and the share format — and asserts only that nothing panics.
+
+[package]
+name = "pandora-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+pandora = { path = ".." }
+
+[[bin]]
+name = "codec"
+path = "fuzz_targets/codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "csv"
+path = "fuzz_targets/csv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import"
+path = "fuzz_targets/import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "share"
+path = "fuzz_targets/share.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

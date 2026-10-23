@@ -1,0 +1,4 @@
+# Fuzzing needs nightly: `libfuzzer-sys` and `-Z sanitizer` are not on stable.
+[toolchain]
+channel = "nightly"
+profile = "minimal"

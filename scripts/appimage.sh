@@ -15,6 +15,23 @@ cd "$(dirname "$0")/.."
 # Permissions inside the bundle must not depend on the caller's umask.
 umask 022
 
+# Where cargo and this script put their work. A reproducible-build check points
+# this at a fresh directory, so the two builds share nothing but the source.
+target=${CARGO_TARGET_DIR:-target}
+
+# A build is the same build only when its timestamps are: the commit's second when
+# there is a repository, and the epoch otherwise (a release tarball has no history).
+export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || echo 0)}
+
+# rustc writes the paths it read into the binary, and a build script's `OUT_DIR`
+# lives under the target directory — which is exactly what a reproducible-build
+# check changes between its two passes. Remapping all three makes a runner's, a
+# user's and a container's build the same bytes.
+target_abs=$(realpath -m "$target")
+repo=$(pwd)
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$target_abs=/build/target --remap-path-prefix=$repo=/build/pandora --remap-path-prefix=$cargo_home=/build/cargo"
+
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 test -n "$version"
 
@@ -30,7 +47,7 @@ case "$(uname -m)" in
     ;;
 esac
 
-outdir=target/appimage
+outdir=$target/appimage
 appdir="$outdir/Pandora.AppDir"
 rm -rf "$appdir"
 mkdir -p "$appdir/usr/bin" "$appdir/usr/lib" \
@@ -38,15 +55,19 @@ mkdir -p "$appdir/usr/bin" "$appdir/usr/lib" \
   "$appdir/usr/share/icons"
 
 cargo build --release --locked
-install -m 0755 target/release/pandora "$appdir/usr/bin/pandora"
+install -m 0755 "$target/release/pandora" "$appdir/usr/bin/pandora"
 
-# The binary is dynamically linked against libasound and nothing else besides
-# glibc. Bundling it means the AppImage also opens on a host without the ALSA
-# development/runtime package; its plugins are still loaded from the host.
-alsa=$(ldd target/release/pandora | awk '/libasound\.so/ { print $3; exit }')
-if [ -n "$alsa" ] && [ -f "$alsa" ]; then
-  cp -L "$alsa" "$appdir/usr/lib/libasound.so.2"
-fi
+# Besides glibc, the binary asks for two libraries: ALSA (the audio preview) and
+# libusb (the YubiKey's HMAC exchange). Both are bundled, so the AppImage opens on a
+# host without either; ALSA's plugins are still loaded from the host.
+for soname in libasound.so.2 libusb-1.0.so.0; do
+  found=$(ldd "$target/release/pandora" | awk -v wanted="$soname" '$1 == wanted { print $3; exit }')
+  if [ -n "$found" ] && [ -f "$found" ]; then
+    cp -L "$found" "$appdir/usr/lib/$soname"
+  else
+    echo "warning: $soname is not linked into the binary" >&2
+  fi
+done
 
 # The same desktop entry and icon the manual install uses, with a copy at the
 # root because that is where appimagetool and the desktop integration look.

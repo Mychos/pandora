@@ -25,6 +25,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.PersistableBundle;
+import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
@@ -44,6 +45,7 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.fragment.app.FragmentActivity;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -102,11 +104,17 @@ public final class Pandora {
 
     private static final int REQUEST_PICK = 1;
     private static final int REQUEST_CAMERA = 3;
+    private static final int REQUEST_TREE = 4;
+    private static final int REQUEST_CREATE = 5;
+
+    /** The mime every version file is created as: nothing here is for a viewer. */
+    private static final String BLOB = "application/octet-stream";
 
     private static volatile Activity activity;
     private static volatile boolean foreground;
     private static final AtomicBoolean SYSTEM_LOCK = new AtomicBoolean();
     private static final AtomicBoolean RESUMED = new AtomicBoolean();
+    private static final AtomicBoolean PAUSED = new AtomicBoolean();
     private static boolean screenReceiver;
     private static final BroadcastReceiver SCREEN = new BroadcastReceiver() {
         @Override
@@ -127,6 +135,15 @@ public final class Pandora {
     private static volatile CountDownLatch picking;
 
     private static volatile String picked;
+
+    /** The same latch for the folder picker: a tree, not a copied file. */
+    private static volatile CountDownLatch choosing;
+
+    private static volatile String chosen;
+
+    /** The same latch for the create-document picker. */
+    private static volatile CountDownLatch creating;
+    private static volatile String created;
 
     /** The camera while a scan is up: device, session, reader and newest frame. */
     private static volatile CameraDevice camera;
@@ -178,6 +195,7 @@ public final class Pandora {
 
     static void paused() {
         foreground = false;
+        PAUSED.set(true);
         // A camera nobody is looking at is a battery drain and, worse, a light on.
         stopCamera();
     }
@@ -192,6 +210,11 @@ public final class Pandora {
 
     static boolean takeResumed() {
         return RESUMED.getAndSet(false);
+    }
+
+    /** True once per pause: the first frame after it is where the box is written. */
+    static boolean takePaused() {
+        return PAUSED.getAndSet(false);
     }
 
     /** Is there a fingerprint reader this app is allowed to use? */
@@ -594,8 +617,321 @@ public final class Pandora {
         return path;
     }
 
+    /**
+     * Ask for a folder — a tree the vault keeps versions in — and keep the
+     * grant across restarts. What comes back is the tree's uri, which is what
+     * every later write needs; null when the user backed out. Blocks this
+     * thread; the picker runs on the UI thread.
+     */
+    static String treeOpen() {
+        Activity current = activity;
+        if (current == null) {
+            return null;
+        }
+        CountDownLatch done = new CountDownLatch(1);
+        choosing = done;
+        chosen = null;
+        failure = null;
+        current.runOnUiThread(() -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            current.startActivityForResult(intent, REQUEST_TREE);
+        });
+        await(done);
+        choosing = null;
+        String tree = chosen;
+        chosen = null;
+        if (tree == null && failure != null) {
+            String why = failure;
+            failure = null;
+            throw new IllegalStateException(why);
+        }
+        return tree;
+    }
+
+    /**
+     * Ask the system to create (or pick) a document the vault will write to, and
+     * keep its uri. Returns the uri, or null when the user backed out.
+     */
+    static String documentCreate(String mime, String name) {
+        Activity current = activity;
+        if (current == null) {
+            return null;
+        }
+        CountDownLatch done = new CountDownLatch(1);
+        creating = done;
+        created = null;
+        failure = null;
+        current.runOnUiThread(() -> {
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType(mime == null || mime.isEmpty() ? "application/octet-stream" : mime)
+                    .putExtra(Intent.EXTRA_TITLE, name == null || name.isEmpty() ? "vault.pandora" : name);
+            current.startActivityForResult(intent, REQUEST_CREATE);
+        });
+        await(done);
+        creating = null;
+        String uri = created;
+        created = null;
+        if (uri == null && failure != null) {
+            String why = failure;
+            failure = null;
+            throw new IllegalStateException(why);
+        }
+        return uri;
+    }
+
+    /**
+     * The names in a tree, one per line, or null when it cannot be listed. An
+     * empty tree is an empty answer, which is not the same as a refusal.
+     */
+    static String treeList(String tree) {
+        Activity current = activity;
+        if (current == null) {
+            return null;
+        }
+        Uri uri = Uri.parse(tree);
+        try (Cursor cursor = current.getContentResolver().query(
+                children(uri),
+                new String[] {DocumentsContract.Document.COLUMN_DISPLAY_NAME},
+                null, null, null)) {
+            if (cursor == null) {
+                return null;
+            }
+            StringBuilder names = new StringBuilder();
+            while (cursor.moveToNext()) {
+                String name = cursor.getString(0);
+                if (name == null) {
+                    continue;
+                }
+                // The answer is newline-separated, so a name may not hold one.
+                if (names.length() > 0) {
+                    names.append('\n');
+                }
+                names.append(name.replace('\n', ' '));
+            }
+            return names.toString();
+        } catch (Exception e) {
+            Log.w(TAG, "treeList: " + e);
+            return null;
+        }
+    }
+
+    /** Read a single document by its content uri; null when it cannot be read. */
+    static byte[] documentRead(String uri) {
+        Activity current = activity;
+        if (current == null || uri == null) {
+            return null;
+        }
+        try {
+            return readAll(current, Uri.parse(uri));
+        } catch (Exception e) {
+            Log.w(TAG, "documentRead: " + e);
+            return null;
+        }
+    }
+
+    /** Write bytes to a single document by its content uri; null on success, else why. */
+    static String documentWrite(String uri, byte[] bytes) {
+        Activity current = activity;
+        if (current == null || uri == null) {
+            return "no activity";
+        }
+        try (OutputStream out = current.getContentResolver().openOutputStream(Uri.parse(uri), "wt")) {
+            if (out == null) {
+                return "the provider opened no stream";
+            }
+            out.write(bytes);
+            out.flush();
+            return null;
+        } catch (Exception e) {
+            Log.w(TAG, "documentWrite: " + e);
+            return e.toString();
+        }
+    }
+
+    /** The file's bytes, or null when the tree cannot hand them over. */
+    static byte[] treeRead(String arg) {
+        Activity current = activity;
+        if (current == null) {
+            return null;
+        }
+        try {
+            Uri tree = treeOf(arg);
+            Uri file = find(current, tree, filed(arg));
+            return file == null ? null : readAll(current, file);
+        } catch (Exception e) {
+            Log.w(TAG, "treeRead: " + e);
+            return null;
+        }
+    }
+
+    /**
+     * Write the file in place, answering null, `moved` when the stamp is not the
+     * expected one, or the sentence saying why it would not. The arg carries the
+     * tree, the name and the expected stamp, joined by newlines; `-1` means the
+     * folder held no file when this write was prepared, and `-2` means the
+     * provider cannot stamp, so the write is unguarded.
+     */
+    static String treeWrite(String arg, byte[] bytes) {
+        Activity current = activity;
+        if (current == null) {
+            return "the app has no activity";
+        }
+        try {
+            Uri tree = treeOf(arg);
+            String name = filed(arg);
+            long expected = Long.parseLong(expected(arg));
+            Uri existing = find(current, tree, name);
+            if (existing != null) {
+                if (expected == -1) {
+                    return "moved";
+                }
+                // A provider that cannot stamp cannot be guarded; the bytes are
+                // the only check left, and the probe already compared them.
+                if (expected >= 0) {
+                    long now = modified(current, existing);
+                    if (now >= 0 && now != expected) {
+                        return "moved";
+                    }
+                }
+                try (OutputStream out = current.getContentResolver().openOutputStream(existing, "wt")) {
+                    if (out == null) {
+                        throw new IOException("the provider opened no stream");
+                    }
+                    out.write(bytes);
+                }
+                return null;
+            }
+            if (expected >= 0) {
+                // The file was there when this write was prepared and is gone now:
+                // another device moved it, so this write has to look again.
+                return "moved";
+            }
+            Uri created = DocumentsContract.createDocument(
+                    current.getContentResolver(), treeRoot(tree), BLOB, name);
+            if (created == null) {
+                return "this provider does not let the app create the file";
+            }
+            try (OutputStream out = current.getContentResolver().openOutputStream(created, "wt")) {
+                if (out == null) {
+                    throw new IOException("the provider opened no stream");
+                }
+                out.write(bytes);
+            } catch (Exception e) {
+                // A half-written file must not stay as the mirror's only copy.
+                try {
+                    DocumentsContract.deleteDocument(current.getContentResolver(), created);
+                } catch (Exception ignored) {
+                    // Nothing more can be done about it here.
+                }
+                throw e;
+            }
+            // A provider that files it under another name — Drive appends " (1)" when
+            // the name is taken — leaves a file no probe can read back.
+            String landed = nameOf(created);
+            if (!landed.equals(name) && !landed.equals("imported")) {
+                try {
+                    DocumentsContract.deleteDocument(current.getContentResolver(), created);
+                } catch (Exception ignored) {
+                    // Nothing more can be done about it here.
+                }
+                return "the provider filed it as " + landed + " instead of " + name;
+            }
+            return null;
+        } catch (Exception e) {
+            return "the file could not be written: " + e;
+        }
+    }
+
+    /** When the file was last written, in epoch milliseconds; null when the provider cannot say. */
+    static String treeStamp(String arg) {
+        Activity current = activity;
+        if (current == null) {
+            return null;
+        }
+        try {
+            Uri tree = treeOf(arg);
+            Uri file = find(current, tree, filed(arg));
+            if (file == null) {
+                return null;
+            }
+            long stamp = modified(current, file);
+            return stamp < 0 ? null : Long.toString(stamp);
+        } catch (Exception e) {
+            Log.w(TAG, "treeStamp: " + e);
+            return null;
+        }
+    }
+
+    /**
+     * Whether the tree lets this app write. `1` and `0` are answers; null means
+     * the provider did not say, which is read as writable and settled by a write.
+     */
+    static String treeWritable(String tree) {
+        Activity current = activity;
+        if (current == null) {
+            return null;
+        }
+        Uri uri = Uri.parse(tree);
+        try {
+            Uri file = find(current, uri, "vault.pandora");
+            Uri target = file != null ? file : treeRoot(uri);
+            try (Cursor cursor = current.getContentResolver().query(
+                    target,
+                    new String[] {DocumentsContract.Document.COLUMN_FLAGS},
+                    null, null, null)) {
+                if (cursor == null || !cursor.moveToFirst() || cursor.isNull(0)) {
+                    return "1";
+                }
+                int flags = cursor.getInt(0);
+                if (flags == 0) {
+                    return "1";
+                }
+                int need = file != null
+                        ? DocumentsContract.Document.FLAG_SUPPORTS_WRITE
+                        : DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE;
+                return (flags & need) != 0 ? "1" : "0";
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "treeWritable: " + e);
+            return null;
+        }
+    }
+
+    /** Drop a version; one that is already gone is already dropped. */
+    static String treeDelete(String arg) {
+        Activity current = activity;
+        if (current == null) {
+            return "the app has no activity";
+        }
+        try {
+            Uri tree = treeOf(arg);
+            Uri file = find(current, tree, filed(arg));
+            if (file == null) {
+                return null;
+            }
+            if (!DocumentsContract.deleteDocument(current.getContentResolver(), file)) {
+                return "this provider does not let the app delete the file";
+            }
+            return null;
+        } catch (Exception e) {
+            return "this provider does not let the app delete the file: " + e;
+        }
+    }
+
     /** The picker's answer, from the activity's `onActivityResult` (UI thread). */
     static void picked(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQUEST_CREATE) {
+            createPicked(resultCode, data);
+            return;
+        }
+        if (requestCode == REQUEST_TREE) {
+            treePicked(resultCode, data);
+            return;
+        }
         CountDownLatch waiting = picking;
         if (requestCode != REQUEST_PICK || waiting == null) {
             return;
@@ -606,6 +942,58 @@ public final class Pandora {
             }
         } catch (Exception e) {
             failure = "the picked file could not be copied: " + e;
+        }
+        waiting.countDown();
+    }
+
+    private static void createPicked(int resultCode, Intent data) {
+        CountDownLatch waiting = creating;
+        if (waiting == null) {
+            return;
+        }
+        try {
+            if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
+                Uri uri = data.getData();
+                currentPersist(uri);
+                created = uri.toString();
+            }
+        } catch (Exception e) {
+            failure = "the document could not be created: " + e;
+        }
+        waiting.countDown();
+    }
+
+    private static void currentPersist(Uri uri) {
+        Activity current = activity;
+        if (current == null) {
+            return;
+        }
+        try {
+            current.getContentResolver().takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** The folder picker's answer, and the grant that has to outlive the process. */
+    private static void treePicked(int resultCode, Intent data) {
+        CountDownLatch waiting = choosing;
+        if (waiting == null) {
+            return;
+        }
+        try {
+            Activity current = activity;
+            if (current != null && resultCode == Activity.RESULT_OK && data != null
+                    && data.getData() != null) {
+                Uri tree = data.getData();
+                int granted = data.getFlags()
+                        & (Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                current.getContentResolver().takePersistableUriPermission(tree, granted);
+                chosen = tree.toString();
+            }
+        } catch (Exception e) {
+            failure = "the folder could not be kept: " + e;
         }
         waiting.countDown();
     }
@@ -922,6 +1310,86 @@ public final class Pandora {
                 KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
         generator.init(spec.build());
         return generator.generateKey();
+    }
+
+    /** The tree in an arg: the uri and the file's name, joined by a newline. */
+    private static Uri treeOf(String arg) {
+        return Uri.parse(arg.substring(0, arg.indexOf('\n')));
+    }
+
+    private static String filed(String arg) {
+        int start = arg.indexOf('\n') + 1;
+        int end = arg.indexOf('\n', start);
+        return end < 0 ? arg.substring(start) : arg.substring(start, end);
+    }
+
+    /** The guard a write carries: -1 expects no file, -2 cannot be stamped. */
+    private static String expected(String arg) {
+        int at = arg.indexOf('\n');
+        if (at < 0) {
+            return "-1";
+        }
+        at = arg.indexOf('\n', at + 1);
+        return at < 0 ? "-1" : arg.substring(at + 1);
+    }
+
+    /** The provider's stamp in epoch milliseconds, or -1 when it cannot say. */
+    private static long modified(Activity current, Uri uri) {
+        try (Cursor cursor = current.getContentResolver().query(
+                uri,
+                new String[] {DocumentsContract.Document.COLUMN_LAST_MODIFIED},
+                null, null, null)) {
+            if (cursor != null && cursor.moveToFirst() && !cursor.isNull(0)) {
+                return cursor.getLong(0);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "modified: " + e);
+        }
+        return -1;
+    }
+
+    private static Uri children(Uri tree) {
+        return DocumentsContract.buildChildDocumentsUriUsingTree(
+                tree, DocumentsContract.getTreeDocumentId(tree));
+    }
+
+    private static Uri treeRoot(Uri tree) {
+        return DocumentsContract.buildDocumentUriUsingTree(
+                tree, DocumentsContract.getTreeDocumentId(tree));
+    }
+
+    /** The document filed under `name` in the tree, or null when there is none. */
+    private static Uri find(Activity current, Uri tree, String name) throws IOException {
+        try (Cursor cursor = current.getContentResolver().query(
+                children(tree),
+                new String[] {DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME},
+                null, null, null)) {
+            if (cursor == null) {
+                throw new IOException("the tree could not be listed");
+            }
+            while (cursor.moveToNext()) {
+                String id = cursor.getString(0);
+                if (id != null && name.equals(cursor.getString(1))) {
+                    return DocumentsContract.buildDocumentUriUsingTree(tree, id);
+                }
+            }
+        }
+        return null;
+    }
+
+    private static byte[] readAll(Activity current, Uri uri) throws IOException {
+        try (InputStream in = current.getContentResolver().openInputStream(uri)) {
+            if (in == null) {
+                throw new IOException("the provider opened no stream");
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            for (int read; (read = in.read(buffer)) > 0; ) {
+                out.write(buffer, 0, read);
+            }
+            return out.toByteArray();
+        }
     }
 
     private static String importTo(Uri uri) throws IOException {
