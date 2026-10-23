@@ -36,6 +36,8 @@ pub fn run(ui: &mut egui::Ui, app: &mut App, compact: bool) {
                         let keyfile = keyfile(app);
                         box_card(ui, app, &facts, keyfile, compact);
                         ui.add_space(CARD);
+                        crate::features::sync::ui::folder(ui, app);
+                        ui.add_space(CARD);
                         // A phone's card, drawn only when there is a reader to
                         // offer: on a desk it paints nothing and takes no gap.
                         if fingerprint(ui, app) {
@@ -43,6 +45,13 @@ pub fn run(ui: &mut egui::Ui, app: &mut App, compact: bool) {
                         }
                         master_card(ui, app, keyfile);
                         ui.add_space(CARD);
+                        recovery_card(ui, app);
+                        // A desk has a port for a key; a phone does not.
+                        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                        {
+                            key_card(ui, app, keyfile);
+                            ui.add_space(CARD);
+                        }
                         lock_card(ui, app);
                         ui.add_space(CARD);
                         clipboard_card(ui, app);
@@ -52,6 +61,8 @@ pub fn run(ui: &mut egui::Ui, app: &mut App, compact: bool) {
                         trash_card(ui, app, facts.trashed, compact);
                         ui.add_space(CARD);
                         browser(ui, app);
+                        ui.add_space(CARD);
+                        agent_card(ui, app);
                         ui.add_space(CARD);
                         #[cfg(target_os = "android")]
                         {
@@ -171,7 +182,7 @@ fn box_card(ui: &mut egui::Ui, app: &mut App, facts: &Facts, keyfile: Option<boo
                 theme::secondary_button(ui, &app.icons, Some(theme::Icon::Download), "Export CSV")
                     .clicked();
             ui.add_space(HINT);
-            import = theme::secondary_button(ui, &app.icons, Some(theme::Icon::Plus), "Import CSV")
+            import = theme::secondary_button(ui, &app.icons, Some(theme::Icon::Upload), "Import…")
                 .clicked();
         } else {
             ui.columns(2, |cols| {
@@ -185,8 +196,8 @@ fn box_card(ui: &mut egui::Ui, app: &mut App, facts: &Facts, keyfile: Option<boo
                 import = theme::secondary_button(
                     &mut cols[1],
                     &app.icons,
-                    Some(theme::Icon::Plus),
-                    "Import CSV",
+                    Some(theme::Icon::Upload),
+                    "Import…",
                 )
                 .clicked();
             });
@@ -197,12 +208,18 @@ fn box_card(ui: &mut egui::Ui, app: &mut App, facts: &Facts, keyfile: Option<boo
             }
         }
         if import {
-            app.import_csv();
+            crate::features::settings::import::pick(app);
+        }
+        ui.add_space(HINT);
+        if theme::secondary_button(ui, &app.icons, Some(theme::Icon::Upload), "Open a share…")
+            .clicked()
+        {
+            crate::features::share::ui::pick(app);
         }
         ui.add_space(HINT);
         theme::hint(
                             ui,
-                            "unencrypted CSV, no attachments — delete the export when you are done. Import reads name, username, password, URL, notes, folder, type and TOTP columns from other managers; it never overwrites entries already in the box",
+                            "unencrypted CSV, no attachments — delete the export when you are done. Import reads a CSV, a Bitwarden .json, a 1Password .1pux or a KeePass .xml; it never overwrites entries already in the box, and the file stays where it is",
                         );
         ui.add_space(ACT);
         // The copy `store::save` keeps beside the box, restored on purpose. Off
@@ -343,6 +360,7 @@ pub fn trash_modal(ctx: &egui::Context, app: &mut App) {
 
     let mut restore: Option<String> = None;
     let mut empty = false;
+    app.boxes.editing(true);
     let open = theme::dialog(ctx, egui::Id::new("trash"), |ui| {
         theme::width(ui, 380.0);
         let closed = theme::head(ui, &app.icons, "Trash");
@@ -398,7 +416,11 @@ pub fn trash_modal(ctx: &egui::Context, app: &mut App) {
         if let Some(s) = app.boxes.session.as_mut() {
             s.show_trash = false;
         }
+    } else {
+        return;
     }
+    app.boxes.editing(false);
+    app.boxes.flush(&mut app.shell);
 }
 
 /// How long ago a record was deleted, in the coarsest unit.
@@ -414,6 +436,283 @@ fn ago(secs: u64) -> String {
     } else {
         tf("{n} d ago", &[("n", &(d / 86_400))])
     }
+}
+
+/// The printed code that opens the box when the password is gone. It is a copy of the
+/// key, wrapped under a code the user writes down — not a second password, and not a
+/// reset: nothing here can recover a box whose code was never made.
+fn recovery_card(ui: &mut egui::Ui, app: &mut App) {
+    card(ui, "Recovery code", |ui| {
+        theme::hint(
+            ui,
+            t("a printed code opens this box when the master password is gone — write it down and keep it away from the box"),
+        );
+        ui.add_space(HINT);
+        let has = app
+            .boxes
+            .session
+            .as_ref()
+            .is_some_and(|s| s.creds.recovery.is_some());
+        if let Some(code) = app.auth.code_shown.clone() {
+            ui.add_space(HINT);
+            balance::label(
+                ui,
+                RichText::new(code.as_str())
+                    .monospace()
+                    .color(theme::palette().text),
+            );
+            ui.add_space(HINT);
+            theme::hint(ui, t("this is the only time it is shown — copy it now"));
+            ui.add_space(ACT);
+            ui.horizontal(|ui| {
+                if theme::primary_button(ui, &app.icons, Some(theme::Icon::Copy), "Copy it", None)
+                    .clicked()
+                {
+                    app.shell.copy_text(ui.ctx(), &code);
+                }
+                ui.add_space(HINT);
+                if theme::secondary_button(ui, &app.icons, None, "I wrote it down").clicked() {
+                    app.auth.code_shown = None;
+                }
+            });
+            return;
+        }
+        ui.add_space(ACT);
+        let label = if has {
+            "Make a new code (the old one stops working)"
+        } else {
+            "Make a recovery code"
+        };
+        if theme::secondary_button(ui, &app.icons, Some(theme::Icon::Key), label).clicked() {
+            let code = crate::vault::recovery::make_code();
+            let made = match app.boxes.session.as_mut() {
+                Some(s) => match crate::vault::store::box_id(&s.path) {
+                    Ok(id) => match crate::vault::store::set_recovery(&mut s.creds, &code, &id) {
+                        Ok(()) => {
+                            s.mark_dirty();
+                            true
+                        }
+                        Err(e) => {
+                            app.shell.fail(e);
+                            false
+                        }
+                    },
+                    Err(e) => {
+                        app.shell.fail(e);
+                        false
+                    }
+                },
+                None => false,
+            };
+            if made {
+                app.auth.code_shown = Some(code);
+                app.shell.set_status(
+                    "a recovery code was made — it is written with the next save",
+                    crate::app::StatusKind::Saved,
+                );
+            }
+        }
+        if has {
+            ui.add_space(HINT);
+            theme::hint(
+                ui,
+                t("changing the master password or the key drops this code: make a new one after"),
+            );
+        }
+    });
+}
+
+/// The SSH agent: the switch, where its socket is, and the keys the user allows. A key
+/// is made here, never imported: a private key file from outside is its own parser and
+/// its own policy, and this box can make its own.
+fn agent_card(ui: &mut egui::Ui, app: &mut App) {
+    card(ui, "SSH agent", |ui| {
+        let mut on = app.prefs.ssh_agent;
+        if theme::check(ui, &mut on, "Serve the box's SSH keys on a socket").changed() {
+            app.prefs.ssh_agent = on;
+            prefs::save(&app.prefs);
+        }
+        ui.add_space(HINT);
+        let socket = crate::features::agent::socket_path(&app.prefs.ssh_socket);
+        theme::hint(
+            ui,
+            &tf(
+                "point SSH_AUTH_SOCK at {path}",
+                &[("path", &socket.display())],
+            ),
+        );
+        ui.add_space(HINT);
+        theme::hint(
+            ui,
+            t("only the keys you allow are listed and sign; the socket is 0600 and answers only while a box is unlocked"),
+        );
+        ui.add_space(ACT);
+
+        let mut copy: Option<String> = None;
+        let mut drop: Option<String> = None;
+        let mut add = false;
+        let names = match app.boxes.session.as_ref() {
+            Some(s) => s
+                .vault
+                .ssh_keys
+                .iter()
+                .map(|it| (it.id.clone(), it.name.clone(), it.allowed))
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        for (id, name, allowed) in names {
+            ui.horizontal(|ui| {
+                let mut ticked = allowed;
+                if theme::check(ui, &mut ticked, "").changed() {
+                    if let Some(s) = app.boxes.session.as_mut() {
+                        if let Some(key) = s.vault.ssh_keys.iter_mut().find(|it| it.id == id) {
+                            key.allowed = ticked;
+                            key.touched(crate::vault::model::now_secs());
+                        }
+                        s.mark_dirty();
+                    }
+                }
+                ui.label(RichText::new(&name).color(theme::palette().text));
+                if app
+                    .icons
+                    .button(
+                        ui,
+                        theme::Icon::Copy,
+                        13.0,
+                        theme::palette().muted,
+                        "copy the public key",
+                    )
+                    .clicked()
+                {
+                    copy = app
+                        .boxes
+                        .session
+                        .as_ref()
+                        .and_then(|s| s.vault.ssh_keys.iter().find(|it| it.id == id))
+                        .map(crate::features::agent::public_line);
+                }
+                if app
+                    .icons
+                    .button(
+                        ui,
+                        theme::Icon::Trash,
+                        13.0,
+                        theme::palette().error,
+                        "Delete",
+                    )
+                    .clicked()
+                {
+                    drop = Some(id.clone());
+                }
+            });
+        }
+        if app.boxes.session.is_some() {
+            ui.add_space(HINT);
+            if theme::secondary_button(ui, &app.icons, Some(theme::Icon::Plus), "Add a key")
+                .clicked()
+            {
+                add = true;
+            }
+        } else {
+            theme::hint(ui, t("open a box to manage its keys"));
+        }
+
+        if let Some(line) = copy {
+            app.shell.copy_text(ui.ctx(), &line);
+            app.shell.set_status(
+                "public key copied — paste it into remote's authorized_keys",
+                crate::app::StatusKind::Saved,
+            );
+        }
+        if let Some(id) = drop {
+            if let Some(s) = app.boxes.session.as_mut() {
+                s.vault.ssh_keys.retain(|it| it.id != id);
+                s.mark_dirty();
+            }
+        }
+        if add {
+            if let Some(s) = app.boxes.session.as_mut() {
+                let n = s.vault.ssh_keys.len() + 1;
+                let comment = s.vault.name.clone();
+                let key = crate::vault::model::SshKey::make(
+                    crate::vault::model::now_secs(),
+                    &format!("Key {n}"),
+                    &comment,
+                );
+                s.vault.ssh_keys.push(key);
+                s.mark_dirty();
+            }
+        }
+    });
+}
+
+/// The box's YubiKey: enrol it, or drop it. The key is a second factor, never the only
+/// one — the master password is asked for here because the box's key is derived from
+/// it — and losing the key loses the box.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn key_card(ui: &mut egui::Ui, app: &mut App, keyfile: Option<bool>) {
+    let busy = app
+        .auth
+        .op
+        .as_ref()
+        .is_some_and(|o| o.kind == OpKind::EnrolKey);
+    let present = crate::shared::yubikey::present();
+    card(ui, "YubiKey", |ui| {
+        ui.add_enabled_ui(!busy, |ui| {
+            auth::secret_field(
+                ui,
+                egui::Id::new("key-password"),
+                &app.icons,
+                &mut app.auth.key.password,
+                "master password (needed to re-derive the box)",
+            );
+            if keyfile != Some(false) {
+                ui.add_space(ROW);
+                auth::file_field(
+                    ui,
+                    &app.icons,
+                    &mut app.auth.key.keyfile,
+                    if keyfile == Some(true) {
+                        "keyfile (required by this box)"
+                    } else {
+                        "keyfile (if this box uses one)"
+                    },
+                    false,
+                );
+            }
+            ui.add_space(HINT);
+            theme::hint(
+                ui,
+                if present {
+                    t("a key is plugged in — press Enrol and touch it when it blinks")
+                } else {
+                    t("no key is plugged in")
+                },
+            );
+            ui.add_space(HINT);
+            // Said before the button, not after: the key is a factor, and the box is
+            // lost without it.
+            theme::hint(
+                ui,
+                t("this adds a second factor: the box then needs the password and the key, on every device. Lose the key and the box is lost — there is no reset"),
+            );
+            ui.add_space(ACT);
+        });
+        let enrol = theme::primary_button(
+            ui,
+            &app.icons,
+            Some(theme::Icon::Fingerprint),
+            "Enrol this key",
+            busy.then_some("Working…"),
+        );
+        if enrol.clicked() {
+            app.auth.enrol_key(&app.boxes, true);
+        }
+        ui.add_space(HINT);
+        if theme::secondary_button(ui, &app.icons, None, "Stop using it").clicked() {
+            app.auth.enrol_key(&app.boxes, false);
+        }
+    });
 }
 
 /// Change the box's master password.
@@ -650,6 +949,8 @@ fn footer(ui: &mut egui::Ui, app: &mut App) {
             ),
         );
         crate::features::update::ui::row(ui, app);
+        ui.add_space(4.0);
+        crate::features::health::ui::row(ui, app);
     });
 }
 
@@ -924,7 +1225,15 @@ fn browser(ui: &mut egui::Ui, app: &mut App) {
         );
         ui.add_space(HINT);
         theme::hint(ui, &let_in(app.prefs.browsers.len()));
+        ui.add_space(HINT);
+        theme::hint(ui, t(passkey_browser()));
     });
+}
+
+/// Where passkeys are used, in one line: the box holds them, and only the browser
+/// with a provider API can ask for one.
+fn passkey_browser() -> &'static str {
+    "passkeys live in this box and only the extension on Chrome 129+ can use them — Firefox has no passkey provider API"
 }
 
 /// What a tick alone cannot say: off and on paint the same box, and the difference
@@ -1275,6 +1584,32 @@ mod tests {
     /// does not take is the value's own box beside it — 418 of a 420 pt card is
     /// the slider, 342 of it is the rail. A slider on a card four times as wide as
     /// egui's own 100 pt rail is the thing this fixed.
+    /// The key card says what it is for and what losing the key costs, before the
+    /// button is pressed.
+    #[test]
+    fn the_key_card_says_the_box_is_lost_without_its_key() {
+        let shapes = page(900.0, 2400.0);
+        let drawn = shot::words(&shapes);
+        for line in [
+            "YUBIKEY",
+            "Enrol this key",
+            "Stop using it",
+            "this adds a second factor: the box then needs the password and the key, on every device. Lose the key and the box is lost — there is no reset",
+        ] {
+            assert!(
+                drawn.iter().any(|word| word == line),
+                "{line:?} is missing: {drawn:?}"
+            );
+        }
+        assert!(
+            drawn
+                .iter()
+                .any(|word| word.starts_with("a key is plugged in")
+                    || word == "no key is plugged in"),
+            "the card says whether one is there: {drawn:?}"
+        );
+    }
+
     #[test]
     fn the_clipboard_slider_fills_its_row() {
         for (w, h) in SIZES {

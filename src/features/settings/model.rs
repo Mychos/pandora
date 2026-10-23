@@ -24,6 +24,10 @@ pub const MAX_RETRY_DELAY: u64 = 3600;
 /// before sources had kinds is read as.
 pub const GITHUB: &str = "github";
 
+/// A folder the user picked: a SAF tree on Android, a directory on a desktop.
+/// No account, no token — the folder itself is the transport.
+pub const FOLDER: &str = "folder";
+
 pub const MAX_ATTEMPTS: u32 = 50;
 
 /// Below a few seconds the wait is not felt at all, so a limit with no wait is
@@ -99,6 +103,18 @@ pub struct Prefs {
     /// switch in the settings turns it off.
     #[serde(skip_serializing_if = "is_true")]
     pub update_check: bool,
+    /// Whether the box's SSH keys are served on a socket. Off by default: a socket is
+    /// a door, and one nobody opened is one nobody uses.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ssh_agent: bool,
+    /// Where that socket lives; empty means the runtime dir's own path.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ssh_socket: String,
+    /// Whether a password may be checked against a public breach list. Off by
+    /// default: it is the only lookup that sends anything derived from a password
+    /// out of this machine, and silence means "no".
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub breach_check: bool,
     /// The release the user answered "Later" to, so the notice does not come back
     /// every launch for a version they already decided against.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -133,12 +149,35 @@ pub struct Source {
 pub struct Remote {
     #[serde(default = "github")]
     pub kind: String,
+    #[serde(default)]
     pub repo: String,
+    #[serde(default)]
     pub file: String,
     /// The blob sha this box last saw, so a push can prove it is replacing the
     /// version it read. Empty until the box has been pushed once.
     #[serde(default)]
     pub sha: String,
+    /// Where a folder mirror lives: a tree uri on Android, a directory path on a
+    /// desktop. Empty for a repo, which is addressed by `repo` alone.
+    #[serde(default)]
+    pub folder: String,
+    /// Digest of the file bytes last synced with the folder. Empty until the
+    /// folder has been read or written once.
+    #[serde(default)]
+    pub digest: String,
+    /// The provider's stamp for the file, in Unix milliseconds. Zero when the
+    /// provider cannot say or the file is not there yet.
+    #[serde(default)]
+    pub stamp: u64,
+    /// The provider refused writes: the mirror stays attached but paused, so the
+    /// user can fix the folder without losing which one it was.
+    #[serde(default)]
+    pub read_only: bool,
+    /// The folder holds a copy this box's key does not open: writing would
+    /// overwrite another box, so the mirror pauses until the folder is picked
+    /// again.
+    #[serde(default)]
+    pub blocked: bool,
 }
 
 fn github() -> String {
@@ -174,6 +213,9 @@ impl Default for Prefs {
             lang: Lang::En,
             theme: crate::shared::theme::Scheme::Dark,
             update_check: true,
+            ssh_agent: false,
+            ssh_socket: String::new(),
+            breach_check: false,
             skip: String::new(),
         }
     }
@@ -447,6 +489,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read(&dir).clip_clear, MAX_CLIP_CLEAR);
+
+        fs::write(dir.join("prefs.json"), br#"{"lock_after":30,"keep":4}"#).unwrap();
+        assert_eq!(
+            read(&dir).lock_after,
+            DEFAULT_LOCK_AFTER,
+            "a version depth from an older build is ignored"
+        );
     }
 
     #[test]
@@ -533,6 +582,11 @@ mod tests {
                 repo: "octocat/boxes".to_owned(),
                 file: "work.pandora".to_owned(),
                 sha: String::new(),
+                folder: String::new(),
+                digest: String::new(),
+                stamp: 0,
+                read_only: false,
+                blocked: false,
             },
         );
         write(&dir, &p);
@@ -591,6 +645,11 @@ mod tests {
                 repo: "octocat/boxes".to_owned(),
                 file: "work.pandora".to_owned(),
                 sha: "abc".to_owned(),
+                folder: String::new(),
+                digest: String::new(),
+                stamp: 0,
+                read_only: false,
+                blocked: false,
             },
         );
         write(&dir, &p);
@@ -619,6 +678,47 @@ mod tests {
         let back = read(&dir);
         assert_eq!(back.remotes[&key].kind, GITHUB);
         assert_eq!(back.remotes[&key].file, "x.pandora");
+        assert!(
+            back.remotes[&key].folder.is_empty()
+                && back.remotes[&key].digest.is_empty()
+                && back.remotes[&key].stamp == 0,
+            "a repo remote has no folder, digest or stamp, and none is needed to read it"
+        );
+    }
+
+    /// A folder mirror is the same remote with a folder, a digest and a stamp:
+    /// the kind says which, and all of them survive a write and a read.
+    #[test]
+    fn a_folder_remote_keeps_its_folder_digest_and_stamp() {
+        let dir = tmp("folder-remote");
+        let key = box_key("/boxes/work.pandora");
+        let mut p = Prefs::default();
+        p.remotes.insert(
+            key.clone(),
+            Remote {
+                kind: FOLDER.to_owned(),
+                repo: String::new(),
+                file: String::new(),
+                sha: String::new(),
+                folder: "content://tree/drive".to_owned(),
+                digest: "0123456789abcdef0123456789abcdef".to_owned(),
+                stamp: 1_700_000_000_000,
+                read_only: true,
+                blocked: true,
+            },
+        );
+        write(&dir, &p);
+
+        let back = read(&dir);
+        assert_eq!(back.remotes[&key].kind, FOLDER);
+        assert_eq!(back.remotes[&key].folder, "content://tree/drive");
+        assert_eq!(
+            back.remotes[&key].digest,
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(back.remotes[&key].stamp, 1_700_000_000_000);
+        assert!(back.remotes[&key].read_only);
+        assert!(back.remotes[&key].blocked);
     }
 
     /// The remembered session is the default, not a choice the user has to find:
