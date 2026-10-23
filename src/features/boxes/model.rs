@@ -16,8 +16,11 @@ use std::time::{Instant, SystemTime};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Passwords,
+    Cards,
+    Identities,
     Drive,
     Codes,
+    Health,
     Settings,
 }
 
@@ -28,8 +31,23 @@ impl Tab {
         use crate::vault::model::Kind;
         match kind {
             Kind::Login => Tab::Passwords,
+            Kind::Card => Tab::Cards,
+            Kind::Identity => Tab::Identities,
+            // A passkey is shown beside the login it belongs with.
+            Kind::Passkey => Tab::Passwords,
             Kind::Note | Kind::File => Tab::Drive,
             Kind::Otp => Tab::Codes,
+        }
+    }
+
+    /// The shape of record this pane creates and shows, for the ones that hold one.
+    pub fn kind(self) -> Option<crate::vault::model::Kind> {
+        use crate::vault::model::Kind;
+        match self {
+            Tab::Passwords => Some(Kind::Login),
+            Tab::Cards => Some(Kind::Card),
+            Tab::Identities => Some(Kind::Identity),
+            _ => None,
         }
     }
 }
@@ -64,6 +82,13 @@ pub struct Session {
     pub parked: bool,
     pub parked_seq: u64,
     pub dirty: bool,
+    /// The change was finished the moment it happened — a create, a delete, a
+    /// move — so the next tick writes it instead of waiting out the safety timer.
+    pub immediate: bool,
+    /// An editor is open: its fields are written on disk only when it closes.
+    /// The timer that writes a dirty box is a safety net for edits made outside
+    /// one, and must never fire while this is set.
+    pub editing: bool,
     pub last_edit: Option<Instant>,
     pub last_mtime: Option<SystemTime>,
     pub conflict: bool,
@@ -75,6 +100,9 @@ pub struct Session {
     // was sent and never what it held: the commit subject is plaintext in the
     // repo, so nothing of the box's shape may reach it.
     pub baseline: Option<Fingerprint>,
+    /// The content the file holds, as of the last save or load: a write with the
+    /// same fingerprint has nothing to encrypt and is skipped.
+    pub saved: Option<Fingerprint>,
     /// When this box may next be pushed on its own; a run of edits lands as one
     /// commit once they stop. None means nothing is waiting to go out.
     pub push_at: Option<Instant>,
@@ -135,6 +163,7 @@ impl Session {
     /// panes on their defaults. A caller that opened onto particular preferences
     /// overrides them after.
     pub fn fresh(path: PathBuf, creds: Credentials, vault: Vault) -> Self {
+        let saved = Some(Fingerprint::of(&vault));
         Self {
             path,
             creds,
@@ -142,12 +171,15 @@ impl Session {
             parked: false,
             parked_seq: 0,
             dirty: false,
+            immediate: false,
+            editing: false,
             last_edit: None,
             last_mtime: None,
             conflict: false,
             ignore_mtime: None,
             remote: None,
             baseline: None,
+            saved,
             push_at: None,
             behind: false,
             selected: None,
@@ -175,10 +207,19 @@ impl Session {
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
         self.last_edit = Some(Instant::now());
-        // The file is written on a 900 ms debounce; the commit waits for the box
-        // to settle, because GitHub counts commits against an hourly budget and
-        // typing is not a change.
+        // The commit waits for the box to settle, because GitHub counts commits
+        // against an hourly budget and typing is not a change.
         self.push_at = Some(Instant::now() + crate::features::sync::github::PUSH_QUIET);
+    }
+
+    /// A change with nothing left to type into it — a record created, deleted or
+    /// moved: there is no editor to close, so the next tick writes it.
+    pub fn mark_now(&mut self) {
+        self.mark_dirty();
+        self.immediate = true;
+        // A finished change (create, delete, move) is worth pushing sooner than
+        // typing, but still not instantly: a burst of edits lands as one commit.
+        self.push_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
     }
 
     /// Whether a secret field is being shown in the clear. The reveal belongs to
@@ -220,10 +261,12 @@ impl Session {
         self.parked_seq = self.vault.seq;
         self.sanitize();
         self.dirty = false;
+        self.immediate = false;
         self.last_edit = None;
         self.conflict = false;
         self.ignore_mtime = None;
         self.last_mtime = store::modified_time(&self.path);
+        self.saved = Some(Fingerprint::of(&self.vault));
     }
 
     /// Bring a parked tab back from its file. The key is the one the session
@@ -254,6 +297,7 @@ impl Session {
             Confirm::Folder(id) => !vault.folders.iter().any(|f| &f.id == id),
             Confirm::Export { .. }
             | Confirm::File { .. }
+            | Confirm::Import { .. }
             | Confirm::Box
             | Confirm::Reload
             | Confirm::EmptyTrash

@@ -4,7 +4,9 @@ use crate::features::shell::model::Shell;
 use crate::shared::i18n::{t, tf};
 use crate::vault::store;
 
-const AUTOSAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(900);
+/// A last resort, not an autosave: an edit made outside an editor is written
+/// after this long, so a crash cannot lose it. Editors write when they close.
+const SAFETY_WRITE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Which half of a credentials entry a copy takes.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -139,6 +141,8 @@ impl App {
         }
         for (key, tab) in [
             (Key::Num1, Tab::Passwords),
+            (Key::Num6, Tab::Cards),
+            (Key::Num7, Tab::Identities),
             (Key::Num2, Tab::Drive),
             (Key::Num5, Tab::Codes),
             (Key::Num4, Tab::Settings),
@@ -150,6 +154,14 @@ impl App {
         // The tool is no pane of the box: Ctrl+3 opens it with or without one.
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num3)) {
             self.screen = Screen::Generate;
+        }
+        // Auto-type goes through xdotool/wtype, so it is a key and not a menu only.
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::T)) {
+            self.autotype();
+        }
+        // The review reads the open box, so it is a pane and not a screen.
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::H)) {
+            self.boxes.pane(Tab::Health);
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
             // The only search on the sources screen is the recents'.
@@ -256,8 +268,8 @@ impl App {
 
 impl Boxes {
     pub fn tick(&mut self, shell: &mut Shell) {
-        /// How often the file is looked at. Autosave runs on its own 900 ms
-        /// debounce; a changed file is noticed within a beat, not on every paint.
+        /// How often the file is looked at. A changed file is noticed within a
+        /// beat, not on every paint.
         const WATCH: std::time::Duration = std::time::Duration::from_millis(750);
         let due = self.watch.is_none_or(|watched| watched.elapsed() >= WATCH);
         if due {
@@ -300,11 +312,13 @@ impl Boxes {
                 }
             }
 
-            if s.dirty && !s.conflict {
-                if let Some(t) = s.last_edit {
-                    if t.elapsed() >= AUTOSAVE_DELAY {
-                        save_now = true;
-                    }
+            // An open editor is never written under: its fields land when it
+            // closes, however long they have been dirty. A change that is already
+            // finished — a create, a delete, a move — does not wait at all.
+            if s.dirty && !s.conflict && !s.editing {
+                let safety = s.last_edit.is_some_and(|t| t.elapsed() >= SAFETY_WRITE);
+                if s.immediate || safety {
+                    save_now = true;
                 }
             }
         }
@@ -322,11 +336,25 @@ impl Boxes {
         }
     }
 
+    /// An editor is on screen, or has just left it. While it is, the timer that
+    /// writes a dirty box stays away.
+    pub fn editing(&mut self, on: bool) {
+        if let Some(s) = self.session.as_mut() {
+            s.editing = on;
+        }
+    }
+
     /// The last moment before its key is dropped (tab switch, tab close, lock):
     /// write the unsaved, conflict-free edits.
     pub fn flush(&mut self, shell: &mut Shell) {
         if let Some(s) = &mut self.session {
             write_if_dirty(s, shell);
+            if s.remote.as_ref().is_some_and(|r| r.kind == crate::features::settings::model::GITHUB)
+                && !s.conflict
+                && !s.behind
+            {
+                s.push_at = Some(std::time::Instant::now());
+            }
         }
     }
 
@@ -335,6 +363,12 @@ impl Boxes {
     pub fn flush_all(&mut self, shell: &mut Shell) {
         if let Some(s) = &mut self.session {
             write_if_dirty(s, shell);
+            if s.remote.as_ref().is_some_and(|r| r.kind == crate::features::settings::model::GITHUB)
+                && !s.conflict
+                && !s.behind
+            {
+                s.push_at = Some(std::time::Instant::now());
+            }
         }
         for s in &mut self.tabs {
             write_if_dirty(s, shell);
@@ -396,10 +430,22 @@ fn write(s: &mut Session, shell: &mut Shell, forced: bool) -> bool {
             return false;
         }
     }
+    // A box whose content is already what the file holds costs no cipher and no
+    // fsync: the fingerprint of the last save says so. A forced write is a
+    // different file under the same content (a new key), so it always writes.
+    let print = crate::features::sync::github::Fingerprint::of(&s.vault);
+    if !forced && s.path.is_file() && s.saved.as_ref() == Some(&print) {
+        s.dirty = false;
+        s.immediate = false;
+        s.last_edit = None;
+        return true;
+    }
     match store::save(&s.path, &mut s.vault, &s.creds) {
         Ok(()) => {
             s.dirty = false;
+            s.immediate = false;
             s.last_edit = None;
+            s.saved = Some(crate::features::sync::github::Fingerprint::of(&s.vault));
             s.last_mtime = store::modified_time(&s.path);
             s.ignore_mtime = None;
             s.conflict = false;
@@ -562,6 +608,28 @@ mod tests {
         other.logins.push(Login::new(1));
         let s = app.boxes.session.as_ref().unwrap();
         store::save(&s.path, &mut other, &s.creds).unwrap();
+    }
+
+    /// A box that already holds what the file holds costs no cipher and no
+    /// fsync: the save is skipped and the file keeps its generation.
+    #[test]
+    fn a_save_with_nothing_changed_leaves_the_file_alone() {
+        let mut app = opened(&unique());
+        let path = app.boxes.session.as_ref().unwrap().path.clone();
+        let before = std::fs::read(&path).unwrap();
+        let seq = app.boxes.session.as_ref().unwrap().vault.seq;
+
+        app.boxes.session.as_mut().unwrap().dirty = true;
+        app.boxes.persist(&mut app.shell);
+
+        let s = app.boxes.session.as_ref().unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the box on disk is already the one in memory"
+        );
+        assert_eq!(s.vault.seq, seq, "and nothing was bumped");
+        assert!(!s.dirty, "nothing is waiting to be saved");
     }
 
     #[test]
