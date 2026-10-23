@@ -78,7 +78,7 @@ impl Boxes {
         let folder = Folder::new(name, parent, now_secs());
         let id = folder.id.clone();
         s.vault.folders.push(folder);
-        s.mark_dirty();
+        s.mark_now();
         Some(id)
     }
 
@@ -119,7 +119,7 @@ impl Boxes {
             s.editing_folder = None;
         }
         s.confirm = None;
-        s.mark_dirty();
+        s.mark_now();
     }
 }
 
@@ -156,7 +156,7 @@ impl Boxes {
                 record.touched(now);
             }
         }
-        s.mark_dirty();
+        s.mark_now();
         shell.set_status("moved", StatusKind::Saved);
     }
 
@@ -182,6 +182,7 @@ impl Boxes {
                         (n.id(), n.folder())
                     })
                 }
+                Some(Kind::Card | Kind::Identity | Kind::Passkey) => false,
                 None => false,
             },
             Drag::Folder(id) => shift(&mut s.vault.folders, &id, anchor, after, |f| {
@@ -189,7 +190,7 @@ impl Boxes {
             }),
         };
         if moved {
-            s.mark_dirty();
+            s.mark_now();
         }
     }
 }
@@ -383,7 +384,7 @@ impl Boxes {
             it.folder = folder.clone();
             s.vault.drive.push(Entry::File(it));
         }
-        s.mark_dirty();
+        s.mark_now();
         if count == 1 {
             shell.set_status(crate::shared::i18n::t("file added"), StatusKind::Saved);
         } else {

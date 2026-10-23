@@ -69,6 +69,7 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
     let screen = crate::shared::ui::chrome::body(ctx);
     let (width, height) = box_for(screen.size());
 
+    app.boxes.editing(true);
     let open = theme::dialog(ctx, egui::Id::new("drive-entry"), |ui| {
         theme::width(ui, width);
         theme::height(ui, height);
@@ -98,6 +99,8 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
             s.selected = None;
         }
         app.preview.sync(None);
+        app.boxes.editing(false);
+        app.boxes.flush(&mut app.shell);
     }
 }
 
