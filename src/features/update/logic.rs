@@ -136,7 +136,20 @@ fn fetch(tx: &Sender<Event>, ctx: &Context) -> Result<bool, String> {
     let release = github::pick(&releases).ok_or("no release is published")?;
     let asset = github::asset(channel(), release)
         .ok_or("the newest release has no file this build can install")?;
-    let sums = github::sums(release)?;
+    // A hash says the download is intact; the signature says the checksum file is the
+    // release's own. A build with a key refuses a release that has none.
+    let text = github::sums_text(release)?;
+    if let Some(key) = github::public_key() {
+        match github::signature(release)? {
+            Some(signature) => github::verify_signature(key, &text, &signature)?,
+            None => {
+                return Err(
+                    "this release publishes no signature and this build needs one".to_owned(),
+                )
+            }
+        }
+    }
+    let sums = github::parse_sums(&text);
     let dir = install::staging_dir()?;
     let staged = github::download(&asset.browser_download_url, &dir, |progress| {
         // A frame that is behind will draw a fresher percentage than this one, so

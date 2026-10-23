@@ -14,6 +14,9 @@ const API: &str = "https://api.github.com";
 /// The file the release publishes with one line per artifact.
 const SUMS: &str = "SHA256SUMS";
 
+/// The signature the release publishes beside it, when it has a key to sign with.
+const SUMS_SIG: &str = "SHA256SUMS.minisig";
+
 /// How often a check waits on the network, and how long a download may take: an
 /// artifact is tens of megabytes, and a phone connection is not a stall.
 const CHECK_TIMEOUT: u64 = 30;
@@ -177,8 +180,17 @@ fn staging(dir: &Path) -> Result<(PathBuf, File), String> {
     Ok((path, file))
 }
 
-/// The published hashes, by file name.
-pub fn sums(release: &Release) -> Result<HashMap<String, String>, String> {
+/// The key the checksums are signed with, when this build was given one. It is a
+/// repository variable at build time, not a secret: a public key is public, and a
+/// build without one keeps the hash as its only check.
+pub fn public_key() -> Option<&'static str> {
+    option_env!("PANDORA_MINISIGN_PUBLIC_KEY")
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+}
+
+/// The checksums as the release published them, still to be signed-and-checked.
+pub fn sums_text(release: &Release) -> Result<String, String> {
     let url = release
         .assets
         .iter()
@@ -193,19 +205,63 @@ pub fn sums(release: &Release) -> Result<HashMap<String, String>, String> {
     if status != 200 {
         return Err(format!("SHA256SUMS: HTTP {status}"));
     }
-    let text = res
-        .body_mut()
+    res.body_mut()
         .read_to_string()
-        .map_err(|e| format!("SHA256SUMS: {e}"))?;
-    Ok(text
-        .lines()
+        .map_err(|e| format!("SHA256SUMS: {e}"))
+}
+
+/// The two columns of the checksum file, by file name. A line that names no file is
+/// dropped rather than guessed at.
+pub fn parse_sums(text: &str) -> HashMap<String, String> {
+    text.lines()
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
             let hash = parts.next()?;
             let name = parts.next()?.trim_start_matches('*');
             Some((name.to_owned(), hash.to_ascii_lowercase()))
         })
-        .collect())
+        .collect()
+}
+
+/// The published hashes, by file name.
+pub fn sums(release: &Release) -> Result<HashMap<String, String>, String> {
+    Ok(parse_sums(&sums_text(release)?))
+}
+
+/// The signature text the release publishes, if it publishes one at all.
+pub fn signature(release: &Release) -> Result<Option<String>, String> {
+    let Some(url) = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == SUMS_SIG)
+        .map(|asset| asset.browser_download_url.as_str())
+    else {
+        return Ok(None);
+    };
+    let mut res = agent(CHECK_TIMEOUT)
+        .get(url)
+        .call()
+        .map_err(|e| format!("{SUMS_SIG}: {e}"))?;
+    let status = res.status().as_u16();
+    if status != 200 {
+        return Err(format!("{SUMS_SIG}: HTTP {status}"));
+    }
+    let text = res
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("{SUMS_SIG}: {e}"))?;
+    Ok(Some(text))
+}
+
+/// Whether the checksums are the ones the release's key signed. A hash says the file
+/// is intact; this says who wrote the checksum.
+pub fn verify_signature(key: &str, sums: &str, signature: &str) -> Result<(), String> {
+    let key = minisign_verify::PublicKey::from_base64(key.trim())
+        .map_err(|_| "the key this build trusts does not read".to_owned())?;
+    let signature = minisign_verify::Signature::decode(signature)
+        .map_err(|_| format!("{SUMS_SIG} does not read as a minisign signature"))?;
+    key.verify(sums.as_bytes(), &signature, false)
+        .map_err(|_| format!("{SUMS} is not the file the release signed"))
 }
 
 /// Whether the bytes are the ones the release published. A mismatch is the one
@@ -392,6 +448,55 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The doc key and signature from `minisign-verify`, over the word "test": a real
+    /// signature, a public key, and nothing secret in the repository.
+    const TEST_KEY: &str = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
+    const TEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\n\
+        RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=\n\
+        trusted comment: timestamp:1633700835\tfile:test\tprehashed\n\
+        wLMDjy9FLAuxZ3q4NlEvkgtyhrr0gtTu6KC4KBJdITbbOeAi1zBIYo0v4iTgt8jJpIidRJnp94ABQkJAgAooBQ==";
+
+    /// The signature is over the checksum file, not over the artifact: a hash that was
+    /// swapped for another one is caught here, before anything is downloaded.
+    #[test]
+    fn a_signed_checksum_file_is_the_one_that_is_trusted() {
+        assert!(verify_signature(TEST_KEY, "test", TEST_SIGNATURE).is_ok());
+
+        let swapped = "d41d8cd98f00b204e9800998ecf8427e  Pandora-0.1.1-x86_64.AppImage\n";
+        assert!(
+            verify_signature(TEST_KEY, swapped, TEST_SIGNATURE).is_err(),
+            "another checksum file is another file"
+        );
+        assert!(verify_signature(TEST_KEY, "test", "not a signature").is_err());
+        assert!(verify_signature("not a key", "test", TEST_SIGNATURE).is_err());
+
+        // A build with no key compiled in has the hash and nothing else, and says so.
+        assert!(public_key().is_none() || !public_key().unwrap().is_empty());
+    }
+
+    /// A release with no signature reads as `None` instead of failing: the hash is
+    /// still there, and the caller decides what a missing signature means.
+    #[test]
+    fn a_release_without_a_signature_is_read_as_none() {
+        let plain = release(
+            "v0.1.1",
+            false,
+            false,
+            &["Pandora-0.1.1-x86_64.AppImage", "SHA256SUMS"],
+        );
+        assert!(signature(&plain).unwrap().is_none());
+
+        let signed = release(
+            "v0.1.1",
+            false,
+            false,
+            &["SHA256SUMS", "SHA256SUMS.minisig"],
+        );
+        // It goes to the network for one that is listed; a bad host is an error, not
+        // a silent `None`: a release that says it is signed has to be.
+        assert!(signature(&signed).is_err());
     }
 
     #[test]
