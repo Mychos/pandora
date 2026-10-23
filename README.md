@@ -26,8 +26,10 @@ Every other password manager puts your secrets on someone else's computer. Pando
 does not.
 
 - **Yours.** One file. Uninstall the app and it still opens in the next version.
-- **Offline.** Works unplugged, measures nothing. Two requests exist, both to
-  GitHub — the mirror you add and the update check — and both switch off.
+- **Offline.** Works unplugged, measures nothing. Three requests exist, all
+  switchable: the mirror you add, the update check, and — only when you turn it on
+  — passwords against a public breach list, sending five characters of a hash and
+  nothing else.
 - **No lock-in.** JSON manifest, plain Rust, MIT, CSV export in the shape those
   managers already import.
 - **Boring crypto.** Argon2id, XChaCha20-Poly1305, the Public Suffix List. Nothing
@@ -88,16 +90,101 @@ through Save. Both are plaintext and both warn you first.
 - A seed can come from a QR: clipboard, file, photo picker, or the live scanner on a
   phone (ZXing, via `rxing`).
 
+### Auto-type
+
+- `Ctrl+T` types the selected login into whatever window has the focus, for the sites a
+  browser extension cannot fill: a native app, a remote desktop, a terminal.
+- The sequence is per login: `{USERNAME}`, `{PASSWORD}`, `{OTP}`, `{ENTER}`, `{TAB}` and
+  `{WAIT 250}`, with `{USERNAME}{TAB}{PASSWORD}{ENTER}` as the default.
+- It types with what the session already has — `xdotool` on X11, `wtype` or `ydotool` on
+  Wayland — and says so when none of them is installed instead of doing nothing.
+
+### Passkeys
+
+- A passkey lives in the box like everything else: the private key, the credential id
+  and the handle are payload fields. The extension on **Chrome 129+** creates and uses
+  them; no browser sees a key.
+- The credential is bound to its origin (`rpIdHash`), an assertion needs the box
+  unlocked, and the attestation is `none`. Firefox has no provider API, so passkeys are
+  Chrome-only and the extension says so.
+
+### Sealed shares
+
+- One record sealed for somebody else: a `.pandora-share` file that only their key — or
+  a passphrase you agree on — opens. No account, no server, no link that expires.
+- The box keeps the keypair a share is sealed to inside the payload; the public half is
+  one line you hand over in a chat.
+
+### Recovery code
+
+- One printed code opens the box when the master password is gone. It wraps the box's
+  own key; it is not a reset, and a box whose code was never made stays unrecoverable.
+- Changing the password drops it, on purpose: what it wraps is the key being replaced.
+
+### Around the box
+
+- Ed25519 keys kept **in the box**, never as files, served to `ssh` and `git` on a Unix
+  socket the user turns on in Settings → box → SSH agent.
+- Only the keys marked **allowed** are listed and only they sign; the socket is `0600`
+  and answers only while a box is unlocked — locking it empties the agent.
+- Keys are made here. A private key file from another machine is not imported: it has
+  its own format, its own parser and its own policy.
+
+```sh
+export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR:-$HOME/.local/share/pandora}/pandora-agent.sock"
+ssh-add -L        # the keys you allowed
+```
+
+To have the app — and with it the agent — up with the session, one unit each:
+
+```ini
+# ~/.config/systemd/user/pandora.service
+[Unit]
+Description=Pandora
+[Service]
+ExecStart=%h/.local/bin/pandora
+Restart=on-failure
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user enable --now pandora
+```
+
+On macOS, a launch agent does the same, and `SSH_AUTH_SOCK` goes into the shell profile:
+
+```xml
+<!-- ~/Library/LaunchAgents/dev.pandora.app.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.pandora.app</string>
+  <key>ProgramArguments</key>
+  <array><string>/Applications/Pandora.app/Contents/MacOS/pandora</string></array>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+```
+
+```sh
+launchctl load ~/Library/LaunchAgents/dev.pandora.app.plist
+export SSH_AUTH_SOCK="$HOME/Library/Application Support/pandora/agent.sock"
+```
+
 ### Around the box
 
 - **Password generator** with length and character classes, on `Ctrl+3`.
 - **Multiple boxes** in tabs, each with its own master password.
 - **Trash and undo.** Deleting is reversible until the trash is emptied; only then
   are a document's bytes erased.
-- **Autosave** after 900 ms of quiet, atomic writes, one `.bak` beside the box.
+- **Edits written on close**, with a 60 s safety net for the rest; atomic writes, one
+  `.bak` beside the box.
 - **CSV import/export**, reading KeePassXC, KeePass and Bitwarden aliases.
 - **GitHub mirror.** One encrypted blob through the Contents API. Private repos
   only, and one made public later is refused on the next push.
+- **Folder mirror.** One encrypted file written in place, guarded by the
+  provider's stamp and merged when both sides moved. Any folder will do — see
+  [Folder mirror](#folder-mirror).
 - **Browser extension.** Chrome and Firefox, filling logins and codes through a
   native host. It never reads the vault and never runs the crypto.
 - **Autofill on Android.** The phone's own fill panel, in any app whose login form
@@ -109,12 +196,42 @@ through Save. Both are plaintext and both warn you first.
 - **Settings:** one page per box, one for the app (English or Spanish, dark or
   light).
 
+### Folder mirror
+
+Point a box at any folder and it keeps that box's file there. The folder is the
+transport: a disk, a Syncthing folder, a WebDAV mount — the mirror never knows how
+the bytes travel, so the same code runs against all of them.
+
+- **No account.** No token, no OAuth, no sign-in. On Android the folder comes from
+  the system picker (SAF); on a desk it is a directory.
+- **One file, written in place.** The mirror is `vault.pandora`. A look compares
+  the provider's modification stamp with the one the box last saw and reads the
+  bytes only when it moved. A write re-checks the stamp inside the write and
+  refuses when the file moved under it; the next pass reads, merges or adopts.
+- **History is the provider's.** There are no numbered versions, no `keep` depth
+  and no pruning. Drive, Syncthing or the filesystem keeps whatever history the
+  user asked them to keep.
+- **Divergence is merged, not asked about.** The digest the box last synced is the
+  base; when both sides moved they are folded together, conflicts are kept twice,
+  and the status line says what happened. An open editor counts as unsaved work,
+  so its box is merged, never replaced.
+- **What it does not guarantee.** A write cut in half can leave a truncated remote
+  until the next save; recovery is the provider's history. Every changed file is
+  read and hashed whole, so a big box over a slow link is slow — there is no range
+  request and no delta.
+- **The key stays here.** What lands in the folder is the encrypted box, the same
+  bytes the GitHub mirror would hold. A folder holding a copy this box's key does
+  not open is paused, never overwritten; so is a folder that refuses writes.
+
+**Not here yet, on purpose.** The Drive API, which would need OAuth. It is one more
+transport behind the same `Folder`, not a redesign of the box or the mirror.
+
 ## How it works
 
 ```
 desktop / phone ──────▶ Pandora app ──────▶ one encrypted .pandora file
                              │
-                             ├───────────▶ GitHub repo (optional mirror)
+                             ├───────────▶ GitHub repo or a folder (optional mirror)
                              │
 browser extension ──▶ native host ──▶ local bridge (the app holds the key)
 
@@ -192,8 +309,8 @@ ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/path/to/jdk-21 scripts/android-apk.sh 
 2. **Add records** with `Ctrl+N`.
 3. **Search** with `Ctrl+K`, or `Ctrl+F` for the current list.
 4. **Lock** with `Ctrl+L`, or let the idle timer do it.
-5. **Mirror** to GitHub from Settings → GitHub. Reads and pushes run off the UI
-   thread.
+5. **Mirror** to GitHub from Settings → GitHub, or to a folder from Settings → the
+   box. Reads and pushes run off the UI thread.
 
 ### Keyboard
 
@@ -208,6 +325,9 @@ ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/path/to/jdk-21 scripts/android-apk.sh 
 | `Ctrl+5` | Codes |
 | `Ctrl+4` | Settings |
 | `Ctrl+3` | Password generator |
+| `Ctrl+T` | Auto-type the selected login |
+| `Ctrl+H` | Review the box |
+| `Ctrl+6` / `Ctrl+7` | Cards / identities |
 | `Ctrl+K` | Search the whole box |
 | `Ctrl+F` | Focus the search field |
 | `Ctrl+N` | New record |
@@ -219,6 +339,21 @@ ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/path/to/jdk-21 scripts/android-apk.sh 
 | Browser Back | Go back (also the Android back button) |
 
 Below 620 px the layout collapses to one column, which is what the phone uses.
+
+### Reproducible builds
+
+The release AppImage is built twice from a clean tree by `scripts/repro.sh`, and the
+two files are compared byte for byte. Every release carries `reproducible.txt` with the
+answer, and the recipe is the script itself:
+
+```sh
+scripts/repro.sh      # reproducible: yes <sha256>
+```
+
+Three things make the passes agree: the compiler is pinned (`rust-toolchain.toml`), the
+build's timestamps come from the commit (`SOURCE_DATE_EPOCH`), and every absolute path
+rustc would embed — the checkout, the cargo registry, the target directory — is remapped
+to `/build/...` by `scripts/appimage.sh`.
 
 ### Environment
 
@@ -234,6 +369,8 @@ Below 620 px the layout collapses to one column, which is what the phone uses.
 ```sh
 cargo run                         # the GUI; needs a display
 cargo test                        # full suite, ~25 s
+cargo audit                       # advisories in the dependency tree
+cd fuzz && cargo fuzz run codec   # the parsers, on nightly (see fuzz/README)
 cargo test vault::store           # one module
 cargo test create_open_roundtrip  # one test
 cargo fmt
@@ -250,11 +387,23 @@ Releases — workflow, artifacts, the Android signing key, `act` — are in
 ## Limitations
 
 - iOS is not wired up: the icons exist, the entry point does not.
+- A phone keeps three panes on the floor: cards, identities, review and the SSH agent
+  are reached from a wide window (or, for cards and identities, from the search
+  palette).
+- Auto-type types into whatever has the focus; it does not check the window's title the
+  way KeePassXC does, so a mistimed click types into the wrong window.
+- The SSH agent makes its keys; importing an OpenSSH private key is not implemented.
+- Changing the master password drops the box's other factors — the YubiKey and the
+  recovery code — because both are derived from the key being replaced. Re-enrol them
+  after a change; the settings page says so.
+- A passkey cannot be shared, and only Chrome 129+ can use one.
+- Only the AppImage is checked byte for byte (`scripts/repro.sh`); Windows, macOS and
+  the APK are not compared.
 - Android autofill answers for WebViews only: a native app has no URL, so no stored
   entry claims it, and Chrome keeps its own forms out of the framework entirely.
   Codes are offered in any app, unfiltered by site.
-- GitHub is the only mirror, and caps a blob at 100 MB; a box with a huge attachment
-  may not fit. Local storage has no per-file ceiling.
+- GitHub caps a blob at 100 MB, so a box with a huge attachment may not fit there;
+  the folder mirror has no such ceiling. Local storage has none at all.
 - A keyfile box cannot be opened from the browser.
 - No video preview, no auto-type, no server-side sync, no plugin API.
 - The format is not frozen: v4 is all this version reads and writes, and a future

@@ -10,6 +10,10 @@ A Linux build needs the ALSA headers the audio preview links against
 
 ## Commands
 
+The compiler is pinned in `rust-toolchain.toml` (1.99.0, with rustfmt and clippy):
+two builds of the same commit have to be the same build, and the release job names
+the same version. Bump it on purpose, with the whole suite run.
+
 ```bash
 cargo run                        # GUI; needs a display (Glow by default)
 PANDORA_RENDERER=wgpu cargo run  # desktop wgpu fallback
@@ -37,6 +41,22 @@ scripts/android-apk.sh install
 act workflow_dispatch -W .github/workflows/release.yml -j linux \
   -P ubuntu-22.04=catthehacker/ubuntu:act-22.04 \
   -P ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# Advisories in the dependency tree; a finding is a bump or a documented ignore.
+cargo audit
+
+# The parsers that take bytes from a stranger. Nightly, with a C++ toolchain:
+# `libfuzzer-sys` and the sanitizer are not on stable. One target at a time.
+cd fuzz
+cargo fuzz run codec -- -max_total_time=60
+cargo fuzz run csv   -- -max_total_time=60
+cargo fuzz run import -- -max_total_time=60
+cargo fuzz run share -- -max_total_time=60
+
+# The box without a window: list, get, otp, generate, export. The master password comes
+# from a file, an askpass program or the environment — never from argv.
+cargo run --bin pandora-cli -- --box FILE list
+cargo run --bin pandora-cli -- --help
 
 # Browser extension lives next to the crate: ../extension (see its README)
 ../extension/install.sh          # builds the host + writes the native-messaging manifest
@@ -72,7 +92,13 @@ The Linux job runs on Ubuntu 22.04 on purpose: the AppImage inherits the runner'
 glibc floor, and 2.35 still opens on Debian 12 and Ubuntu 22.04.
 
 A `vX.Y.Z` tag runs every job and publishes the artifacts plus `SHA256SUMS` as a
-GitHub Release. PRs do not build packages: `check.yml` is the PR gate, and it
+GitHub Release. The Linux job also builds the AppImage a second time from a clean tree
+and compares the two byte for byte (`scripts/repro.sh`); the line it prints is attached
+to the release as `reproducible.txt`, and it is not part of `SHA256SUMS` — it is a
+claim about the artifacts, not one of them. The recipe: pinned toolchain
+(`rust-toolchain.toml`), `SOURCE_DATE_EPOCH` from the commit, `strip` in the release
+profile, and `--remap-path-prefix` for the checkout, the cargo home and the target
+directory. PRs do not build packages: `check.yml` is the PR gate, and it
 typechecks Linux, Windows and macOS.
 
 A manual `workflow_dispatch` accepts `jobs` (`all` or a comma-separated subset of
@@ -181,12 +207,19 @@ name, never the box's (`Recent::label`). The working copies live in
 `sources/<digest>/`, not `sources/<kind>/<owner>/<repo>/`, and the folder an older build
 left there is moved over once.
 
-**One pane per record.** The strip holds `Passwords` (`features/entries`, a login),
-`Files` (`features/drive`, a note or a document), `Codes` (`features/codes`, a one-time
-seed) and `Settings`. Each record pane owns its own list *and* its own editor, which is
-what keeps `if kind ==` out of the drawing code. The drive is the one pane that holds
+**One pane per shape of record.** The strip holds `Passwords` (`features/entries`, a
+login), `Cards` and `Identities` (the same `features/entries` pane, the same list and
+editor, one form each), `Files` (`features/drive`, a note or a document), `Codes`
+(`features/codes`, a one-time seed), `Review` (`features/health`) and `Settings`. A shape is a form, not a pane: a
+login, a card and an identity share the row, the search, the head, the notes and the
+tail, and each draws only the fields it owns (`editor::body_login`, `body_card`,
+`body_identity`), chosen by `Kind`. Duplicating the panel per shape is what this rule
+is for: it was three copies of the same list before. The login keeps the folders
+view, the generated tree and the drag order to itself — `entries::ui::list` — and
+the other two share `entries::ui::flat`. The drive is the one pane that holds
 two types: `vault::model::Entry` is the tagged enum, so a note cannot carry a document
-and a file cannot carry text. `Kind` is only what the screen and the CSV call a row.
+and a file cannot carry text. `Kind` is only what the screen, the CSV and the pane map
+(`Tab::of` / `Tab::kind`) call a row.
 A seed can also be read out of a QR, which lands the text in the same parser a pasted
 one goes through: on a desktop, from the picture a screenshot leaves on the clipboard
 or from a file; on a phone, from the photo picker or from the live full-screen scanner
@@ -194,6 +227,16 @@ or from a file; on a phone, from the photo picker or from the live full-screen s
 because the hard case is a photograph of a screen: it finds the corners *and* corrects
 the modules the panel's own pixel grid smudges. It runs on its own thread, one frame at
 a time, so the preview never waits for a read.
+
+**Beside the box, on the same key.** Three features keep secrets that are not records:
+`features/agent` serves the box's Ed25519 keys on a 0600 Unix socket (only the keys
+marked `allowed`, only while a box is unlocked — `Agent::poll` empties the snapshot the
+moment the session goes), `features/share` seals one record for somebody else
+(`vault::share`, age-shaped: X25519 to a key or Argon2id to a passphrase, header in the
+AAD), and `features/autotype` types a login into the focused window through `xdotool`,
+`wtype` or `ydotool`. `features/health` is the review pane: `vault::health::report` is
+offline and pure, and the one network lookup (breach ranges) is opt-in, in
+`features/health/hibp.rs`.
 
 **Platform split.** `lib.rs` is the crate: `main.rs` is only the desktop binary, and
 `android_main` starts the same app. `cfg(target_os = "android")` is the only switch, and
@@ -393,11 +436,13 @@ keystore, and what the keystore holds is a box's **derived key** (see
 A vault is one portable file. v4 is a fixed 4 KiB header, 1 MiB encrypted chunks and
 an encrypted manifest at the end. Only v4 opens; an older container is refused.
 
-- `CURRENT_VERSION` is 4. The header is `PANDORA4\n` followed by JSON (KDF, a random
-  `box_id`, and the manifest's offset, length and nonce), padded to 4 KiB. The
-  manifest's AEAD tag authenticates the header fields, so the KDF parameters cannot
-  be changed under the ciphertext. Changing what the header covers means a new
-  version, not an edit. Only v4 boxes open; an older container is refused.
+- `CURRENT_VERSION` is 5. The header is `PANDORA5\n` followed by JSON (KDF, a random
+  `box_id`, the manifest's offset, length and nonce, and the optional recovery slot),
+  padded to 4 KiB. The manifest's AEAD tag authenticates the header fields, so the KDF
+  parameters and the recovery slot cannot be changed under the ciphertext. Changing
+  what the header covers means a new version, not an edit — which is exactly why the
+  recovery slot made v5. A `PANDORA4\n` box still opens with its own AAD (frozen at
+  `pandora4|…`), and the next save writes it as v5; an older container is refused.
 - A file or note body lives in one or more chunks outside the manifest. Each chunk is
   XChaCha20-Poly1305 with its own random nonce; its AAD binds the box id, the record
   id and kind, the chunk index, the chunk count and the plaintext length, so a chunk
@@ -435,11 +480,24 @@ an encrypted manifest at the end. Only v4 opens; an older container is refused.
   thing that tells a copy older than the one on screen apart from a newer one. It rides
   inside the payload, so it is ciphertext like the rest, and it reads as absent (0) in a
   box written before it existed.
-- The file is not frozen yet, so the payload's shape may still change. Once it ships, a
-  new persisted field needs `#[serde(default)]` + `skip_serializing_if`, and never
-  renames or drops one. `url_match` on a login is the pattern: a vault nobody gave a
-  rule to writes the JSON it always did, and
-  `an_empty_box_writes_no_empty_collection` guards the rest.
+- **The format is v4 and stays v4.** The policy is written down here so a feature does
+  not decide it by accident:
+  - **The payload grows, the header does not.** A new collection or field is additive:
+    `#[serde(default)]` + `skip_serializing_if`, read as empty or absent when it is not
+    there, and never a rename or a drop of one that is. `url_match` on a login is the
+    pattern: a vault nobody gave a rule to writes the JSON it always did, and
+    `an_empty_box_writes_no_empty_collection` guards the rest.
+  - **The header and its AAD are frozen.** `KdfHeader`, `box_id`, the manifest's offset,
+    length and nonce, and everything `v4_aad` covers, are a new version to touch — not
+    an edit. A payload-only change never bumps it.
+  - **One v5, and it is spent.** The recovery slot (`recovery`: salt + nonce + the
+    wrapped box key) is the change that reached the header, so the version moved to 5
+    and is frozen with it. A rekey drops the slot: what it wraps is the key being
+    replaced (`features/auth/logic.rs`).
+  - **A second factor is not a header field.** The keyfile slot already is one: a
+    secret handed to `crypto::material` before derivation, with the AEAD tag deciding
+    which secret opened the box. A YubiKey's challenge-response goes in that slot beside
+    the keyfile, never as a header flag the plaintext announces.
 - Writes are atomic (`.tmp` + `fsync` + rename). Chunks pad their last plaintext block
   to 4 KiB, and the whole file is rounded to a 4 KiB block with a 64 KiB floor
   (`PAD_FLOOR`), so a small box is never its own few hundred bytes and its size does

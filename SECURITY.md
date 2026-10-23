@@ -47,7 +47,45 @@ master password.
   requests the bridge does not serve get one fixed sentence, because an unknown
   shape can carry a password. On Android there is a second plaintext copy while a
   box is open — what the fill panel reads — and it is dropped when the box locks
-  (`## Autofill on Android`).
+  (`## Auto-type
+
+Auto-type types the login into whatever window has the focus, through `xdotool`,
+`wtype` or `ydotool`. The box is not the boundary here — the session is: a process that
+can type into the focused window can type anywhere, which is why nothing runs unless
+the user presses `Ctrl+T` on a selected login and clicks the field in the two seconds
+that follow. There is no window-title matching: a mistimed click types the password into
+whatever is in front.
+
+## Sealed shares
+
+A share is a bundle encrypted to one recipient — their X25519 public key, or a
+passphrase — and it is exactly the payload an import lands, so it cannot carry anything
+an import could not. The header says who sealed it and when, and it is authenticated by
+the ciphertext's tag: changing the recipient or the moment makes the file refuse to
+open. A passphrase share is sealed with Argon2id, and its strength is the passphrase's.
+
+## The recovery code
+
+A box created or changed by this version can carry one slot in its header: the box's
+own key, encrypted under a 256-bit code the user writes down (base32, so a printer and
+a person can tell an `O` from a `0`). It is not a second password and it is not a
+reset — nothing on this side can recover a box whose code was never made.
+
+- **What the slot is.** The same key the password derives, wrapped with Argon2id over
+  the code and XChaCha20-Poly1305, with the salt, the nonce and the wrapped key in the
+  clear header like the KDF parameters. It says nothing on its own, and it is inside
+  the header's AAD, so it cannot be swapped for another wrapped key.
+- **What it costs.** Anyone holding the box file and the code opens the box. The code
+  is a second key to the same door: keep it away from the file, and treat a photograph
+  of it as a key.
+- **When it goes.** A rekey — a new master password, a new keyfile, enrolling or
+  dropping the YubiKey — drops the slot: what it wraps is the key being replaced. The
+  settings page says so, and a new code is one click after.
+- **v5.** The header grew this slot, which the AAD covers, so the version moved to 5.
+  A v4 box still opens and is written as v5 on the next save; a v5 box is refused by an
+  older build, as every newer box is.
+
+## Autofill on Android`).
 - **The clipboard.** A copied secret is cleared after a countdown (30 s by
   default; `0` never clears). What is remembered is a BLAKE2 fingerprint of the
   text, not the text, and it is only cleared while reading the clipboard back
@@ -113,6 +151,75 @@ process that already runs as you.
 `Prefs::unlock_from_browser`, off by default, is the only thing that lets the
 extension open a box on its own. Turning it on means the master password can be
 typed into a browser window; the setting says so.
+
+## Passkeys
+
+A passkey is stored like the rest of the box: the private key, the credential id and
+the account handle are fields of the encrypted payload, in the same file, and nothing
+about them is written anywhere else.
+
+- **The key never leaves the host.** The extension has no crypto, no key and no seed.
+  It asks the native host for an assertion; the host signs and hands back
+  `authenticatorData` and a signature. An extension or a page that reads everything the
+  extension can see gets neither the key nor a way to make a signature it did not ask
+  for by picking a credential.
+- **The credential is bound to its origin.** The relying party id is part of what is
+  signed (`rpIdHash`), so an assertion made for `example.com` cannot be replayed at
+  another site, and the host refuses an id that belongs to a different site. Nothing
+  short of that binding is trusted: the `clientDataJSON` a page sends has to carry the
+  challenge the page asked about, and the signature covers both halves.
+- **One credential, one record.** A passkey is a record of the box, so it is in the
+  trash like anything else, and deleting it is reversible until the trash is emptied.
+  It carries no note and no attachment.
+- **What a relying party learns.** Nothing more than from any authenticator: the
+  credential id, the handle it gave at creation, a signature and a counter. The
+  attestation is `none` and the AAGUID is all zeroes, so it cannot be used to identify
+  this app or this device.
+- **The host must be able to read the box.** A signature only happens with the box
+  open (or opened by the host under `Prefs::unlock_from_browser`), and that unlocked
+  state is the user verification the credential claims. A browser that never reaches
+  the host gets `NotAllowedError`, not a key.
+- **Chrome only.** The provider API an extension needs exists in Chromium 129+ and
+  nowhere else; Firefox and other Gecko browsers have no equivalent, so no passkey is
+  ever offered there. The popup says so.
+
+## Auto-type
+
+Auto-type types the login into whatever window has the focus, through `xdotool`,
+`wtype` or `ydotool`. The box is not the boundary here — the session is: a process that
+can type into the focused window can type anywhere, which is why nothing runs unless
+the user presses `Ctrl+T` on a selected login and clicks the field in the two seconds
+that follow. There is no window-title matching: a mistimed click types the password into
+whatever is in front.
+
+## Sealed shares
+
+A share is a bundle encrypted to one recipient — their X25519 public key, or a
+passphrase — and it is exactly the payload an import lands, so it cannot carry anything
+an import could not. The header says who sealed it and when, and it is authenticated by
+the ciphertext's tag: changing the recipient or the moment makes the file refuse to
+open. A passphrase share is sealed with Argon2id, and its strength is the passphrase's.
+
+## The recovery code
+
+A box created or changed by this version can carry one slot in its header: the box's
+own key, encrypted under a 256-bit code the user writes down (base32, so a printer and
+a person can tell an `O` from a `0`). It is not a second password and it is not a
+reset — nothing on this side can recover a box whose code was never made.
+
+- **What the slot is.** The same key the password derives, wrapped with Argon2id over
+  the code and XChaCha20-Poly1305, with the salt, the nonce and the wrapped key in the
+  clear header like the KDF parameters. It says nothing on its own, and it is inside
+  the header's AAD, so it cannot be swapped for another wrapped key.
+- **What it costs.** Anyone holding the box file and the code opens the box. The code
+  is a second key to the same door: keep it away from the file, and treat a photograph
+  of it as a key.
+- **When it goes.** A rekey — a new master password, a new keyfile, enrolling or
+  dropping the YubiKey — drops the slot: what it wraps is the key being replaced. The
+  settings page says so, and a new code is one click after.
+- **v5.** The header grew this slot, which the AAD covers, so the version moved to 5.
+  A v4 box still opens and is written as v5 on the next save; a v5 box is refused by an
+  older build, as every newer box is.
 
 ## Autofill on Android
 
@@ -199,7 +306,17 @@ it answers no to all three.
 
 What `SHA256SUMS` cannot prove is authorship: the hash and the file come from the
 same release, so **TLS to GitHub is the real trust anchor**, not the checksum. The
-checksum is for a mangled download. The signing that matters is Android's, where
+checksum is for a mangled download.
+
+A release also publishes `SHA256SUMS.minisig`, and a build compiled with
+`PANDORA_MINISIGN_PUBLIC_KEY` refuses to install from a release that does not carry
+one, or whose signature does not verify: that turns "this file came from GitHub over
+TLS" into "this checksum file was signed by the key this build trusts", which is what
+makes the artifact portable to a mirror, a USB stick or a stranger's re-upload. A build
+with no key compiled in keeps the old behaviour — the hash, and nothing more — and the
+`--remap-path-prefix` of the release recipe is what lets a third party rebuild the
+AppImage and compare it byte for byte (`scripts/repro.sh`; the answer rides every
+release as `reproducible.txt`). The signing that matters is Android's, where
 the APK must carry the key already on the phone — see below.
 
 Installing writes the open box first and refuses when it has unsaved edits or an
