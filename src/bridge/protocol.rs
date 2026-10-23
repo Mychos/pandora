@@ -121,6 +121,27 @@ pub enum Request {
     Reveal {
         id: String,
     },
+    /// The passkeys a site may use; a listing never carries a key.
+    PasskeyList {
+        rp_id: String,
+    },
+    /// A new credential for one site, minted by the host and stored in the open box.
+    PasskeyCreate {
+        rp_id: String,
+        /// The account name the page showed; it names the record too.
+        #[serde(default)]
+        user_name: String,
+    },
+    /// One assertion for one credential, and only after the user picked it.
+    PasskeyGet {
+        rp_id: String,
+        /// The credential the user picked, base64 as the page sent it.
+        credential_id: String,
+        /// The challenge the page asked about, base64url: checked against the client data.
+        challenge: String,
+        /// The `clientDataJSON` the page will post back, base64.
+        client_data: String,
+    },
     /// The seeds in the box, by name: a listing never carries a secret.
     Codes,
     /// The code one seed holds now, derived and about to expire; the seed stays put.
@@ -145,6 +166,22 @@ pub struct Candidate {
     pub username: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
+}
+
+/// A passkey as the extension may see it: no key and no seed, only what a page needs
+/// to offer the credential and the handle it belongs to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PasskeyInfo {
+    pub id: String,
+    pub name: String,
+    pub rp_id: String,
+    /// COSE algorithm: -7 ES256, -8 EdDSA.
+    pub alg: i32,
+    /// Base64 of the credential id, which the site already knows: it is what
+    /// `allowCredentials` names, not a secret.
+    pub credential_id: String,
+    /// Base64 of the account handle the site gave at creation.
+    pub user_handle: String,
 }
 
 /// A seed as the extension may see it: id and name. [`Request::Code`] derives the
@@ -180,6 +217,29 @@ pub enum Response {
     /// The entry the panel just wrote, so it can show it without a second call.
     Saved {
         entry: Candidate,
+    },
+    Passkeys {
+        passkeys: Vec<PasskeyInfo>,
+    },
+    /// A credential just minted: the attestation object and what it holds.
+    PasskeyCreated {
+        entry: PasskeyInfo,
+        /// Base64 of the raw credential id the page must keep.
+        credential_id: String,
+        /// Base64 of the `fmt: "none"` attestation object, CBOR.
+        attestation: String,
+    },
+    /// One assertion, over a client data the page already has.
+    PasskeyAssertion {
+        /// Base64 of the credential that signed.
+        credential_id: String,
+        /// Base64 of `authenticatorData`.
+        auth_data: String,
+        /// Base64 of the signature (DER for ES256, raw for EdDSA).
+        signature: String,
+        /// Base64 of the handle, so the page can say who signed in.
+        user_handle: String,
+        counter: u32,
     },
     Generated {
         password: String,

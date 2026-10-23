@@ -62,6 +62,13 @@ pub fn read(request: &Request, peer: Peer<'_>) -> Option<Response> {
             },
         }),
 
+        Request::PasskeyList { rp_id } => Some(match peer {
+            Peer::Locked { .. } => locked(),
+            Peer::Open(vault) => Response::Passkeys {
+                passkeys: crate::host::passkeys::list(vault, rp_id),
+            },
+        }),
+
         Request::Codes => Some(match peer {
             Peer::Locked { .. } => locked(),
             Peer::Open(vault) => Response::Codes {
@@ -116,7 +123,7 @@ pub fn update_login(
         item.username = username;
     }
     if let Some(password) = password {
-        item.password = Zeroizing::new(password.to_owned());
+        item.set_password(password);
     }
     item.touched(now_secs());
     Some(candidate(
@@ -274,11 +281,58 @@ mod tests {
         assert!(matches!(answer, Response::Error { .. }), "{answer:?}");
     }
 
+    /// The listing is the shape a page can use: id, name, algorithm and handle. The
+    /// key stays in the box, and another site's credential is not even named.
+    #[test]
+    fn listing_passkeys_carries_no_key_and_only_its_own_site() {
+        let mut vault = Vault::new("Box");
+        let mut it = crate::vault::model::Passkey::new(1, "example.com");
+        it.name = "ana@example.com".to_owned();
+        it.credential_id = Zeroizing::new(vec![1, 2, 3]);
+        it.user_handle = Zeroizing::new(vec![7, 7, 7]);
+        it.private_key = Zeroizing::new(b"never-listed".to_vec());
+        vault.passkeys.push(it);
+        let mut other = crate::vault::model::Passkey::new(1, "other.example");
+        other.name = "other site".to_owned();
+        vault.passkeys.push(other);
+
+        let answer = read(
+            &Request::PasskeyList {
+                rp_id: "example.com".to_owned(),
+            },
+            Peer::Open(&vault),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&answer).unwrap();
+        assert!(json.contains("ana@example.com"), "{json}");
+        assert!(!json.contains("other site"), "another site is not offered");
+        assert!(!json.contains("never-listed"), "the key stays in the box");
+        match answer {
+            Response::Passkeys { passkeys } => {
+                assert_eq!(passkeys.len(), 1);
+                assert_eq!(passkeys[0].alg, -7, "ES256 is what a host mints");
+                assert!(!passkeys[0].user_handle.is_empty());
+                assert_eq!(
+                    passkeys[0].credential_id,
+                    crate::vault::codec::display(&[1, 2, 3]).to_string(),
+                    "the site's own credential id, in base64, is what a page names"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// A locked peer answers every read the same way, codes included.
     #[test]
     fn a_locked_peer_carries_no_code() {
         let locked = Peer::Locked { unlockable: false };
-        for request in [Request::Codes, Request::Code { id: "x".to_owned() }] {
+        for request in [
+            Request::Codes,
+            Request::Code { id: "x".to_owned() },
+            Request::PasskeyList {
+                rp_id: "example.com".to_owned(),
+            },
+        ] {
             assert!(matches!(
                 read(&request, locked).unwrap(),
                 Response::Error { .. }

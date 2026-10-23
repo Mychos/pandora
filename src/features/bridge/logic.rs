@@ -42,7 +42,7 @@ pub fn answer(request: Request, session: Option<&mut Session>) -> Response {
             };
             let entry = serve::create_login(&mut session.vault, name, username, &password, url);
             // The app's own autosave writes it: one writer, no conflict to detect.
-            session.mark_dirty();
+            session.mark_now();
             Response::Saved { entry }
         }
 
@@ -61,8 +61,48 @@ pub fn answer(request: Request, session: Option<&mut Session>) -> Response {
                     message: "no such entry".to_owned(),
                 };
             };
-            session.mark_dirty();
+            session.mark_now();
             Response::Saved { entry }
+        }
+
+        Request::PasskeyCreate { rp_id, user_name } => {
+            let Some(session) = session else {
+                return serve::locked();
+            };
+            let response = crate::host::passkeys::create_in(&mut session.vault, &rp_id, &user_name);
+            if !matches!(response, Response::Error { .. }) {
+                session.mark_now();
+            }
+            response
+        }
+
+        Request::PasskeyGet {
+            rp_id,
+            credential_id,
+            challenge,
+            client_data,
+        } => {
+            let Some(session) = session else {
+                return serve::locked();
+            };
+            let (Ok(id), Ok(data)) = (
+                crate::vault::codec::decode(&credential_id),
+                crate::vault::codec::decode(&client_data),
+            ) else {
+                return Response::Error {
+                    message: "the page sent something unreadable".to_owned(),
+                };
+            };
+            if !String::from_utf8_lossy(&data).contains(&challenge) {
+                return Response::Error {
+                    message: "the client data is not for this challenge".to_owned(),
+                };
+            }
+            let response = crate::host::passkeys::assert_in(&mut session.vault, &rp_id, &id, &data);
+            if !matches!(response, Response::Error { .. }) {
+                session.mark_now();
+            }
+            response
         }
 
         // Locking is the app's: it clears the session, which is what drops the keys.
