@@ -1,7 +1,7 @@
 //! The unlocked box the host holds: derived key, vault, and the reads the extension
 //! asks for, through the same `vault::store` as the app.
 
-use crate::bridge::protocol::Candidate;
+use crate::bridge::protocol::{Candidate, Response};
 use crate::bridge::serve;
 use crate::vault::model::Vault;
 use crate::vault::store::{self, Credentials};
@@ -16,7 +16,11 @@ pub struct Session {
 impl Session {
     /// The derived key lives for the process and never crosses back to the browser.
     pub fn unlock(path: PathBuf, password: &str) -> Result<Self, String> {
-        let (creds, vault) = store::open(&path, password, None)?;
+        // A key on the desk answers for a box that enrolled one; the password alone
+        // still opens every box that did not.
+        let key = crate::shared::yubikey::Usb;
+        let factor = crate::shared::yubikey::present().then_some(&key as &dyn store::Factor);
+        let (creds, vault) = store::open_with(&path, password, None, factor)?;
         Ok(Self { path, creds, vault })
     }
 
@@ -67,6 +71,51 @@ impl Session {
         Ok(entry)
     }
 
+    /// A new credential for the site, minted here and saved into the box.
+    pub fn passkey_create(&mut self, rp_id: &str, user_name: &str) -> Response {
+        self.refresh_response(|session| {
+            let response = crate::host::passkeys::create_in(&mut session.vault, rp_id, user_name);
+            (response, true)
+        })
+    }
+
+    /// One assertion for the credentials a page already knows; the counter moves with it.
+    pub fn passkey_assert(
+        &mut self,
+        rp_id: &str,
+        credential_id: &[u8],
+        client_data: &[u8],
+    ) -> Response {
+        self.refresh_response(|session| {
+            let response = crate::host::passkeys::assert_in(
+                &mut session.vault,
+                rp_id,
+                credential_id,
+                client_data,
+            );
+            (response, true)
+        })
+    }
+
+    /// Re-read first, so an edit made in the app is not lost, then run the change and
+    /// write the box when the change says it changed something.
+    fn refresh_response<F>(&mut self, change: F) -> Response
+    where
+        F: FnOnce(&mut Self) -> (Response, bool),
+    {
+        if let Err(message) = self.refresh() {
+            return Response::Error { message };
+        }
+        let (response, touched) = change(self);
+        if !touched || matches!(response, Response::Error { .. }) {
+            return response;
+        }
+        match self.save() {
+            Ok(()) => response,
+            Err(message) => Response::Error { message },
+        }
+    }
+
     fn save(&mut self) -> Result<(), String> {
         store::save(&self.path, &mut self.vault, &self.creds)
     }
@@ -96,6 +145,37 @@ mod tests {
         }
         store::save(&path, &mut vault, &creds).unwrap();
         (Session::unlock(path.clone(), "pw").unwrap(), path)
+    }
+
+    /// A credential minted through the host is in the file, not only in memory, and
+    /// the assertion's counter goes there too.
+    #[test]
+    fn a_passkey_is_written_and_its_counter_is_kept() {
+        let (mut s, path) = session(&[]);
+        let answer = s.passkey_create("example.com", "ana@example.com");
+        let crate::bridge::protocol::Response::PasskeyCreated { credential_id, .. } = answer else {
+            panic!("a credential comes back: {answer:?}");
+        };
+        let id = crate::vault::codec::decode(&credential_id).unwrap();
+
+        let answer = s.passkey_assert("example.com", &id, br#"{"challenge":"AAAA"}"#);
+        assert!(
+            matches!(
+                answer,
+                crate::bridge::protocol::Response::PasskeyAssertion { counter: 1, .. }
+            ),
+            "{answer:?}"
+        );
+
+        let again = Session::unlock(path.clone(), "pw").unwrap();
+        assert_eq!(again.vault().passkeys.len(), 1, "the box on disk has it");
+        assert_eq!(again.vault().passkeys[0].counter, 1);
+        assert_eq!(
+            again.vault().passkeys[0].name,
+            "ana@example.com",
+            "the account name is what the record is called"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

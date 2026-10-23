@@ -1,6 +1,7 @@
 //! The stdio host the browser launches. Every secret operation goes through `vault/`,
 //! so the extension never learns the format or the crypto; it draws nothing.
 
+pub mod passkeys;
 mod session;
 
 use crate::bridge::protocol::{self, BoxInfo, Envelope, Request, Response};
@@ -193,6 +194,36 @@ fn handle(current: &mut Option<Session>, request: Request, prefs: &Prefs) -> Res
                     Ok(entry) => Response::Saved { entry },
                     Err(message) => Response::Error { message },
                 }
+            }
+            None => serve::locked(),
+        },
+
+        Request::PasskeyCreate { rp_id, user_name } => match current {
+            Some(session) => session.passkey_create(&rp_id, &user_name),
+            None => serve::locked(),
+        },
+
+        Request::PasskeyGet {
+            rp_id,
+            credential_id,
+            challenge,
+            client_data,
+        } => match current {
+            Some(session) => {
+                let (Ok(id), Ok(data)) = (
+                    crate::vault::codec::decode(&credential_id),
+                    crate::vault::codec::decode(&client_data),
+                ) else {
+                    return Response::Error {
+                        message: "the page sent something unreadable".to_owned(),
+                    };
+                };
+                if !String::from_utf8_lossy(&data).contains(&challenge) {
+                    return Response::Error {
+                        message: "the client data is not for this challenge".to_owned(),
+                    };
+                }
+                session.passkey_assert(&rp_id, &id, &data)
             }
             None => serve::locked(),
         },
