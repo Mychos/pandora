@@ -1201,3 +1201,40 @@ fn the_recents_card_keeps_the_floor_gap_of_the_local_view() {
         "recents and local leave a different floor gap: {recents:?} {local:?}"
     );
 }
+
+#[test]
+fn the_folder_section_names_the_file_and_offers_both_moves() {
+    let ctx = egui::Context::default();
+    theme::apply(&ctx);
+    let mut app = App::blank(&ctx);
+    app.open("Folder section");
+    let dir = tempfile::tempdir().expect("a temp dir");
+    app.boxes.session.as_mut().expect("a box").remote =
+        Some(crate::features::settings::model::Remote {
+            kind: crate::features::settings::model::FOLDER.to_owned(),
+            repo: String::new(),
+            file: String::new(),
+            sha: String::new(),
+            folder: dir.path().display().to_string(),
+            digest: "0123456789abcdef0123456789abcdef".to_owned(),
+            stamp: 1_700_000_000_000,
+            read_only: false,
+            blocked: false,
+        });
+
+    let shapes = shot::frame(&ctx, egui::vec2(900.0, 700.0), Vec::new(), |ui| {
+        folder(ui, &mut app)
+    });
+    let drawn = shot::words(&shapes);
+    for want in [
+        "FOLDER MIRROR",
+        "vault.pandora",
+        "Choose a folder…",
+        "Sync now",
+    ] {
+        assert!(
+            drawn.iter().any(|word| word == want),
+            "{want:?} is missing: {drawn:?}"
+        );
+    }
+}

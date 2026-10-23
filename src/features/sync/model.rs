@@ -1,5 +1,6 @@
-//! Everything the app knows about GitHub: the repos it can reach, the box files
-//! each source holds, and the requests in flight.
+//! Everything the app knows about its mirrors — the GitHub repos it can reach,
+//! the folder it writes the box into, the files each holds — and the
+//! requests in flight.
 
 use crate::features::settings::model::Source;
 use crate::features::sync::github::{self, Avatars, Quota, Repo};
@@ -29,6 +30,60 @@ pub enum Reply {
 pub struct Job {
     pub path: PathBuf,
     pub rx: mpsc::Receiver<Result<Reply, String>>,
+}
+
+/// What a folder probe saw, without decrypting anything.
+pub enum Seen {
+    /// The file is not in the folder.
+    Missing,
+    /// The stamp is the one this box last saw; the bytes were not read.
+    Unchanged(u64),
+    /// The stamp moved, or the provider cannot stamp. These are the bytes now.
+    Changed(Option<u64>, Vec<u8>),
+}
+
+/// What a folder mirror answered.
+pub enum FolderReply {
+    /// What the folder holds now.
+    Probed(Seen),
+    /// A write landed, and the stamp the provider gave it afterwards.
+    Wrote(Option<u64>),
+    /// A merge was filed, its stamp, and what the merge did to get there.
+    Merged(Option<u64>, Summary),
+    /// The write was overtaken: another device moved the file. Nothing was written.
+    Moved,
+    /// The folder refused writes; the mirror is paused.
+    ReadOnly,
+}
+
+/// What a merge kept and what it had to duplicate, so the view can say a conflict
+/// was kept rather than silently swallow one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    /// Records this side took from the folder, because they were newer there.
+    pub adopted: usize,
+    /// Records both sides changed at once, kept twice.
+    pub conflicts: usize,
+    /// Live records a tombstone removed.
+    pub dropped: usize,
+}
+
+/// What a folder worker was asked to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderIntent {
+    /// Report the file's stamp, its bytes when the stamp moved, or that it is gone.
+    Probe,
+    /// File what is on disk, guarded by the stamp this box last saw.
+    Write,
+}
+
+/// A folder read, probe, write or prune on a worker thread. Like [`Job`], it
+/// carries the file it was started on: a box not on screen any more still gets
+/// its own reply, and never another box's version.
+pub struct FolderJob {
+    pub path: PathBuf,
+    pub intent: FolderIntent,
+    pub rx: mpsc::Receiver<Result<FolderReply, String>>,
 }
 
 /// What a repo request carried back. No box is attached to it — it is the folder
@@ -110,6 +165,18 @@ pub struct Sync {
     /// This run's spend against GitHub's hourly write budget.
     pub quota: Quota,
     pub job: Option<Job>,
+    /// The folder mirror's one request in flight. It is separate from `job`
+    /// because a repo and a folder are two different transports, and a box only
+    /// ever uses one of them.
+    pub folder_job: Option<FolderJob>,
+    /// Why the folder mirror last failed, by box path. The next answer clears it.
+    pub folder_failed: Option<(PathBuf, String)>,
+    /// When the folder was last looked at, and which box, so an open box and a
+    /// return to the foreground are probed once per window and not per frame.
+    pub folder_at: Option<Instant>,
+    pub folder_seen: Option<PathBuf>,
+    /// A return to the foreground asks for a fresh probe.
+    pub folder_resume: bool,
     pub repo_job: Option<RepoJob>,
     /// The last page the app asked the platform to open. Only a test reads it:
     /// no test may launch a browser, so what would have been opened is written

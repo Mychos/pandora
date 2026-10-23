@@ -1,3 +1,4 @@
+pub mod folder;
 pub mod github;
 pub mod logic;
 pub mod model;

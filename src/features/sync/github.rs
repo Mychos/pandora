@@ -673,8 +673,8 @@ fn erase_at(base: &str, repo: &str, file: &str, sha: &str, token: &str) -> Resul
     }
 }
 
-/// 900 ms because a crash may not cost the edits; 15 s because GitHub counts commits
-/// against an hourly budget and typing is not a change.
+/// 15 s because GitHub counts commits against an hourly budget and typing is
+/// not a change.
 pub const PUSH_QUIET: Duration = Duration::from_secs(15);
 
 pub const PUSH_BACKOFF: Duration = Duration::from_secs(60);
@@ -719,17 +719,21 @@ impl Quota {
     }
 }
 
-/// A commit subject is plaintext in the repo, so it is one fixed line and never a name,
-/// count or collection; it records only *that* a version went out.
-pub struct Fingerprint;
+/// One box's content boiled down to a value two copies can be compared by. It
+/// says *that* a version went out — a commit subject is plaintext in the repo —
+/// and it spares a save that would encrypt a box already on disk.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Fingerprint(String);
 
 impl Fingerprint {
     /// The one subject every push carries.
     pub const SUBJECT: &'static str = "pandora: box synced";
 
-    /// Every caller has a box; nothing is read off it, which is the point.
-    pub fn of(_vault: &Vault) -> Self {
-        Self
+    /// The generation rides inside the payload, so it is part of the content: a
+    /// vault read off disk and the one just written agree on it.
+    pub fn of(vault: &Vault) -> Self {
+        let bytes = serde_json::to_vec(vault).unwrap_or_default();
+        Self(crate::vault::crypto::digest(&bytes))
     }
 }
 

@@ -3,7 +3,8 @@
 
 use crate::app::{App, Screen, Side, StatusKind};
 use crate::features::auth::ui as auth;
-use crate::features::settings::model::Source;
+use crate::features::settings::model::{Source, FOLDER};
+use crate::features::sync::folder::NAME;
 use crate::shared::i18n::t;
 use crate::shared::theme;
 use crate::shared::ui::entry as record;
@@ -12,7 +13,7 @@ use crate::vault::store;
 use egui::{Layout, RichText, TextEdit};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BOTTOM: f32 = 24.0;
 
@@ -297,6 +298,120 @@ fn machine(ui: &mut egui::Ui, app: &mut App) {
 /// A full-width quiet button, its mark in front of its label.
 fn aux_button(ui: &mut egui::Ui, icons: &theme::Icons, icon: theme::Icon, text: &str) -> bool {
     theme::secondary_button(ui, icons, Some(icon), text).clicked()
+}
+
+/// The folder mirror's section, beside the GitHub one: the switch that attaches
+/// or removes the mirror, the folder it writes to, the file and how old the last
+/// sync is, and the two things a person does with it — choose the folder, or send
+/// the box now. Divergence is merged without a question; the status line is the
+/// only place it shows.
+pub(crate) fn folder(ui: &mut egui::Ui, app: &mut App) {
+    let Some(s) = app.boxes.session.as_ref() else {
+        return;
+    };
+    let path = s.path.clone();
+    let remote = s.remote.clone().filter(|remote| remote.kind == FOLDER);
+    let why = app
+        .sync
+        .folder_failed
+        .as_ref()
+        .filter(|(at, _)| at == &path)
+        .map(|(_, why)| why.clone());
+    let mut choose = false;
+    let mut forgot = false;
+    let mut now = false;
+    let mut mirror = remote.is_some();
+
+    theme::card(ui, "Folder mirror", |ui| {
+        ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+            if theme::check(ui, &mut mirror, "Mirror this box to a folder").changed() {
+                if mirror {
+                    choose = true;
+                } else {
+                    forgot = true;
+                }
+            }
+            ui.add_space(8.0);
+            if let Some(remote) = remote.as_ref() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&remote.folder)
+                            .small()
+                            .color(theme::palette().muted),
+                    )
+                    .truncate(),
+                );
+                ui.add_space(6.0);
+                value(ui, app, NAME, "file");
+                ui.add_space(4.0);
+                if remote.read_only {
+                    if why.is_none() {
+                        failure(ui, t("the folder is read-only — the mirror is paused"));
+                    }
+                } else if remote.blocked {
+                    if why.is_none() {
+                        failure(
+                            ui,
+                            t("the folder holds another box — choose another folder"),
+                        );
+                    }
+                } else if remote.stamp == 0 && remote.digest.is_empty() {
+                    theme::hint(ui, "not synced to the folder yet");
+                } else if remote.stamp == 0 {
+                    theme::hint(ui, "synced to the folder");
+                } else {
+                    let at = UNIX_EPOCH + Duration::from_millis(remote.stamp);
+                    theme::hint(
+                        ui,
+                        &crate::shared::i18n::tf("synced {age} ago", &[("age", &age(at))]),
+                    );
+                }
+            } else {
+                theme::hint(
+                    ui,
+                    "no folder is mirrored — choose one to keep this box's file there",
+                );
+            }
+            if let Some(why) = why.as_deref() {
+                ui.add_space(4.0);
+                failure(ui, why);
+            }
+            ui.add_space(8.0);
+            if aux_button(ui, &app.icons, theme::Icon::Folder, "Choose a folder…") {
+                choose = true;
+            }
+            if remote.is_some() {
+                ui.add_space(4.0);
+                if aux_button(ui, &app.icons, theme::Icon::RefreshCw, "Sync now") {
+                    now = true;
+                }
+            }
+        });
+    });
+
+    if forgot {
+        app.folder_forget();
+    }
+    if choose {
+        app.folder_pick();
+    }
+    if now {
+        app.folder_push();
+    }
+}
+
+fn age(stamp: SystemTime) -> String {
+    let seconds = SystemTime::now()
+        .duration_since(stamp)
+        .unwrap_or_default()
+        .as_secs();
+    let (count, unit) = match seconds {
+        0..60 => (seconds, "{count} seconds"),
+        60..3600 => (seconds / 60, "{count} minutes"),
+        3600..86_400 => (seconds / 3600, "{count} hours"),
+        _ => (seconds / 86_400, "{count} days"),
+    };
+    crate::shared::i18n::tf(unit, &[("count", &count)])
 }
 
 /// GitHub's half. Without a session the repos and their working copies still show:

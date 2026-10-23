@@ -7,6 +7,7 @@ use crate::features::sync::github::{self as sync, Fingerprint};
 use crate::features::sync::remember;
 use crate::shared::i18n::tf;
 use crate::shared::ui::size;
+use crate::vault::model::Vault;
 use crate::vault::store;
 use crate::vault::Failure;
 use std::fs;
@@ -38,7 +39,7 @@ fn due_in(read_at: Option<Instant>, now: Instant) -> Duration {
 
 /// Download in one step: a half-written box would open as a corrupt vault. The
 /// copy it replaces is stashed, so a fetch never loses an unsent edit.
-fn place(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn place(path: &Path, bytes: &[u8]) -> Result<(), String> {
     store::stash(path);
     store::write_atomic(path, bytes)
         .map_err(|e| tf("cannot place the box: {error}", &[("error", &e)]))
@@ -303,6 +304,7 @@ impl App {
     fn out(&mut self) -> Option<Zeroizing<String>> {
         if self.sync.due(Instant::now()) {
             self.renew();
+            return None;
         }
         (!self.sync.token.is_empty()).then(|| Zeroizing::new(self.sync.token.to_string()))
     }
@@ -538,6 +540,11 @@ impl App {
             repo: source.target.clone(),
             file,
             sha: String::new(),
+            folder: String::new(),
+            digest: String::new(),
+            stamp: 0,
+            read_only: false,
+            blocked: false,
         };
         self.prefs
             .remotes
@@ -561,6 +568,11 @@ impl App {
             repo: source.target,
             file,
             sha,
+            folder: String::new(),
+            digest: String::new(),
+            stamp: 0,
+            read_only: false,
+            blocked: false,
         };
         self.prefs
             .remotes
@@ -590,11 +602,8 @@ impl App {
         let Some(remote) = s.remote.clone() else {
             return self.shell.fail("this box is not in a repo yet");
         };
-        if s.dirty {
-            return self
-                .shell
-                .fail("the box has unsaved edits — let them save first");
-        }
+        // A box with unsaved edits is pulled too: the merge below keeps them, and
+        // what it keeps is what gets written.
         let (tx, rx) = mpsc::channel();
         let path = s.path.clone();
         thread::spawn(move || {
@@ -825,13 +834,18 @@ impl App {
                 Ok(Reply::Pulled(bytes, sha)) => self.land_pull(&path, bytes, sha),
                 Ok(Reply::Pushed(sha, sent)) => self.land_push(&path, sha, sent),
                 Ok(Reply::Conflict) => {
-                    // A stale sha would make every later push fail; visible until a pull clears it.
+                    // A stale sha would make every later push fail until the repo's
+                    // version is in hand. Ask for it now: the pull merges, the merge
+                    // writes, and what is left over goes back out with the new sha.
                     if let Some(s) = self.boxes.find(&path) {
                         s.behind = true;
                     }
                     self.retry_later(&path, now);
-                    self.shell
-                        .fail("the repo has a newer version — get it first");
+                    self.pull();
+                    self.shell.set_status(
+                        "the repo has a newer version — merging it",
+                        StatusKind::Info,
+                    );
                 }
                 Ok(Reply::Erased) => {
                     // No copy left: forgetting the sha makes the next push a create.
@@ -918,20 +932,48 @@ impl App {
             }
         }
 
-        if self.auth.login.is_some()
-            || self.sync.job.is_some()
-            || self.sync.repo_job.is_some()
-            || self.sync.renew_job.is_some()
-        {
-            ctx.request_repaint_after(Duration::from_millis(200));
+        let mut folder: Option<(
+            PathBuf,
+            crate::features::sync::model::FolderIntent,
+            Result<crate::features::sync::model::FolderReply, String>,
+        )> = None;
+        if let Some(job) = self.sync.folder_job.as_ref() {
+            match job.rx.try_recv() {
+                Ok(reply) => folder = Some((job.path.clone(), job.intent, reply)),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    folder = Some((
+                        job.path.clone(),
+                        job.intent,
+                        Err("the folder request was interrupted".to_owned()),
+                    ));
+                }
+            }
+        }
+        if let Some((path, intent, reply)) = folder {
+            self.sync.folder_job = None;
+            self.land_folder(&path, intent, reply);
         }
 
         // Automatic sending: a run of edits lands as one commit once the box settles.
         let now = Instant::now();
+        if let Some(wait) = self.folder_tick(now) {
+            ctx.request_repaint_after(wait);
+        }
         match self.push_wait(now) {
             Some(wait) if wait.is_zero() => self.send(false),
             Some(wait) => ctx.request_repaint_after(wait),
             None => {}
+        }
+
+        // Last, because the tick and the send can start a job of their own.
+        if self.auth.login.is_some()
+            || self.sync.job.is_some()
+            || self.sync.folder_job.is_some()
+            || self.sync.repo_job.is_some()
+            || self.sync.renew_job.is_some()
+        {
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
     }
 
@@ -945,7 +987,13 @@ impl App {
             return None;
         }
         let s = self.boxes.session.as_ref()?;
-        if s.remote.is_none() || s.behind || s.conflict {
+        if !s
+            .remote
+            .as_ref()
+            .is_some_and(|remote| remote.kind == GITHUB)
+            || s.behind
+            || s.conflict
+        {
             return None;
         }
         s.push_at.map(|at| at.saturating_duration_since(now))
@@ -964,6 +1012,9 @@ impl App {
         let note: Option<(String, StatusKind)>;
         // A refused copy is not the repo's version, so nothing after this may treat them as agreeing.
         let mut refused = false;
+        // A merge that left something only this box holds must not be told the repo
+        // already has it: the tail below clears the push for every other landing.
+        let mut send = false;
         // None: closed while the request was out. Some(None): open, but no longer mirrored.
         let mut mirror: Option<Option<Remote>> = None;
         match self.boxes.find(path) {
@@ -990,9 +1041,54 @@ impl App {
                         "the repo copy is this box already".to_owned(),
                         StatusKind::Info,
                     ));
+                } else if !s.parked && !s.dirty {
+                    match reconcile(s, &bytes, &sha) {
+                        Ok(Reconcile::Same) => {
+                            note = Some((
+                                "the repo copy is this box already".to_owned(),
+                                StatusKind::Info,
+                            ));
+                        }
+                        Ok(Reconcile::Merged {
+                            adopted,
+                            conflicts,
+                            sending,
+                        }) => {
+                            send = sending;
+                            let mut said = crate::vault::merge::summary(adopted, conflicts);
+                            if said.is_empty() {
+                                said = crate::shared::i18n::t("this box's own edits were kept")
+                                    .to_owned();
+                            }
+                            let said = if sending {
+                                tf("{what} — sending it back", &[("what", &said)])
+                            } else {
+                                said
+                            };
+                            note = Some((said, StatusKind::Saved));
+                        }
+                        Err(e) if Failure::of(&e) == Some(Failure::RolledBack) => {
+                            refused = true;
+                            note = Some((
+                                "the repo copy is older than this box — nothing replaced"
+                                    .to_owned(),
+                                StatusKind::Error,
+                            ));
+                        }
+                        Err(e) => {
+                            note = Some((
+                                tf(
+                                    "the repo copy does not open with this box's key: {error}",
+                                    &[("error", &e)],
+                                ),
+                                StatusKind::Error,
+                            ));
+                        }
+                    }
                 } else {
-                    // The pull names the generation: a rewound repo hands a valid old blob
-                    // with a valid sha, and nothing else would notice.
+                    // A parked box is not loaded, and a box with unsaved edits is one
+                    // keystroke from losing them: the copy replaces the file, as it
+                    // always did, and the merge waits for a moment with neither.
                     let floor = if s.parked {
                         Some(s.parked_seq)
                     } else {
@@ -1043,7 +1139,9 @@ impl App {
                 // push that was due still is.
                 if !refused {
                     s.baseline = Some(Fingerprint::of(&s.vault));
-                    s.push_at = None;
+                    if !send {
+                        s.push_at = None;
+                    }
                 }
                 s.behind = false;
                 mirror = Some(s.remote.clone());
@@ -1113,7 +1211,7 @@ impl App {
     }
 
     /// Remember where a box is mirrored; the token is never written down.
-    fn remember(&mut self, path: &Path, remote: Option<Remote>) {
+    pub(crate) fn remember(&mut self, path: &Path, remote: Option<Remote>) {
         let key = prefs::box_key(&path.display().to_string());
         match remote {
             Some(remote) => {
@@ -1125,6 +1223,77 @@ impl App {
         }
         prefs::save(&self.prefs);
     }
+}
+
+/// What a pull's merge did with the box on screen.
+enum Reconcile {
+    /// The repo says what this box says: nothing was written.
+    Same,
+    /// The two were folded: what the other copy had is here now.
+    Merged {
+        adopted: usize,
+        conflicts: usize,
+        /// This box holds something the repo does not, so a push is due.
+        sending: bool,
+    },
+}
+
+/// The repo's copy, decrypted with the key this session holds, without touching the
+/// box: chunks are read through a file, so the bytes land in a private temp beside it.
+fn remote_vault(path: &Path, bytes: &[u8], creds: &store::Credentials) -> Result<Vault, String> {
+    let candidate = path.with_extension(format!("{}.incoming", store::EXT));
+    store::write_atomic(&candidate, bytes)?;
+    let opened = store::load(&candidate, creds);
+    let _ = fs::remove_file(&candidate);
+    opened
+}
+
+/// Fold the repo's copy into the box on screen and write the result: this device keeps
+/// its edits, the repo's arrive, and a record both changed at once stays twice. The
+/// write is the normal one — atomic, and it keeps the version it displaces in the
+/// stash — so a merge is never the last word on a box.
+fn reconcile(s: &mut crate::app::Session, bytes: &[u8], sha: &str) -> Result<Reconcile, String> {
+    let theirs = remote_vault(&s.path, bytes, &s.creds)?;
+    // The pull names the generation: a rewound repo hands a valid old blob with a
+    // valid sha, and nothing else would notice.
+    if theirs.seq < s.vault.seq {
+        return Err(Failure::RolledBack.to_string());
+    }
+
+    if crate::vault::merge::equal(&s.vault, &theirs) {
+        if let Some(remote) = &mut s.remote {
+            remote.sha = sha.to_owned();
+        }
+        s.baseline = Some(Fingerprint::of(&s.vault));
+        s.push_at = None;
+        s.behind = false;
+        return Ok(Reconcile::Same);
+    }
+
+    let merged = crate::vault::merge::merge(&s.vault, &theirs, crate::vault::model::now_secs());
+    let (adopted, conflicts) = (merged.adopted, merged.conflicts);
+    s.vault = merged.vault;
+    s.sanitize();
+    store::save(&s.path, &mut s.vault, &s.creds)?;
+    s.dirty = false;
+    s.last_edit = None;
+    s.conflict = false;
+    s.ignore_mtime = None;
+    s.last_mtime = store::modified_time(&s.path);
+    if let Some(remote) = &mut s.remote {
+        remote.sha = sha.to_owned();
+    }
+    s.baseline = Some(Fingerprint::of(&s.vault));
+    s.behind = false;
+    // The repo does not hold the merged box yet; if it holds something else than what
+    // this box now says, the next push carries it under the sha just read.
+    let sending = !crate::vault::merge::equal(&s.vault, &theirs);
+    s.push_at = sending.then(std::time::Instant::now);
+    Ok(Reconcile::Merged {
+        adopted,
+        conflicts,
+        sending,
+    })
 }
 
 #[cfg(test)]
@@ -1149,6 +1318,262 @@ mod tests {
         for bad in ["", "boxes", "/boxes", "octocat/", "a/b/c", "/"] {
             assert!(!repo_ok(bad), "{bad:?} is not a repo");
         }
+    }
+
+    /// A pull folds the repo's copy into this one: the edit made here and the edit
+    /// made there both survive, the file is written once, and the merged box is
+    /// scheduled to go back out under the sha just read.
+    #[test]
+    fn a_pull_merges_both_sides_and_schedules_the_send() {
+        let ctx = egui::Context::default();
+        let mut app = crate::app::App::blank(&ctx);
+        app.open("merge-pull");
+
+        let (path, theirs_path) = {
+            let s = app.boxes.session.as_mut().unwrap();
+            s.remote = Some(crate::features::settings::model::Remote {
+                kind: "github".to_owned(),
+                repo: "me/boxes".to_owned(),
+                file: "box.pandora".to_owned(),
+                sha: String::new(),
+                folder: String::new(),
+                digest: String::new(),
+                stamp: 0,
+                read_only: false,
+                blocked: false,
+            });
+            s.vault.logins.push(crate::vault::model::Login::new(1));
+            store::save(&s.path, &mut s.vault, &s.creds).unwrap();
+            (s.path.clone(), s.path.with_extension("other"))
+        };
+
+        // The repo's copy: this box, plus a login written on another device.
+        let bytes = {
+            let s = app.boxes.session.as_mut().unwrap();
+            let mut theirs = s.vault.clone();
+            let mut far = crate::vault::model::Login::new(1);
+            far.name = "From the repo".to_owned();
+            far.modified = crate::vault::model::now_secs();
+            theirs.logins.push(far);
+            store::save(&theirs_path, &mut theirs, &s.creds).unwrap();
+            fs::read(&theirs_path).unwrap()
+        };
+
+        // And this device's own edit, made while the pull was in flight.
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            let mut here = crate::vault::model::Login::new(1);
+            here.name = "From here".to_owned();
+            here.modified = crate::vault::model::now_secs();
+            s.vault.logins.push(here);
+            store::save(&s.path, &mut s.vault, &s.creds).unwrap();
+            s.last_mtime = store::modified_time(&s.path);
+        }
+
+        app.land_pull(&path, bytes, "sha-2".to_owned());
+
+        let s = app.boxes.session.as_ref().unwrap();
+        let names: Vec<&str> = s.vault.logins.iter().map(|it| it.name.as_str()).collect();
+        assert_eq!(
+            names.len(),
+            3,
+            "the login, the repo's and this device's: {names:?}"
+        );
+        assert!(names.contains(&"From the repo"));
+        assert!(names.contains(&"From here"));
+        assert!(s.push_at.is_some(), "the merged box goes back out");
+        assert!(!s.behind, "and the repo's version is in hand");
+        assert_eq!(s.remote.as_ref().unwrap().sha, "sha-2", "the push names it");
+
+        let on_disk = store::load(&path, &s.creds).unwrap();
+        assert_eq!(on_disk.logins.len(), 3, "the file holds the merge");
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&theirs_path);
+    }
+
+    /// This box, opened and saved, with a remote copy made by saving a changed clone
+    /// beside it under the same key: what another device would have written.
+    fn diverged(
+        edit_here: impl FnOnce(&mut Vault),
+        edit_there: impl FnOnce(&mut Vault),
+    ) -> (crate::app::App, std::path::PathBuf, Vec<u8>) {
+        let ctx = egui::Context::default();
+        let mut app = crate::app::App::blank(&ctx);
+        app.open("diverged");
+        let (path, theirs_path, bytes) = {
+            let s = app.boxes.session.as_mut().unwrap();
+            s.remote = Some(crate::features::settings::model::Remote {
+                kind: "github".to_owned(),
+                repo: "me/boxes".to_owned(),
+                file: "box.pandora".to_owned(),
+                sha: String::new(),
+                folder: String::new(),
+                digest: String::new(),
+                stamp: 0,
+                read_only: false,
+                blocked: false,
+            });
+            let mut mine = crate::vault::model::Login::new(1);
+            mine.id = "bank".to_owned();
+            mine.name = "Bank".to_owned();
+            mine.password = zeroize::Zeroizing::new("mine".to_owned());
+            mine.modified = crate::vault::model::now_secs();
+            s.vault.logins.push(mine);
+            edit_here(&mut s.vault);
+            store::save(&s.path, &mut s.vault, &s.creds).unwrap();
+
+            let mut theirs = s.vault.clone();
+            edit_there(&mut theirs);
+            let theirs_path = s.path.with_extension("other");
+            store::save(&theirs_path, &mut theirs, &s.creds).unwrap();
+            let bytes = fs::read(&theirs_path).unwrap();
+            s.last_mtime = store::modified_time(&s.path);
+            (s.path.clone(), theirs_path, bytes)
+        };
+        // The remote copy is a file only while the test runs; the box it was made from
+        // is the one on screen.
+        let _ = theirs_path;
+        (app, path, bytes)
+    }
+
+    fn said(app: &crate::app::App) -> String {
+        app.shell
+            .status
+            .as_ref()
+            .map(|s| s.text.clone())
+            .unwrap_or_default()
+    }
+
+    fn passwords(app: &crate::app::App) -> Vec<String> {
+        let s = app.boxes.session.as_ref().unwrap();
+        s.vault
+            .logins
+            .iter()
+            .map(|it| it.password.to_string())
+            .collect()
+    }
+
+    /// The same login edited on both sides at nearly the same second is not a race to
+    /// win: both passwords stay, the older one under a name that says so, and the bar
+    /// says how many were kept twice.
+    #[test]
+    fn both_edits_of_one_record_survive_a_pull() {
+        let now = crate::vault::model::now_secs();
+        let (mut app, path, bytes) = diverged(
+            |vault| vault.logins[0].password = zeroize::Zeroizing::new("mine-2".to_owned()),
+            |vault| {
+                vault.logins[0].password = zeroize::Zeroizing::new("theirs".to_owned());
+                vault.logins[0].modified = now;
+            },
+        );
+        app.boxes.session.as_mut().unwrap().vault.logins[0].modified = now;
+
+        app.land_pull(&path, bytes, "sha-2".to_owned());
+
+        let mut kept = passwords(&app);
+        kept.sort();
+        assert_eq!(kept, ["mine-2", "theirs"], "neither password is lost");
+        let s = app.boxes.session.as_ref().unwrap();
+        assert!(
+            s.vault
+                .logins
+                .iter()
+                .any(|it| it.name.ends_with(" (conflict)")),
+            "the copy says it is one"
+        );
+        assert!(
+            said(&app).contains("kept twice"),
+            "the bar counts them: {}",
+            said(&app)
+        );
+        let on_disk = store::load(&path, &s.creds).unwrap();
+        assert_eq!(on_disk.logins.len(), 2, "and the file holds both");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// A deletion written on the other side reaches this one, and the bar says a record
+    /// came over: the tombstone is not silently dropped.
+    #[test]
+    fn a_deletion_on_the_other_side_removes_what_it_outlived() {
+        let (mut app, path, bytes) = diverged(
+            |_| {},
+            |vault| {
+                let at = vault.logins[0].modified + 5;
+                vault.take("bank", at).unwrap();
+            },
+        );
+
+        app.land_pull(&path, bytes, "sha-2".to_owned());
+
+        let s = app.boxes.session.as_ref().unwrap();
+        assert!(s.vault.logins.is_empty(), "the delete reached this side");
+        assert_eq!(s.vault.trash.len(), 1, "and the stone is kept");
+        assert!(
+            said(&app).contains("came over"),
+            "the bar says what moved: {}",
+            said(&app)
+        );
+        let on_disk = store::load(&path, &s.creds).unwrap();
+        assert!(on_disk.logins.is_empty());
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// An edit made after the other side deleted the record is newer than the stone,
+    /// and stays: deleting is not a way to overwrite a later change.
+    #[test]
+    fn an_edit_after_the_other_sides_deletion_survives() {
+        let now = crate::vault::model::now_secs();
+        let (mut app, path, bytes) = diverged(
+            |vault| vault.logins[0].modified = now,
+            |vault| {
+                vault.take("bank", now.saturating_sub(100)).unwrap();
+            },
+        );
+
+        app.land_pull(&path, bytes, "sha-2".to_owned());
+
+        let s = app.boxes.session.as_ref().unwrap();
+        assert_eq!(s.vault.logins.len(), 1, "the later edit is the truth");
+        assert_eq!(s.vault.logins[0].password.as_str(), "mine");
+        assert!(s.vault.trash.is_empty(), "the stone is dropped");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// The same version pulled twice duplicates nothing, and a record both copies hold
+    /// identically — touched at different times — is still one record.
+    #[test]
+    fn a_merge_never_duplicates_records() {
+        let now = crate::vault::model::now_secs();
+        let (mut app, path, bytes) = diverged(
+            |_| {},
+            |vault| {
+                // The same record, touched later and otherwise untouched.
+                vault.logins[0].modified = now + 60;
+            },
+        );
+
+        app.land_pull(&path, bytes.clone(), "sha-2".to_owned());
+        assert_eq!(app.boxes.session.as_ref().unwrap().vault.logins.len(), 1);
+        assert!(
+            said(&app).contains("already"),
+            "and it says the repo had it: {}",
+            said(&app)
+        );
+
+        // The file is where the merge wrote it: the same blob again changes nothing.
+        let again = fs::read(&path).unwrap();
+        app.land_pull(&path, again, "sha-3".to_owned());
+        assert_eq!(
+            app.boxes.session.as_ref().unwrap().vault.logins.len(),
+            1,
+            "a second pull of the same version adds no copy"
+        );
+
+        let _ = fs::remove_file(&path);
     }
 
     /// A pull older than the box is refused: a rewound repo hands a valid old blob, and
