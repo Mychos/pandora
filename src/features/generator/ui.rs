@@ -190,10 +190,11 @@ fn apply(app: &mut App, entry: &str) {
     let recipe = app.generate.recipe;
     if let Some(s) = app.boxes.session.as_mut() {
         if let Some(it) = s.vault.logins.iter_mut().find(|i| i.id == entry) {
-            it.password = Zeroizing::new(password::generate(&recipe));
+            let fresh = password::generate(&recipe);
+            it.set_password(fresh.as_str());
             it.touched(now_secs());
             s.reveal.insert((entry.to_owned(), Field::Password));
-            s.mark_dirty();
+            s.mark_now();
         }
     }
 }
