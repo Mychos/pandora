@@ -453,6 +453,7 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
 
     let mut changed = false;
     let mut copied = false;
+    app.boxes.editing(true);
     let open = theme::dialog(ctx, egui::Id::new("otp"), |ui| {
         theme::width(ui, 360.0);
         let Some(s) = app.boxes.session.as_mut() else {
@@ -560,6 +561,8 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
         if let Some(s) = app.boxes.session.as_mut() {
             s.selected = None;
         }
+        app.boxes.editing(false);
+        app.boxes.flush(&mut app.shell);
     }
 }
 

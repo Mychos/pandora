@@ -21,7 +21,7 @@ impl Boxes {
         let id = it.id.clone();
         s.vault.otps.push(it);
         s.selected = Some(id);
-        s.mark_dirty();
+        s.mark_now();
     }
 
     /// Open the camera for a scan that reads as the user aims. Answers the frame
@@ -205,7 +205,7 @@ impl Boxes {
         let id = otp.id.clone();
         s.vault.otps.push(otp);
         s.selected = Some(id);
-        s.mark_dirty();
+        s.mark_now();
     }
 
     /// The same, for a seed that came with the name its URI carries.
