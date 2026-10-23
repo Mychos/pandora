@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<KeePassFile>
+  <Root>
+    <Group>
+      <Name>Test Group</Name>
+      <Entry>
+        <String><Key>Title</Key><Value>Example Login</Value></String>
+        <String><Key>UserName</Key><Value>someone@example.com</Value></String>
+        <String><Key>Password</Key><Value Protected="True">not-a-real-password</Value></String>
+        <String><Key>URL</Key><Value>https://example.com</Value></String>
+        <String><Key>Notes</Key><Value>written for the test</Value></String>
+        <String><Key>otp</Key><Value>otpauth://totp/Example?secret=JBSWY3DPEHPK3PXP</Value></String>
+        <String><Key>Recovery</Key><Value Protected="True">aaaa-bbbb</Value></String>
+        <History>
+          <Entry>
+            <String><Key>Title</Key><Value>Example Login</Value></String>
+            <String><Key>Password</Key><Value>an-older-one</Value></String>
+          </Entry>
+        </History>
+      </Entry>
+      <Entry>
+        <String><Key>Title</Key><Value>Example Second</Value></String>
+        <String><Key>Password</Key><Value>not-a-real-password-either</Value></String>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>

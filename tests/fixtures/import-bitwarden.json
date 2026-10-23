@@ -1,0 +1,38 @@
+{
+  "encrypted": false,
+  "folders": [{ "id": "f1", "name": "Personal" }],
+  "items": [
+    {
+      "type": 1,
+      "name": "Example Login",
+      "notes": "written for the test",
+      "fields": [{ "name": "Recovery", "value": "aaaa-bbbb", "type": 1 }],
+      "login": {
+        "username": "someone@example.com",
+        "password": "not-a-real-password",
+        "uris": [{ "uri": "https://example.com" }],
+        "totp": "JBSWY3DPEHPK3PXP"
+      }
+    },
+    { "type": 2, "name": "Example Note", "notes": "one\ntwo", "folderId": "f1" },
+    {
+      "type": 3,
+      "name": "Example Card",
+      "notes": "",
+      "card": {
+        "cardholderName": "Ana Example",
+        "number": "4111111111111111",
+        "expMonth": "4",
+        "expYear": "2029",
+        "code": "123"
+      }
+    },
+    {
+      "type": 4,
+      "name": "Example Identity",
+      "notes": "test identity",
+      "identity": { "passportNumber": "X0000000", "firstName": "" }
+    },
+    { "type": 5, "name": "Nothing We Model", "notes": "dropped on purpose" }
+  ]
+}
