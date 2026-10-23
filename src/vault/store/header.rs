@@ -2,10 +2,11 @@
 //! how the manifest behind it is opened.
 
 use crate::vault::codec;
-use crate::vault::container::{HEADER_BLOCK, MAGIC};
+use crate::vault::container::{HEADER_BLOCK, MAGIC, MAGIC_V4, MAGIC_V5};
 use crate::vault::crypto::{self, KdfParams, Key};
 use crate::vault::model::Vault;
 use crate::vault::reader::BoxReader;
+use crate::vault::recovery::Slot;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -39,11 +40,37 @@ pub(super) struct V4Header {
     pub(super) manifest_offset: u64,
     pub(super) manifest_len: u64,
     pub(super) manifest_nonce: String,
+    /// The box key wrapped under a printed recovery code. v5 only; a v4 box has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) recovery: Option<Slot>,
 }
 
 pub(super) fn v4_aad(header: &V4Header) -> Vec<u8> {
+    // v4's string is frozen: a box written by that version has it in its tag, and
+    // changing it here would make every old box unreadable. v5 adds the recovery slot,
+    // which a v4 box never has.
+    if header.version == 4 {
+        return format!(
+            "pandora4|{}|{}|{}|{}|{}|{}|{}|{}",
+            header.version,
+            header.kdf.algorithm,
+            header.kdf.m_cost,
+            header.kdf.t_cost,
+            header.kdf.p_cost,
+            header.kdf.salt,
+            header.box_id,
+            header.manifest_offset
+        )
+        .into_bytes();
+    }
+    // The slot is part of what the tag covers: swapping it for another wrapped key
+    // would otherwise change what a printed code opens.
+    let recovery = match &header.recovery {
+        Some(slot) => format!("{}|{}|{}", slot.salt, slot.nonce, slot.wrapped),
+        None => "-".to_owned(),
+    };
     format!(
-        "pandora4|{}|{}|{}|{}|{}|{}|{}|{}",
+        "pandora5|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         header.version,
         header.kdf.algorithm,
         header.kdf.m_cost,
@@ -51,7 +78,8 @@ pub(super) fn v4_aad(header: &V4Header) -> Vec<u8> {
         header.kdf.p_cost,
         header.kdf.salt,
         header.box_id,
-        header.manifest_offset
+        header.manifest_offset,
+        recovery
     )
     .into_bytes()
 }
@@ -77,25 +105,33 @@ pub(super) fn read_header(path: &Path) -> Result<Option<V4Header>, String> {
     let read = file
         .read(&mut block)
         .map_err(|e| format!("cannot read box: {e}"))?;
-    if read < MAGIC.len() || &block[..MAGIC.len()] != MAGIC {
+    // A v4 box still opens: the marker says which version wrote it, and the header
+    // that follows is the same shape plus the optional recovery slot.
+    let magic = if block.starts_with(MAGIC_V5) {
+        MAGIC_V5
+    } else if block.starts_with(MAGIC_V4) {
+        MAGIC_V4
+    } else {
+        return Ok(None);
+    };
+    if read < magic.len() {
         return Ok(None);
     }
-    let body = &block[MAGIC.len()..read];
+    let body = &block[magic.len()..read];
     let end = body.iter().rposition(|b| *b != b' ').map_or(0, |i| i + 1);
     let header: V4Header =
         serde_json::from_slice(&body[..end]).map_err(|e| format!("not a Pandora v4 box: {e}"))?;
-    if header.version != CURRENT_VERSION {
-        return Err(if header.version > CURRENT_VERSION {
-            format!(
-                "box version {} is newer than this app ({CURRENT_VERSION})",
-                header.version
-            )
-        } else {
-            format!(
-                "not a Pandora v4 box: header says version {}",
-                header.version
-            )
-        });
+    if header.version != magic_version(magic) {
+        return Err(format!(
+            "corrupt box: the marker and the header disagree about its version ({})",
+            header.version
+        ));
+    }
+    if header.version > CURRENT_VERSION {
+        return Err(format!(
+            "box version {} is newer than this app ({CURRENT_VERSION})",
+            header.version
+        ));
     }
     let k = &header.kdf;
     if k.m_cost > MAX_M_COST || k.t_cost > MAX_T_COST || k.p_cost > MAX_P_COST {
@@ -105,6 +141,15 @@ pub(super) fn read_header(path: &Path) -> Result<Option<V4Header>, String> {
         ));
     }
     Ok(Some(header))
+}
+
+/// The version a marker belongs to.
+fn magic_version(magic: &[u8]) -> u32 {
+    if magic == MAGIC_V5 {
+        5
+    } else {
+        4
+    }
 }
 
 pub(super) fn decrypt_manifest(path: &Path, header: &V4Header, key: &Key) -> Result<Vault, String> {

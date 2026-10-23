@@ -3,10 +3,14 @@
 pub mod codec;
 pub(crate) mod container;
 pub mod crypto;
+pub mod health;
 pub mod matching;
+pub mod merge;
 pub mod model;
 pub(crate) mod reader;
+pub mod recovery;
 pub mod search;
+pub mod share;
 pub mod store;
 pub mod totp;
 pub mod tree;

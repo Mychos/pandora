@@ -26,7 +26,17 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use zeroize::Zeroizing;
 
-pub const CURRENT_VERSION: u32 = 4;
+pub const CURRENT_VERSION: u32 = 5;
+
+/// A second factor that answers a challenge: the YubiKey's HMAC-SHA1 response. It is a
+/// parameter rather than a call so a test can derive with an answer no hardware gives.
+///
+/// One open asks it exactly once — the answer is reused for every combination the box
+/// could have been written with — so a key that waits for a finger waits once.
+pub trait Factor {
+    /// The response to one challenge, blocking while the key waits to be touched.
+    fn respond(&self, challenge: &[u8]) -> Result<Vec<u8>, String>;
+}
 pub const EXT: &str = "pandora";
 
 const KEYFILE_MAX: u64 = 8 * 1024 * 1024;
@@ -35,6 +45,8 @@ const KEYFILE_MAX: u64 = 8 * 1024 * 1024;
 pub struct Credentials {
     pub key: Key,
     header: KdfHeader,
+    /// The recovery slot this box carries, kept across saves; a rekey drops it.
+    pub recovery: Option<crate::vault::recovery::Slot>,
     /// `Some` when the KDF proved whether a keyfile was used; `None` when this
     /// session ran none (biometric unlock). The file itself never records it.
     keyfile: Option<bool>,
@@ -58,13 +70,25 @@ impl Credentials {
     }
 
     pub fn rekey(password: &str, keyfile: Option<&[u8]>) -> Result<Credentials, String> {
+        Self::rekey_with(password, keyfile, None)
+    }
+
+    /// Derive a new key from the password and whatever factors are enrolled. The order
+    /// is the contract: the keyfile's digest, then the key's response. A box enrolled
+    /// with a key and opened with one is derived the same way both times.
+    pub fn rekey_with(
+        password: &str,
+        keyfile: Option<&[u8]>,
+        response: Option<&[u8]>,
+    ) -> Result<Credentials, String> {
         let salt = crypto::random_bytes::<{ crypto::SALT_LEN }>();
         let params = KdfParams::default();
-        let secret = crypto::material(password, keyfile);
+        let secret = crypto::material(password, &secrets(keyfile, response));
         let key = crypto::derive_key(&secret, &salt, &params)?;
         Ok(Credentials {
             key,
             header: header(&params, &salt),
+            recovery: None,
             keyfile: Some(keyfile.is_some()),
         })
     }
@@ -161,12 +185,13 @@ pub fn create(
 ) -> Result<(Credentials, Vault), String> {
     let salt = crypto::random_bytes::<{ crypto::SALT_LEN }>();
     let params = KdfParams::default();
-    let secret = crypto::material(password, keyfile);
+    let secret = crypto::keyed(password, keyfile);
     let key = crypto::derive_key(&secret, &salt, &params)?;
     let mut vault = Vault::new(name);
     let creds = Credentials {
         key,
         header: header(&params, &salt),
+        recovery: None,
         keyfile: Some(keyfile.is_some()),
     };
     save(path, &mut vault, &creds)?;
@@ -190,6 +215,32 @@ pub fn open(
     password: &str,
     keyfile: Option<&[u8]>,
 ) -> Result<(Credentials, Vault), String> {
+    open_with(path, password, keyfile, None)
+}
+
+/// The box's own id, which its header carries in the clear and every copy keeps.
+pub fn box_id(path: &Path) -> Result<String, String> {
+    Ok(require_header(path)?.box_id)
+}
+
+/// The challenge this box asks its key for: derived from the id the plaintext header
+/// carries, so every copy of the file asks the same question and nothing new is
+/// written down for the key.
+pub fn challenge(path: &Path) -> Result<Vec<u8>, String> {
+    let header = require_header(path)?;
+    Ok(crate::shared::yubikey::challenge(&header.box_id))
+}
+
+/// The same, with a key that answers a challenge. The challenge comes from the box's
+/// own id, so nothing has to be stored for it, and a copy of the box asks the same
+/// question. The factor is asked once; every combination it can form is then derived
+/// until the AEAD tag says which one the box was written with — the box never says.
+pub fn open_with(
+    path: &Path,
+    password: &str,
+    keyfile: Option<&[u8]>,
+    factor: Option<&dyn Factor>,
+) -> Result<(Credentials, Vault), String> {
     let header = require_header(path)?;
     let salt = codec::decode(&header.kdf.salt)?;
     let params = KdfParams {
@@ -197,27 +248,123 @@ pub fn open(
         t_cost: header.kdf.t_cost,
         p_cost: header.kdf.p_cost,
     };
-    // One derivation in the common case: keyfile first when handed over, password alone last.
-    let mut attempts = Vec::with_capacity(2);
-    if keyfile.is_some() {
-        attempts.push(keyfile);
+    // The password first: a box with no key opens without touching one, and a key
+    // plugged in for something else costs a frame rather than a touch.
+    for (attempt, used_keyfile) in attempts(keyfile, None) {
+        if let Some(found) = derive_into(
+            path,
+            &header,
+            &salt,
+            &params,
+            password,
+            &attempt,
+            used_keyfile,
+        ) {
+            return Ok(found);
+        }
     }
-    attempts.push(None);
-    for with in attempts {
-        let secret = crypto::material(password, with);
-        let key = crypto::derive_key(&secret, &salt, &params)?;
-        if let Ok(vault) = decrypt_manifest(path, &header, &key) {
-            return Ok((
-                Credentials {
-                    key,
-                    header: header.kdf,
-                    keyfile: Some(with.is_some()),
-                },
-                vault,
-            ));
+    // Then the key is asked — once — and the combinations it forms are tried.
+    let Some(factor) = factor else {
+        return Err(Failure::Wrong.to_string());
+    };
+    let response = factor.respond(&crate::shared::yubikey::challenge(&header.box_id))?;
+    for (attempt, used_keyfile) in with_response(keyfile, &response) {
+        if let Some(found) = derive_into(
+            path,
+            &header,
+            &salt,
+            &params,
+            password,
+            &attempt,
+            used_keyfile,
+        ) {
+            return Ok(found);
         }
     }
     Err(Failure::Wrong.to_string())
+}
+
+/// One derivation and the one question it answers: does this material open the box?
+#[allow(clippy::too_many_arguments)] // the derivation's own inputs, already read
+fn derive_into(
+    path: &Path,
+    header: &V4Header,
+    salt: &[u8],
+    params: &KdfParams,
+    password: &str,
+    attempt: &[&[u8]],
+    used_keyfile: bool,
+) -> Option<(Credentials, Vault)> {
+    let secret = crypto::material(password, attempt);
+    let key = crypto::derive_key(&secret, salt, params).ok()?;
+    let vault = decrypt_manifest(path, header, &key).ok()?;
+    Some((
+        Credentials {
+            key,
+            header: header.kdf.clone(),
+            recovery: header.recovery.clone(),
+            keyfile: Some(used_keyfile),
+        },
+        vault,
+    ))
+}
+
+/// The material a box may have been written with when it never enrolled a key: the
+/// keyfile, then the plain password.
+fn attempts<'a>(
+    keyfile: Option<&'a [u8]>,
+    _response: Option<&'a [u8]>,
+) -> Vec<(Vec<&'a [u8]>, bool)> {
+    let mut out: Vec<(Vec<&'a [u8]>, bool)> = Vec::with_capacity(2);
+    if let Some(keyfile) = keyfile {
+        out.push((vec![keyfile], true));
+    }
+    out.push((Vec::new(), false));
+    out
+}
+
+/// The material a box enrolled with a key was written with, in the one order the
+/// factors are mixed: the keyfile's digest first, then the response.
+fn with_response<'a>(keyfile: Option<&'a [u8]>, response: &'a [u8]) -> Vec<(Vec<&'a [u8]>, bool)> {
+    let mut out: Vec<(Vec<&'a [u8]>, bool)> = Vec::with_capacity(2);
+    if let Some(keyfile) = keyfile {
+        out.push((vec![keyfile, response], true));
+    }
+    out.push((vec![response], false));
+    out
+}
+
+/// The secret list `crypto::material` takes, in the one order every derivation uses.
+fn secrets<'a>(keyfile: Option<&'a [u8]>, response: Option<&'a [u8]>) -> Vec<&'a [u8]> {
+    keyfile.into_iter().chain(response).collect()
+}
+
+/// Open a box with a printed recovery code instead of the password. The header says
+/// whether there is one; a box without a slot says so, and the wrong code is the tag
+/// refusing the key it unwrapped.
+pub fn open_with_code(path: &Path, code: &str) -> Result<(Credentials, Vault), String> {
+    let header = require_header(path)?;
+    let slot = header
+        .recovery
+        .as_ref()
+        .ok_or_else(|| crate::shared::i18n::t("this box has no recovery code").to_owned())?;
+    let key = crate::vault::recovery::unwrap(slot, code, &header.box_id)?;
+    open_keyed(path, key)
+}
+
+/// Put a recovery slot on a box: the key it already holds, wrapped under a new code.
+/// The box is written by the caller, which is where the new header is made.
+pub fn set_recovery(creds: &mut Credentials, code: &str, box_id: &str) -> Result<(), String> {
+    creds.recovery = Some(crate::vault::recovery::wrap(&creds.key, code, box_id)?);
+    Ok(())
+}
+
+/// Whether this box carries a recovery code, from the header alone.
+pub fn has_recovery(path: &Path) -> bool {
+    read_header(path)
+        .ok()
+        .flatten()
+        .is_some_and(|header| header.recovery.is_some())
 }
 
 /// Open with a key derived earlier, for biometric unlock: no KDF runs, and the
@@ -229,6 +376,7 @@ pub fn open_keyed(path: &Path, key: Key) -> Result<(Credentials, Vault), String>
         Credentials {
             key,
             header: header.kdf,
+            recovery: header.recovery,
             keyfile: None,
         },
         vault,

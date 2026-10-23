@@ -151,6 +151,7 @@ fn hostile_kdf_params_are_refused_before_deriving() {
         manifest_offset: HEADER_BLOCK as u64,
         manifest_len: 0,
         manifest_nonce: String::new(),
+        recovery: None,
     };
     fs::write(&p, header_block(&header).unwrap()).unwrap();
 
@@ -280,6 +281,33 @@ fn payload_is_padded_to_a_block() {
     let size = fs::metadata(&p).unwrap().len();
     assert_eq!(size % PAD_BLOCK as u64, 0);
     assert!(size > floor, "a bigger box grows: {size} vs {floor}");
+    let _ = fs::remove_file(&p);
+}
+
+/// A passkey survives the file: its bytes come back as bytes, and the manifest carries
+/// no plaintext of the key.
+#[test]
+fn a_passkey_roundtrips_through_the_box() {
+    let p = tmp_path("passkey");
+    let (creds, mut vault) = create(&p, "My Vault", "pw", None).unwrap();
+    let mut it = crate::vault::model::Passkey::new(1, "example.com");
+    it.name = "Example".to_owned();
+    it.credential_id = Zeroizing::new(vec![9, 8, 7, 6]);
+    it.user_handle = Zeroizing::new(vec![1, 1, 1]);
+    it.private_key = Zeroizing::new(b"never-printed".to_vec());
+    it.counter = 7;
+    vault.passkeys.push(it);
+    save(&p, &mut vault, &creds).unwrap();
+
+    let cover = open(&p, "pw", None).unwrap().1;
+    assert_eq!(cover.passkeys.len(), 1);
+    let saved = &cover.passkeys[0];
+    assert_eq!(saved.name, "Example");
+    assert_eq!(saved.rp_id, "example.com");
+    assert_eq!(saved.credential_id.as_slice(), &[9, 8, 7, 6]);
+    assert_eq!(saved.user_handle.as_slice(), &[1, 1, 1]);
+    assert_eq!(saved.private_key.as_slice(), b"never-printed");
+    assert_eq!((saved.alg, saved.counter), (-7, 7));
     let _ = fs::remove_file(&p);
 }
 
@@ -461,12 +489,8 @@ fn verify_accepts_only_the_right_key() {
     assert!(verify(&p, &creds.key));
 
     let salt = codec::decode(&header(&p).kdf.salt).unwrap();
-    let wrong = crypto::derive_key(
-        &crypto::material("nope", None),
-        &salt,
-        &KdfParams::default(),
-    )
-    .unwrap();
+    let wrong =
+        crypto::derive_key(&crypto::keyed("nope", None), &salt, &KdfParams::default()).unwrap();
     assert!(!verify(&p, &wrong));
     let _ = fs::remove_file(&p);
 }
@@ -540,12 +564,308 @@ fn an_empty_box_writes_no_empty_collection() {
     let old = r#"{"version":1,"name":"Old"}"#;
     let v: Vault = serde_json::from_str(old).unwrap();
     assert!(v.records().next().is_none());
-    assert!(v.folders.is_empty());
+    assert!(
+        v.folders.is_empty()
+            && v.logins.is_empty()
+            && v.cards.is_empty()
+            && v.identities.is_empty()
+            && v.passkeys.is_empty()
+            && v.drive.is_empty()
+            && v.otps.is_empty()
+            && v.trash.is_empty(),
+        "a collection the payload does not carry reads as empty"
+    );
+    assert_eq!(
+        v.seq, 0,
+        "a generation an older box never wrote reads as absent"
+    );
 
     let round = serde_json::to_string(&v).unwrap();
-    for key in ["folders", "logins", "drive", "otps", "trash"] {
-        assert!(!round.contains(key), "{key} in {round}");
+    assert_eq!(
+        round, old,
+        "and it is not written back: absent is not empty"
+    );
+}
+
+/// A box the previous version wrote, byte for byte: it has to keep opening, and a save
+/// has to lift it to the version this one writes.
+const FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/v4-sample.pandora");
+/// A box this version writes, for the same reason one version later.
+const FIXTURE_V5: &[u8] = include_bytes!("../../../tests/fixtures/v5-sample.pandora");
+const FIXTURE_PASSWORD: &str = "pandora-fixture-password";
+const FIXTURE_NOTE: &str = "the note the fixture keeps";
+
+/// A stand-in for the key: an answer that costs no hardware and never blocks.
+struct Fake(Vec<u8>);
+
+impl Factor for Fake {
+    fn respond(&self, _challenge: &[u8]) -> Result<Vec<u8>, String> {
+        Ok(self.0.clone())
     }
+}
+
+/// A key that is not there: the open has to say so instead of deriving a box nobody
+/// can read.
+struct Absent;
+
+impl Factor for Absent {
+    fn respond(&self, _challenge: &[u8]) -> Result<Vec<u8>, String> {
+        Err("no YubiKey answered".to_owned())
+    }
+}
+
+/// A factor that writes down how many times it was asked and what it was asked, so the
+/// one-touch contract and the challenge itself are both testable without a key.
+struct Watched {
+    calls: std::cell::Cell<usize>,
+    challenge: std::cell::RefCell<Vec<u8>>,
+    answer: Vec<u8>,
+}
+
+impl Watched {
+    fn new(answer: Vec<u8>) -> Self {
+        Self {
+            calls: std::cell::Cell::new(0),
+            challenge: std::cell::RefCell::new(Vec::new()),
+            answer,
+        }
+    }
+}
+
+impl Factor for Watched {
+    fn respond(&self, challenge: &[u8]) -> Result<Vec<u8>, String> {
+        self.calls.set(self.calls.get() + 1);
+        self.challenge.replace(challenge.to_vec());
+        Ok(self.answer.clone())
+    }
+}
+
+/// A box with no key opens without touching one; a box enrolled with a key is asked
+/// once, with the box's own challenge, and never with a challenge of the caller's.
+#[test]
+fn a_factor_is_asked_once_and_only_when_the_box_needs_it() {
+    let p = tmp_path("watched");
+    let (creds, mut vault) = create(&p, "My Vault", "pw", None).unwrap();
+    save(&p, &mut vault, &creds).unwrap();
+
+    let seen = Watched::new(vec![3; 20]);
+    assert!(
+        open_with(&p, "pw", None, Some(&seen)).is_ok(),
+        "the password alone opens a box that never enrolled a key"
+    );
+    assert_eq!(
+        seen.calls.get(),
+        0,
+        "and the key is not touched for it, even when it is plugged in"
+    );
+
+    // Enrolled, the same answer is the only one that opens it, and one open touches it once.
+    let enrolled = Credentials::rekey_with("pw", None, Some(&seen.answer)).unwrap();
+    save(&p, &mut vault, &enrolled).unwrap();
+    let again = Watched::new(seen.answer.clone());
+    assert!(open_with(&p, "pw", None, Some(&again)).is_ok());
+    assert_eq!(again.calls.get(), 1, "one open, one touch");
+    let box_id = header(&p).box_id;
+    assert_eq!(
+        again.challenge.borrow().as_slice(),
+        crate::shared::yubikey::challenge(&box_id).as_slice(),
+        "the challenge is the box's own, derived from the id in its header"
+    );
+    let _ = fs::remove_file(&p);
+}
+
+/// A factor is asked before anything else: a box that cannot reach its key says so
+/// instead of looking like a wrong password.
+#[test]
+fn an_unanswerable_factor_speaks_before_the_password_is_judged() {
+    let p = tmp_path("no-factor");
+    let (creds, mut vault) = create(&p, "My Vault", "pw", None).unwrap();
+    save(&p, &mut vault, &creds).unwrap();
+
+    let err = open_with(&p, "not even the password", None, Some(&Absent))
+        .err()
+        .unwrap();
+    assert_eq!(err, "no YubiKey answered", "the factor's own words");
+    let _ = fs::remove_file(&p);
+}
+
+/// A printed code opens the box without the password, and the slot travels with every
+/// save: it is in the header the write makes, not something the session keeps on the
+/// side.
+#[test]
+fn a_recovery_code_opens_the_box_and_survives_a_save() {
+    let p = tmp_path("recovery");
+    let (mut creds, mut vault) = create(&p, "My Vault", "pw", None).unwrap();
+    let code = crate::vault::recovery::make_code();
+    let box_id = header(&p).box_id;
+    set_recovery(&mut creds, &code, &box_id).unwrap();
+    save(&p, &mut vault, &creds).unwrap();
+
+    assert!(has_recovery(&p));
+    let (_c, opened) = open_with_code(&p, &code).unwrap();
+    assert_eq!(opened.name, "My Vault");
+    assert_eq!(
+        open_with_code(&p, &crate::vault::recovery::make_code())
+            .err()
+            .unwrap(),
+        crate::shared::i18n::t("that code does not open this box")
+    );
+
+    // A normal save keeps the slot, and the code still opens what it wrote.
+    let mut fresh = open(&p, "pw", None).unwrap().1;
+    save(&p, &mut fresh, &creds).unwrap();
+    assert!(has_recovery(&p));
+    assert!(open_with_code(&p, &code).is_ok());
+
+    // A rekey drops it: the wrapped key belonged to the key being replaced.
+    let again = Credentials::rekey("pw-2", None).unwrap();
+    save(&p, &mut fresh, &again).unwrap();
+    assert!(!has_recovery(&p), "a rotated password drops the code");
+    assert!(open_with_code(&p, &code).is_err());
+
+    let _ = fs::remove_file(&p);
+    let _ = fs::remove_file(p.with_extension(format!("{EXT}.bak")));
+}
+
+/// A box enrolled with a key is unreadable without it, and a box enrolled without one
+/// never asks: the challenge and the response enter the derivation in one order.
+#[test]
+fn a_box_enrolled_with_a_key_needs_that_key() {
+    let p = tmp_path("keyfactor");
+    let (creds, mut vault) = create(&p, "My Vault", "pw", None).unwrap();
+    save(&p, &mut vault, &creds).unwrap();
+
+    let key = Fake(vec![7; 20]);
+    let enrolled = Credentials::rekey_with("pw", None, Some(&key.0)).unwrap();
+    save(&p, &mut vault, &enrolled).unwrap();
+
+    let (_, opened) = open_with(&p, "pw", None, Some(&key)).unwrap();
+    assert_eq!(opened.name, "My Vault");
+    assert!(
+        open(&p, "pw", None).is_err(),
+        "the password alone is not the box any more"
+    );
+    assert_eq!(
+        open_with(&p, "pw", None, Some(&Fake(vec![8; 20])))
+            .err()
+            .unwrap(),
+        Failure::Wrong.to_string(),
+        "another key's answer is another key"
+    );
+    assert_eq!(
+        open_with(&p, "pw", None, Some(&Absent)).err().unwrap(),
+        "no YubiKey answered",
+        "a key that is not there says so"
+    );
+    let _ = fs::remove_file(&p);
+}
+
+/// The keyfile and the key are mixed in one order, and both are needed when both were
+/// enrolled: a box with the two is not opened by either alone.
+#[test]
+fn a_keyfile_and_a_key_are_mixed_in_one_order() {
+    let p = tmp_path("keyfilefactor");
+    let (creds, mut vault) = create(&p, "My Vault", "pw", None).unwrap();
+    save(&p, &mut vault, &creds).unwrap();
+    let keyfile = b"the keyfile";
+    let key = Fake(vec![1; 20]);
+    let enrolled = Credentials::rekey_with("pw", Some(keyfile), Some(&key.0)).unwrap();
+    save(&p, &mut vault, &enrolled).unwrap();
+
+    let (creds, _) = open_with(&p, "pw", Some(keyfile), Some(&key)).unwrap();
+    assert_eq!(
+        creds.needs_keyfile(),
+        Some(true),
+        "the session knows the keyfile was part of it"
+    );
+    assert!(open_with(&p, "pw", Some(keyfile), None).is_err());
+    assert!(open_with(&p, "pw", None, Some(&key)).is_err());
+    let _ = fs::remove_file(&p);
+}
+
+#[test]
+fn a_box_written_by_this_version_still_opens() {
+    let p = tmp_path("fixture");
+    fs::write(&p, FIXTURE).unwrap();
+
+    let h = header(&p);
+    assert_eq!(h.version, 4, "the fixture is a v4 box");
+    assert_eq!(
+        (h.kdf.m_cost, h.kdf.t_cost, h.kdf.p_cost),
+        (crypto::M_COST, crypto::T_COST, crypto::P_COST),
+        "and it was written with today's KDF"
+    );
+
+    let (creds, mut vault) = open(&p, FIXTURE_PASSWORD, None).unwrap();
+    assert_eq!(vault.name, "Fixture");
+    assert_eq!(vault.logins.len(), 1);
+    assert_eq!(vault.otps.len(), 1);
+    let note = match &vault.drive[0] {
+        Entry::Note(note) => note,
+        _ => panic!("the drive keeps the note"),
+    };
+    assert_eq!(vault.note_text(note).unwrap().as_str(), FIXTURE_NOTE);
+
+    save(&p, &mut vault, &creds).unwrap();
+    let (_c, again) = open(&p, FIXTURE_PASSWORD, None).unwrap();
+    assert_eq!(again.logins[0].name, "GitHub", "a save keeps what it read");
+    assert_eq!(
+        header(&p).version,
+        CURRENT_VERSION,
+        "and a v4 box is written as the version this app writes"
+    );
+    let _ = fs::remove_file(&p);
+    let _ = fs::remove_file(p.with_extension(format!("{EXT}.bak")));
+}
+
+/// The version this one writes opens with no complaint, and carries no recovery slot
+/// until one is made.
+#[test]
+fn a_box_written_by_this_version_opens() {
+    let p = tmp_path("fixture-v5");
+    fs::write(&p, FIXTURE_V5).unwrap();
+    let h = header(&p);
+    assert_eq!(h.version, CURRENT_VERSION);
+    assert!(h.recovery.is_none(), "no code was made for it");
+
+    let (_creds, mut vault) = open(&p, FIXTURE_PASSWORD, None).unwrap();
+    assert_eq!(vault.logins[0].name, "GitHub");
+    save(&p, &mut vault, &_creds).unwrap();
+    assert_eq!(header(&p).version, CURRENT_VERSION);
+
+    let _ = fs::remove_file(&p);
+    let _ = fs::remove_file(p.with_extension(format!("{EXT}.bak")));
+}
+
+/// Run on purpose when the format is meant to move: it writes the fixture the test
+/// above holds this version to. `v4-sample.pandora` stays as it is — it is the box the
+/// *previous* version wrote, and the compatibility test.
+#[test]
+#[ignore = "writes tests/fixtures/v5-sample.pandora"]
+fn write_the_v4_fixture() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v5-sample.pandora");
+    let _ = fs::remove_file(&path);
+    let (creds, mut vault) = create(&path, "Fixture", FIXTURE_PASSWORD, None).unwrap();
+
+    let mut login = sample_item("fixture-login");
+    login.created = 1;
+    login.modified = 1;
+    vault.logins.push(login);
+
+    let mut note = Note::new(1);
+    note.id = "fixture-note".to_owned();
+    note.name = "Note".to_owned();
+    note.body = Zeroizing::new(FIXTURE_NOTE.to_owned());
+    vault.drive.push(Entry::Note(note));
+
+    let mut otp = Otp::new(1);
+    otp.id = "fixture-otp".to_owned();
+    otp.name = "Code".to_owned();
+    otp.secret = Zeroizing::new("JBSWY3DPEHPK3PXP".to_owned());
+    vault.otps.push(otp);
+
+    save(&path, &mut vault, &creds).unwrap();
+    forget_stash(&path);
 }
 
 #[test]

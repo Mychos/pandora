@@ -117,6 +117,25 @@ fn registrable(host: &str) -> Option<String> {
 
 /// The best rank among an entry's URLs, with the URL that earned it. A `Never` URL
 /// for the page's host drops the whole entry, whatever else it carries.
+/// Whether one of a login's URLs is the site a passkey answers for. A passkey is bound
+/// to its relying party id — a registrable domain or a host — which are the same two
+/// shapes a login's own addresses take, so the link is made the same way.
+pub fn claims(login: &Login, rp_id: &str) -> bool {
+    let rp_id = rp_id.trim().trim_end_matches('.').to_ascii_lowercase();
+    if rp_id.is_empty() {
+        return false;
+    }
+    login.uris().any(|(url, rule)| {
+        if rule == Rule::Never {
+            return false;
+        }
+        let Some(site) = parse(url) else {
+            return false;
+        };
+        site.host == rp_id || site.registrable.as_deref() == Some(rp_id.as_str())
+    })
+}
+
 pub fn rank<'a>(entry: &'a Login, page: &Site) -> Option<(Rank, &'a str)> {
     let mut best: Option<(Rank, &str)> = None;
     for (url, rule) in entry.uris() {
@@ -156,6 +175,35 @@ mod tests {
 
     fn accepts(url: &str, rule: Rule, page: &str) -> bool {
         parse(page).is_some_and(|page| rank(&item(url, rule), &page).is_some())
+    }
+
+    /// A passkey's relying party is the site, not the record: a login on
+    /// `mail.google.com` answers for a `google.com` passkey, and one on `github.io`
+    /// does not answer for somebody else's tenant.
+    #[test]
+    fn a_passkey_hangs_from_the_site_the_login_claims() {
+        let mut mail = item("https://mail.google.com", Rule::Domain);
+        mail.extra_urls.push(Uri {
+            url: "https://github.com".to_owned(),
+            rule: Rule::Never,
+        });
+        assert!(claims(&mail, "google.com"), "the registrable domain");
+        assert!(claims(&mail, "mail.google.com"), "the host itself");
+        assert!(!claims(&mail, "github.com"), "a never rule is not a claim");
+        assert!(!claims(&mail, "evil.example"));
+        assert!(!claims(&mail, ""));
+        let bank = item("https://bank.example", Rule::Domain);
+        assert!(
+            claims(&bank, "bank.example"),
+            "a host with no public suffix"
+        );
+
+        let tenant = item("https://ana.github.io", Rule::Domain);
+        assert!(
+            !claims(&tenant, "other.github.io"),
+            "shared suffixes stay apart"
+        );
+        assert!(claims(&tenant, "ana.github.io"));
     }
 
     #[test]

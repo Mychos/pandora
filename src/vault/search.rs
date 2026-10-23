@@ -1,6 +1,6 @@
 //! Which field of a record a query matches: never a password, a seed or a file's bytes.
 
-use crate::vault::model::{Any, Entry, Folder, Kind, Note, Vault};
+use crate::vault::model::{Any, Entry, Field, Folder, Kind, Note, Vault};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use zeroize::Zeroizing;
@@ -101,8 +101,10 @@ pub fn find<'a>(vault: &'a Vault, query: &str, notes: &mut NoteCache) -> Vec<Hit
         let score = match &it {
             Any::Login(login) => score(
                 &login.name,
-                [login.username.as_str(), login.url.as_str()],
-                [login.notes.as_str()],
+                [login.username.as_str(), login.url.as_str()]
+                    .into_iter()
+                    .chain(labels(&login.fields)),
+                std::iter::once(login.notes.as_str()).chain(values(&login.fields)),
                 &q,
             ),
             Any::Drive(Entry::Note(note)) => {
@@ -110,6 +112,21 @@ pub fn find<'a>(vault: &'a Vault, query: &str, notes: &mut NoteCache) -> Vec<Hit
                 score(&note.name, [], [notes.text(note)], &q)
             }
             Any::Drive(Entry::File(file)) => score(&file.name, [], [], &q),
+            // The number is a secret by shape, so it never reaches a query: a search
+            // that answered a last-4 would spell out what the box hides.
+            Any::Card(card) => score(
+                &card.name,
+                std::iter::once(card.holder.as_str()).chain(labels(&card.fields)),
+                std::iter::once(card.notes.as_str()).chain(values(&card.fields)),
+                &q,
+            ),
+            Any::Identity(identity) => score(
+                &identity.name,
+                labels(&identity.fields),
+                std::iter::once(identity.notes.as_str()).chain(values(&identity.fields)),
+                &q,
+            ),
+            Any::Passkey(passkey) => score(&passkey.name, [passkey.rp_id.as_str()], [], &q),
             Any::Otp(otp) => score(&otp.name, [], [], &q),
         };
         if let Some(score) = score {
@@ -138,9 +155,25 @@ fn detail<'a>(it: &Any<'a>) -> Cow<'a, str> {
     match it {
         Any::Login(it) if !it.username.is_empty() => Cow::Borrowed(it.username.as_str()),
         Any::Login(it) => Cow::Borrowed(it.url.as_str()),
+        Any::Card(it) => Cow::Borrowed(it.holder.as_str()),
+        Any::Passkey(it) => Cow::Borrowed(it.rp_id.as_str()),
         Any::Drive(Entry::File(it)) => Cow::Owned(crate::shared::ui::size::human(it.bytes())),
-        Any::Drive(Entry::Note(_)) | Any::Otp(_) => Cow::Borrowed(""),
+        Any::Drive(Entry::Note(_)) | Any::Identity(_) | Any::Otp(_) => Cow::Borrowed(""),
     }
+}
+
+/// Every label a record's custom fields carry: a label is never a secret.
+fn labels(fields: &[Field]) -> impl Iterator<Item = &str> {
+    fields.iter().map(|field| field.label.as_str())
+}
+
+/// Only the values that are not marked secret; the mark is what keeps a value out
+/// of a query.
+fn values(fields: &[Field]) -> impl Iterator<Item = &str> {
+    fields
+        .iter()
+        .filter(|field| !field.secret)
+        .map(|field| field.value.as_str())
 }
 
 /// `fields` are shown beside the name, `body` is free text; both rank under it.
@@ -213,6 +246,50 @@ mod tests {
 
     fn names(hits: &[Hit<'_>]) -> Vec<String> {
         hits.iter().map(|h| h.name().to_owned()).collect()
+    }
+
+    /// A card answers for its name, its holder, its labels and its open values, and
+    /// for nothing it hides: not the number, not a value marked secret.
+    #[test]
+    fn a_card_and_an_identity_answer_only_for_what_is_not_hidden() {
+        let mut v = Vault::new("Box");
+        let mut card = crate::vault::model::Card::new(1);
+        card.name = "Visa".to_owned();
+        card.holder = "Ana Pérez".to_owned();
+        card.number = Zeroizing::new("4111111111111111".to_owned());
+        card.notes = Zeroizing::new("viajes".to_owned());
+        card.fields = vec![
+            Field::new("PIN", "9876", true),
+            Field::new("Banco", "Santander", false),
+        ];
+        v.cards.push(card);
+        let mut id = crate::vault::model::Identity::new(1);
+        id.name = "Pasaporte".to_owned();
+        id.notes = Zeroizing::new("renovar".to_owned());
+        id.fields = vec![Field::new("número", "X123", true)];
+        v.identities.push(id);
+
+        assert_eq!(names(&search(&v, "visa")), ["Visa"]);
+        assert_eq!(names(&search(&v, "ana")), ["Visa"], "the holder answers");
+        assert_eq!(names(&search(&v, "banco")), ["Visa"], "a label answers");
+        assert_eq!(
+            names(&search(&v, "santander")),
+            ["Visa"],
+            "a value it may show answers"
+        );
+        assert!(search(&v, "4111").is_empty(), "the number is never a hit");
+        assert!(search(&v, "9876").is_empty(), "nor a secret value");
+        assert_eq!(names(&search(&v, "viajes")), ["Visa"], "nor are its notes");
+        assert_eq!(names(&search(&v, "pasaporte")), ["Pasaporte"]);
+        assert!(
+            search(&v, "x123").is_empty(),
+            "nor an identity's secret field"
+        );
+        assert_eq!(
+            search(&v, "visa")[0].detail,
+            "Ana Pérez",
+            "the row says whose card it is"
+        );
     }
 
     /// One search with a cold cache: what the palette gets on its first keystroke.

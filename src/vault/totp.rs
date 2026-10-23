@@ -22,6 +22,24 @@ pub fn at(input: &str, now: u64) -> Result<(Zeroizing<String>, u64), &'static st
     code(parse(input)?, now)
 }
 
+/// What a seed says about itself, for a review that would rather read this than a
+/// code: a bare Base32 seed is the RFC's own shape.
+pub struct Shape {
+    /// `SHA-1`, `SHA-256` or `SHA-512`, as the seed spells it.
+    pub algorithm: &'static str,
+    pub digits: u32,
+    pub period: u64,
+}
+
+pub fn shape(input: &str) -> Option<Shape> {
+    let config = parse(input).ok()?;
+    Some(Shape {
+        algorithm: config.algorithm.name(),
+        digits: config.digits,
+        period: config.period,
+    })
+}
+
 /// What an `otpauth` URI calls itself: `issuer`, else the label before the `:`;
 /// a bare seed names nothing.
 pub fn label(input: &str) -> Option<String> {
@@ -122,6 +140,14 @@ fn parse(input: &str) -> Result<Config, &'static str> {
 }
 
 impl Algorithm {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sha1 => "SHA-1",
+            Self::Sha256 => "SHA-256",
+            Self::Sha512 => "SHA-512",
+        }
+    }
+
     fn parse(value: &str) -> Result<Self, &'static str> {
         match value.to_ascii_uppercase().as_str() {
             "SHA1" => Ok(Self::Sha1),

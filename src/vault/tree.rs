@@ -40,6 +40,36 @@ pub fn path<'a>(vault: &'a Vault, folder: Option<&str>) -> Vec<&'a Folder> {
     out
 }
 
+/// Deepest path an import will create.
+pub const DEPTH: usize = 32;
+
+/// The folder an `a/b/c` path names, created level by level; `None` is the root. A
+/// path deeper than [`DEPTH`] stops at the ceiling instead of refusing the import.
+pub fn ensure(vault: &mut Vault, path: &str) -> Option<String> {
+    let mut parent: Option<String> = None;
+    for name in path
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .take(DEPTH)
+    {
+        let found = children(vault, parent.as_deref())
+            .into_iter()
+            .find(|f| f.name == name)
+            .map(|f| f.id.clone());
+        parent = Some(match found {
+            Some(id) => id,
+            None => {
+                let folder = Folder::new(name, parent.clone(), crate::vault::model::now_secs());
+                let id = folder.id.clone();
+                vault.folders.push(folder);
+                id
+            }
+        });
+    }
+    parent
+}
+
 pub fn tree(vault: &Vault) -> Vec<(usize, &Folder)> {
     const CAP: usize = 32;
 

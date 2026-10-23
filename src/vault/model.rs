@@ -15,6 +15,9 @@ pub const VAULT_VERSION: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Login,
+    Card,
+    Identity,
+    Passkey,
     Note,
     File,
     Otp,
@@ -24,11 +27,43 @@ impl Kind {
     pub fn label(self) -> &'static str {
         match self {
             Kind::Login => "password",
+            Kind::Card => "card",
+            Kind::Identity => "identity",
+            Kind::Passkey => "passkey",
             Kind::Note => "note",
             Kind::File => "file",
             Kind::Otp => "otp",
         }
     }
+}
+
+/// One line a record carries beyond its own shape: a recovery code, a PIN, the
+/// number on a card. `secret` keeps it out of a search and behind the eye.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Field {
+    pub label: String,
+    #[serde(with = "zstr")]
+    pub value: Zeroizing<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub secret: bool,
+}
+
+impl Field {
+    pub fn new(label: &str, value: &str, secret: bool) -> Self {
+        Self {
+            label: label.to_owned(),
+            value: Zeroizing::new(value.to_owned()),
+            secret,
+        }
+    }
+}
+
+/// A password the record no longer uses, newest last.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Old {
+    #[serde(with = "zstr")]
+    pub password: Zeroizing<String>,
+    pub changed: u64,
 }
 
 /// A login's own type, so a note cannot carry a password.
@@ -42,11 +77,19 @@ pub struct Login {
     /// Free text: a recovery hint, the note that came with it from another manager.
     #[serde(with = "zstr")]
     pub notes: Zeroizing<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<Field>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<Old>,
     pub url: String,
     #[serde(default, skip_serializing_if = "Rule::is_domain")]
     pub url_match: Rule,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_urls: Vec<Uri>,
+    /// The keys this login types, when auto-type runs: `{USERNAME}`, `{PASSWORD}`,
+    /// `{OTP}`, `{ENTER}`, `{TAB}` and `{WAIT 250}`. Empty means the default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sequence: String,
     /// Brand icon slug; `None` keeps the kind icon, then the URL's suggestion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
@@ -55,6 +98,9 @@ pub struct Login {
 }
 
 impl Login {
+    /// How many old passwords ride along; the oldest leaves first.
+    pub const HISTORY: usize = 20;
+
     pub fn new(now: u64) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -62,6 +108,9 @@ impl Login {
             username: String::new(),
             password: Zeroizing::new(String::new()),
             notes: Zeroizing::new(String::new()),
+            fields: Vec::new(),
+            history: Vec::new(),
+            sequence: String::new(),
             url: String::new(),
             url_match: Rule::Domain,
             extra_urls: Vec::new(),
@@ -75,6 +124,33 @@ impl Login {
         self.modified = now;
     }
 
+    /// Take a new password, keeping the one it displaces; the same one twice is not a
+    /// change. Returns whether the password moved.
+    pub fn set_password(&mut self, password: &str) -> bool {
+        if self.password.as_str() == password {
+            return false;
+        }
+        let previous = std::mem::take(&mut self.password);
+        self.password = Zeroizing::new(password.to_owned());
+        self.remember(previous)
+    }
+
+    /// Keep `password` as one this login no longer uses. The editor binds the field in
+    /// place, so it hands over the value it displaced instead of calling
+    /// [`Login::set_password`].
+    pub fn remember(&mut self, password: Zeroizing<String>) -> bool {
+        if password.is_empty() || password == self.password {
+            return false;
+        }
+        self.history.push(Old {
+            password,
+            changed: now_secs(),
+        });
+        let over = self.history.len().saturating_sub(Self::HISTORY);
+        self.history.drain(..over);
+        true
+    }
+
     /// Main URL first, then the extras, each with its rule; the only reader of both.
     pub fn uris(&self) -> impl Iterator<Item = (&str, Rule)> + '_ {
         let primary = (!self.url.trim().is_empty()).then_some((self.url.as_str(), self.url_match));
@@ -83,6 +159,199 @@ impl Login {
                 .iter()
                 .map(|uri| (uri.url.as_str(), uri.rule)),
         )
+    }
+}
+
+/// A card's own type, so a number and an expiry never ride a login's fields.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Card {
+    pub id: String,
+    pub name: String,
+    #[serde(default, with = "zstr")]
+    pub notes: Zeroizing<String>,
+    /// The long number, spaces and all: kept as typed, grouped by the UI.
+    #[serde(default, with = "zstr")]
+    pub number: Zeroizing<String>,
+    /// `MM/YY`, as printed on the card.
+    #[serde(default)]
+    pub expiry: String,
+    #[serde(default)]
+    pub holder: String,
+    /// Brand icon slug, the way a login carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<Field>,
+    pub created: u64,
+    pub modified: u64,
+}
+
+impl Card {
+    pub fn new(now: u64) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "New card".to_owned(),
+            notes: Zeroizing::new(String::new()),
+            number: Zeroizing::new(String::new()),
+            expiry: String::new(),
+            holder: String::new(),
+            icon: None,
+            fields: Vec::new(),
+            created: now,
+            modified: now,
+        }
+    }
+
+    pub fn touched(&mut self, now: u64) {
+        self.modified = now;
+    }
+
+    pub fn kind(&self) -> Kind {
+        Kind::Card
+    }
+}
+
+/// Who one is on paper: names, addresses, a passport number. Its own type, so none
+/// of it lands in a login or a note.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Identity {
+    pub id: String,
+    pub name: String,
+    #[serde(default, with = "zstr")]
+    pub notes: Zeroizing<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<Field>,
+    pub created: u64,
+    pub modified: u64,
+}
+
+impl Identity {
+    pub fn new(now: u64) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "New identity".to_owned(),
+            notes: Zeroizing::new(String::new()),
+            fields: Vec::new(),
+            created: now,
+            modified: now,
+        }
+    }
+
+    pub fn touched(&mut self, now: u64) {
+        self.modified = now;
+    }
+
+    pub fn kind(&self) -> Kind {
+        Kind::Identity
+    }
+}
+
+/// An Ed25519 key this box keeps for its SSH agent. `allowed` is the switch the user
+/// sets: a key that is not marked is not listed and does not sign.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct SshKey {
+    pub id: String,
+    pub name: String,
+    /// Base64 of the 32-byte seed; `Zeroizing`, and never in a `Debug`.
+    #[serde(with = "b64")]
+    pub private: Zeroizing<Vec<u8>>,
+    /// The 32-byte public key, as base64.
+    #[serde(with = "b64")]
+    pub public: Zeroizing<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allowed: bool,
+    pub created: u64,
+    pub modified: u64,
+}
+
+impl SshKey {
+    /// A fresh Ed25519 key, made here and never imported: a private key file from the
+    /// outside is its own parser and its own policy, and this box can make its own.
+    pub fn make(now: u64, name: &str, comment: &str) -> Self {
+        let seed = crypto::random_bytes::<32>();
+        let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let public = signing.verifying_key().to_bytes();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.to_owned(),
+            private: Zeroizing::new(seed.to_vec()),
+            public: Zeroizing::new(public.to_vec()),
+            comment: comment.to_owned(),
+            allowed: false,
+            created: now,
+            modified: now,
+        }
+    }
+
+    pub fn touched(&mut self, now: u64) {
+        self.modified = now;
+    }
+}
+
+impl fmt::Debug for SshKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SshKey")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("private", &Redacted)
+            .field(
+                "public",
+                &crate::vault::codec::display(self.public.as_slice()).to_string(),
+            )
+            .field("comment", &self.comment)
+            .field("allowed", &self.allowed)
+            .finish()
+    }
+}
+
+/// A WebAuthn credential: the private key never leaves this box, and the record is
+/// bound to one origin. The id and the handle are bytes, not text, so they ride as
+/// base64 like every other byte field.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Passkey {
+    pub id: String,
+    pub name: String,
+    /// The relying party's id — `example.com` — and the only site this answers for.
+    pub rp_id: String,
+    #[serde(default, with = "b64")]
+    pub user_handle: Zeroizing<Vec<u8>>,
+    #[serde(with = "b64")]
+    pub credential_id: Zeroizing<Vec<u8>>,
+    /// COSE algorithm: -7 is ES256, -8 is EdDSA.
+    pub alg: i32,
+    /// Incremented on every assertion; a relying party may look at it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub counter: u32,
+    #[serde(with = "b64")]
+    pub private_key: Zeroizing<Vec<u8>>,
+    pub created: u64,
+    pub modified: u64,
+}
+
+impl Passkey {
+    pub fn new(now: u64, rp_id: &str) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: rp_id.to_owned(),
+            rp_id: rp_id.to_owned(),
+            user_handle: Zeroizing::new(Vec::new()),
+            credential_id: Zeroizing::new(Vec::new()),
+            alg: -7,
+            counter: 0,
+            private_key: Zeroizing::new(Vec::new()),
+            created: now,
+            modified: now,
+        }
+    }
+
+    pub fn touched(&mut self, now: u64) {
+        self.modified = now;
+    }
+
+    pub fn kind(&self) -> Kind {
+        Kind::Passkey
     }
 }
 
@@ -314,6 +583,13 @@ impl Entry {
         }
     }
 
+    pub fn name_mut(&mut self) -> &mut String {
+        match self {
+            Entry::Note(it) => &mut it.name,
+            Entry::File(it) => &mut it.name,
+        }
+    }
+
     pub fn touched(&mut self, now: u64) {
         match self {
             Entry::Note(it) => it.touched(now),
@@ -377,6 +653,9 @@ pub struct Trashed {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Deleted {
     Login(Login),
+    Card(Card),
+    Identity(Identity),
+    Passkey(Passkey),
     Drive(Entry),
     Otp(Otp),
 }
@@ -385,6 +664,9 @@ impl Deleted {
     pub fn id(&self) -> &str {
         match self {
             Deleted::Login(it) => &it.id,
+            Deleted::Card(it) => &it.id,
+            Deleted::Identity(it) => &it.id,
+            Deleted::Passkey(it) => &it.id,
             Deleted::Drive(it) => it.id(),
             Deleted::Otp(it) => &it.id,
         }
@@ -393,6 +675,9 @@ impl Deleted {
     pub fn name(&self) -> &str {
         match self {
             Deleted::Login(it) => &it.name,
+            Deleted::Card(it) => &it.name,
+            Deleted::Identity(it) => &it.name,
+            Deleted::Passkey(it) => &it.name,
             Deleted::Drive(it) => it.name(),
             Deleted::Otp(it) => &it.name,
         }
@@ -401,6 +686,9 @@ impl Deleted {
     pub fn kind(&self) -> Kind {
         match self {
             Deleted::Login(_) => Kind::Login,
+            Deleted::Card(_) => Kind::Card,
+            Deleted::Identity(_) => Kind::Identity,
+            Deleted::Passkey(_) => Kind::Passkey,
             Deleted::Drive(it) => it.kind(),
             Deleted::Otp(_) => Kind::Otp,
         }
@@ -418,12 +706,18 @@ fn put<T>(list: &mut Vec<T>, it: T, at: Option<usize>) {
 /// Any kind, borrowed; the kind-blind operations go through here.
 pub enum Any<'a> {
     Login(&'a Login),
+    Card(&'a Card),
+    Identity(&'a Identity),
+    Passkey(&'a Passkey),
     Drive(&'a Entry),
     Otp(&'a Otp),
 }
 
 pub enum AnyMut<'a> {
     Login(&'a mut Login),
+    Card(&'a mut Card),
+    Identity(&'a mut Identity),
+    Passkey(&'a mut Passkey),
     Drive(&'a mut Entry),
     Otp(&'a mut Otp),
 }
@@ -432,6 +726,9 @@ impl<'a> Any<'a> {
     pub fn id(&self) -> &str {
         match self {
             Any::Login(it) => &it.id,
+            Any::Card(it) => &it.id,
+            Any::Identity(it) => &it.id,
+            Any::Passkey(it) => &it.id,
             Any::Drive(it) => it.id(),
             Any::Otp(it) => &it.id,
         }
@@ -440,6 +737,9 @@ impl<'a> Any<'a> {
     pub fn name(&self) -> &str {
         match self {
             Any::Login(it) => &it.name,
+            Any::Card(it) => &it.name,
+            Any::Identity(it) => &it.name,
+            Any::Passkey(it) => &it.name,
             Any::Drive(it) => it.name(),
             Any::Otp(it) => &it.name,
         }
@@ -448,6 +748,9 @@ impl<'a> Any<'a> {
     pub fn kind(&self) -> Kind {
         match self {
             Any::Login(_) => Kind::Login,
+            Any::Card(_) => Kind::Card,
+            Any::Identity(_) => Kind::Identity,
+            Any::Passkey(_) => Kind::Passkey,
             Any::Drive(it) => it.kind(),
             Any::Otp(_) => Kind::Otp,
         }
@@ -456,6 +759,9 @@ impl<'a> Any<'a> {
     pub fn modified(&self) -> u64 {
         match self {
             Any::Login(it) => it.modified,
+            Any::Card(it) => it.modified,
+            Any::Identity(it) => it.modified,
+            Any::Passkey(it) => it.modified,
             Any::Drive(it) => it.modified(),
             Any::Otp(it) => it.modified,
         }
@@ -474,6 +780,9 @@ impl<'a> AnyMut<'a> {
     pub fn id(&self) -> &str {
         match self {
             AnyMut::Login(it) => &it.id,
+            AnyMut::Card(it) => &it.id,
+            AnyMut::Identity(it) => &it.id,
+            AnyMut::Passkey(it) => &it.id,
             AnyMut::Drive(it) => it.id(),
             AnyMut::Otp(it) => &it.id,
         }
@@ -482,8 +791,31 @@ impl<'a> AnyMut<'a> {
     pub fn kind(&self) -> Kind {
         match self {
             AnyMut::Login(_) => Kind::Login,
+            AnyMut::Card(_) => Kind::Card,
+            AnyMut::Identity(_) => Kind::Identity,
+            AnyMut::Passkey(_) => Kind::Passkey,
             AnyMut::Drive(it) => it.kind(),
             AnyMut::Otp(_) => Kind::Otp,
+        }
+    }
+
+    pub fn name_mut(&mut self) -> &mut String {
+        match self {
+            AnyMut::Login(it) => &mut it.name,
+            AnyMut::Card(it) => &mut it.name,
+            AnyMut::Identity(it) => &mut it.name,
+            AnyMut::Passkey(it) => &mut it.name,
+            AnyMut::Drive(it) => it.name_mut(),
+            AnyMut::Otp(it) => &mut it.name,
+        }
+    }
+
+    /// The brand slug this shape carries; a note, a code and an identity carry none.
+    pub fn icon_mut(&mut self) -> Option<&mut Option<String>> {
+        match self {
+            AnyMut::Login(it) => Some(&mut it.icon),
+            AnyMut::Card(it) => Some(&mut it.icon),
+            _ => None,
         }
     }
 
@@ -495,7 +827,8 @@ impl<'a> AnyMut<'a> {
         }
     }
 
-    /// Move it into `folder`. A login or a code has nowhere to move to.
+    /// Move it into `folder`. A login, a card, an identity or a code has nowhere to
+    /// move to.
     pub fn move_to(&mut self, folder: Option<String>) {
         if let AnyMut::Drive(it) = self {
             it.move_to(folder);
@@ -505,6 +838,9 @@ impl<'a> AnyMut<'a> {
     pub fn touched(&mut self, now: u64) {
         match self {
             AnyMut::Login(it) => it.touched(now),
+            AnyMut::Card(it) => it.touched(now),
+            AnyMut::Identity(it) => it.touched(now),
+            AnyMut::Passkey(it) => it.touched(now),
             AnyMut::Drive(it) => it.touched(now),
             AnyMut::Otp(it) => it.touched(now),
         }
@@ -528,10 +864,68 @@ impl fmt::Debug for Login {
             .field("username", &self.username)
             .field("password", &Redacted)
             .field("notes", &Redacted)
+            .field("fields", &format_args!("{} field(s)", self.fields.len()))
+            .field(
+                "history",
+                &format_args!("{} old password(s)", self.history.len()),
+            )
             .field("url", &self.url)
             .field("url_match", &self.url_match)
             .field("extra_urls", &self.extra_urls)
             .field("icon", &self.icon)
+            .field("created", &self.created)
+            .field("modified", &self.modified)
+            .finish()
+    }
+}
+
+impl fmt::Debug for Card {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Card")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("notes", &Redacted)
+            .field("number", &Redacted)
+            .field("expiry", &self.expiry)
+            .field("holder", &self.holder)
+            .field("icon", &self.icon)
+            .field("fields", &format_args!("{} field(s)", self.fields.len()))
+            .field("created", &self.created)
+            .field("modified", &self.modified)
+            .finish()
+    }
+}
+
+impl fmt::Debug for Identity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Identity")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("notes", &Redacted)
+            .field("fields", &format_args!("{} field(s)", self.fields.len()))
+            .field("created", &self.created)
+            .field("modified", &self.modified)
+            .finish()
+    }
+}
+
+impl fmt::Debug for Passkey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Passkey")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("rp_id", &self.rp_id)
+            .field(
+                "user_handle",
+                &format_args!("{} bytes", self.user_handle.len()),
+            )
+            .field(
+                "credential_id",
+                &format_args!("{} bytes", self.credential_id.len()),
+            )
+            .field("alg", &self.alg)
+            .field("counter", &self.counter)
+            .field("private_key", &Redacted)
             .field("created", &self.created)
             .field("modified", &self.modified)
             .finish()
@@ -613,6 +1007,19 @@ pub struct Vault {
     pub folders: Vec<Folder>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logins: Vec<Login>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cards: Vec<Card>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identities: Vec<Identity>,
+    /// WebAuthn credentials; a private key lives here and nowhere else.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passkeys: Vec<Passkey>,
+    /// Ed25519 keys for the SSH agent; only the ones marked `allowed` ever answer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssh_keys: Vec<SshKey>,
+    /// The keypair this box receives sealed shares with; absent until one is asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<crate::vault::share::Keypair>,
     /// The drive: notes and files in the one order the user dragged them into.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drive: Vec<Entry>,
@@ -633,6 +1040,11 @@ impl PartialEq for Vault {
             && self.name == other.name
             && self.folders == other.folders
             && self.logins == other.logins
+            && self.cards == other.cards
+            && self.identities == other.identities
+            && self.passkeys == other.passkeys
+            && self.ssh_keys == other.ssh_keys
+            && self.share == other.share
             && self.drive == other.drive
             && self.otps == other.otps
             && self.trash == other.trash
@@ -660,6 +1072,11 @@ impl Vault {
             name: name.to_owned(),
             folders: Vec::new(),
             logins: Vec::new(),
+            cards: Vec::new(),
+            identities: Vec::new(),
+            passkeys: Vec::new(),
+            ssh_keys: Vec::new(),
+            share: None,
             drive: Vec::new(),
             otps: Vec::new(),
             trash: Vec::new(),
@@ -683,6 +1100,15 @@ impl Vault {
             return reader.read_record(crate::vault::container::Kind::File, &file.id, record);
         }
         Ok(file.data.clone())
+    }
+
+    /// The key this box receives sealed shares with, made the first time it is asked
+    /// for: a keypair is not a thing to walk the user through.
+    pub fn share_key(&mut self) -> &crate::vault::share::Keypair {
+        if self.share.is_none() {
+            self.share = Some(crate::vault::share::Keypair::make());
+        }
+        self.share.as_ref().expect("just made")
     }
 
     /// The first `len` bytes; never reads more than the box holds.
@@ -780,6 +1206,9 @@ impl Vault {
         self.logins
             .iter()
             .map(Any::Login)
+            .chain(self.cards.iter().map(Any::Card))
+            .chain(self.identities.iter().map(Any::Identity))
+            .chain(self.passkeys.iter().map(Any::Passkey))
             .chain(self.drive.iter().map(Any::Drive))
             .chain(self.otps.iter().map(Any::Otp))
     }
@@ -798,6 +1227,27 @@ impl Vault {
                 .find(|it| it.id == id)
                 .map(AnyMut::Login);
         }
+        if self.cards.iter().any(|it| it.id == id) {
+            return self
+                .cards
+                .iter_mut()
+                .find(|it| it.id == id)
+                .map(AnyMut::Card);
+        }
+        if self.identities.iter().any(|it| it.id == id) {
+            return self
+                .identities
+                .iter_mut()
+                .find(|it| it.id == id)
+                .map(AnyMut::Identity);
+        }
+        if self.passkeys.iter().any(|it| it.id == id) {
+            return self
+                .passkeys
+                .iter_mut()
+                .find(|it| it.id == id)
+                .map(AnyMut::Passkey);
+        }
         if self.drive.iter().any(|it| it.id() == id) {
             return self
                 .drive
@@ -814,11 +1264,22 @@ impl Vault {
 
     /// Permanent erase; the trash goes through [`Vault::take`].
     pub fn remove(&mut self, id: &str) -> bool {
-        let before = self.logins.len() + self.drive.len() + self.otps.len();
+        let count = |v: &Self| {
+            v.logins.len()
+                + v.cards.len()
+                + v.identities.len()
+                + v.passkeys.len()
+                + v.drive.len()
+                + v.otps.len()
+        };
+        let before = count(self);
         self.logins.retain(|it| it.id != id);
+        self.cards.retain(|it| it.id != id);
+        self.identities.retain(|it| it.id != id);
+        self.passkeys.retain(|it| it.id != id);
         self.drive.retain(|it| it.id() != id);
         self.otps.retain(|it| it.id != id);
-        self.logins.len() + self.drive.len() + self.otps.len() != before
+        count(self) != before
     }
 
     /// Take a record into the trash, remembering where it sat; `None` when the id
@@ -826,6 +1287,12 @@ impl Vault {
     pub fn take(&mut self, id: &str, now: u64) -> Option<Trashed> {
         let (record, at) = if let Some(i) = self.logins.iter().position(|it| it.id == id) {
             (Deleted::Login(self.logins.remove(i)), i)
+        } else if let Some(i) = self.cards.iter().position(|it| it.id == id) {
+            (Deleted::Card(self.cards.remove(i)), i)
+        } else if let Some(i) = self.identities.iter().position(|it| it.id == id) {
+            (Deleted::Identity(self.identities.remove(i)), i)
+        } else if let Some(i) = self.passkeys.iter().position(|it| it.id == id) {
+            (Deleted::Passkey(self.passkeys.remove(i)), i)
         } else if let Some(i) = self.drive.iter().position(|it| it.id() == id) {
             (Deleted::Drive(self.drive.remove(i)), i)
         } else {
@@ -849,6 +1316,9 @@ impl Vault {
         let kind = record.kind();
         match record {
             Deleted::Login(it) => put(&mut self.logins, it, at),
+            Deleted::Card(it) => put(&mut self.cards, it, at),
+            Deleted::Identity(it) => put(&mut self.identities, it, at),
+            Deleted::Passkey(it) => put(&mut self.passkeys, it, at),
             Deleted::Otp(it) => put(&mut self.otps, it, at),
             Deleted::Drive(mut it) => {
                 if let Some(folder) = it.folder() {
@@ -875,9 +1345,14 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// serde helper: generation 0 is the field's absence.
-fn is_zero(value: &u64) -> bool {
-    *value == 0
+/// serde helper: a zero is the field's absence, whatever its width.
+fn is_zero<T: PartialEq + From<u8>>(value: &T) -> bool {
+    *value == T::from(0)
+}
+
+/// serde helper: `secret: false` is the field's absence.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// serde helper: bytes are stored base64, not as a JSON array of numbers.
@@ -923,12 +1398,134 @@ mod tests {
         note.body = Zeroizing::new("body-secret".to_owned());
         let mut otp = Otp::new(1);
         otp.secret = Zeroizing::new("seed-secret".to_owned());
+        let mut card = Card::new(1);
+        card.notes = Zeroizing::new("card-note-secret".to_owned());
+        let mut identity = Identity::new(1);
+        identity.notes = Zeroizing::new("identity-note-secret".to_owned());
+        login.fields.push(Field::new("PIN", "pin-secret", true));
+        login.remember(Zeroizing::new("old-password-secret".to_owned()));
 
-        let said = format!("{login:?} {note:?} {otp:?}");
-        for secret in ["password-secret", "body-secret", "seed-secret"] {
+        let said = format!("{login:?} {note:?} {otp:?} {card:?} {identity:?}");
+        for secret in [
+            "password-secret",
+            "body-secret",
+            "seed-secret",
+            "card-note-secret",
+            "identity-note-secret",
+            "pin-secret",
+            "old-password-secret",
+        ] {
             assert!(!said.contains(secret), "{secret} leaked: {said}");
         }
         assert!(said.contains("Login"), "and still says what it is: {said}");
+    }
+
+    #[test]
+    fn a_replaced_password_is_kept_behind_and_capped() {
+        let mut login = Login::new(1);
+        assert!(!login.set_password("first"), "no password to displace yet");
+        assert!(login.history.is_empty(), "the first one is not history");
+
+        assert!(login.set_password("second"));
+        assert_eq!(login.history.len(), 1);
+        assert_eq!(login.history[0].password.as_str(), "first");
+        assert!(
+            !login.set_password("second"),
+            "the same one twice is not a change"
+        );
+        assert_eq!(login.history.len(), 1);
+
+        for i in 0..(Login::HISTORY + 5) {
+            login.set_password(&format!("pass-{i}"));
+        }
+        assert_eq!(
+            login.history.len(),
+            Login::HISTORY,
+            "the list has a ceiling"
+        );
+        let last = format!("pass-{}", Login::HISTORY + 3);
+        assert_eq!(login.history.last().unwrap().password.as_str(), last);
+    }
+
+    #[test]
+    fn the_editor_hands_over_what_it_displaced() {
+        let mut login = Login::new(1);
+        login.password = Zeroizing::new("in-place".to_owned());
+        let previous = login.password.clone();
+        login.password = Zeroizing::new("in-place-2".to_owned());
+
+        assert!(login.remember(previous));
+        assert_eq!(login.history[0].password.as_str(), "in-place");
+        assert!(
+            !login.remember(Zeroizing::new("in-place-2".to_owned())),
+            "the password in force is not history"
+        );
+    }
+
+    /// A passkey is a record like any other, and its private key never shows up in a
+    /// `Debug`, a listing or a field the screen reads.
+    #[test]
+    fn a_passkey_is_a_record_and_hides_its_key() {
+        let mut vault = Vault::new("Box");
+        let mut it = Passkey::new(1, "example.com");
+        it.id = "pk".to_owned();
+        it.credential_id = Zeroizing::new(vec![1, 2, 3]);
+        it.private_key = Zeroizing::new(b"private-key-bytes".to_vec());
+        vault.passkeys.push(it);
+
+        assert_eq!(vault.records().count(), 1);
+        assert_eq!(vault.any("pk").unwrap().kind(), Kind::Passkey);
+        assert_eq!(vault.any("pk").unwrap().name(), "example.com");
+        assert_eq!(vault.any_mut("pk").unwrap().kind(), Kind::Passkey);
+
+        let said = format!("{vault:?}");
+        assert!(!said.contains("private-key-bytes"), "{said}");
+        let json = serde_json::to_string(&vault.passkeys[0]).unwrap();
+        assert!(!json.contains("private-key-bytes"), "bytes ride as base64");
+        assert!(json.contains("\"alg\":-7"));
+
+        let back: Passkey = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.credential_id.as_slice(), &[1, 2, 3]);
+        assert_eq!(back.private_key.as_slice(), b"private-key-bytes");
+
+        let trashed = vault.take("pk", 5).expect("a passkey goes to the trash");
+        assert_eq!(trashed.record.kind(), Kind::Passkey);
+        assert_eq!(vault.restore("pk"), Some(Kind::Passkey));
+        assert_eq!(vault.passkeys.len(), 1);
+        assert!(vault.remove("pk"));
+        assert!(vault.passkeys.is_empty());
+    }
+
+    #[test]
+    fn a_card_and_an_identity_are_records_of_their_own() {
+        let mut vault = Vault::new("Box");
+        let mut card = Card::new(1);
+        card.id = "card".to_owned();
+        let mut identity = Identity::new(1);
+        identity.id = "identity".to_owned();
+        vault.cards.push(card);
+        vault.identities.push(identity);
+
+        assert_eq!(vault.records().count(), 2);
+        assert_eq!(vault.any("card").unwrap().kind(), Kind::Card);
+        assert_eq!(vault.any("identity").unwrap().kind(), Kind::Identity);
+        assert_eq!(
+            vault.any("card").unwrap().folder(),
+            None,
+            "a folder organises the drive and nothing else"
+        );
+        assert_eq!(vault.any_mut("identity").unwrap().kind(), Kind::Identity);
+
+        let trashed = vault.take("card", 5).expect("a card goes to the trash");
+        assert_eq!(trashed.record.kind(), Kind::Card);
+        assert!(vault.cards.is_empty(), "and leaves its collection");
+        assert_eq!(vault.trash.len(), 1);
+        assert_eq!(vault.restore("card"), Some(Kind::Card));
+        assert_eq!(vault.cards.len(), 1, "and comes back to its own");
+
+        assert!(vault.remove("identity"), "the erase finds it");
+        assert!(vault.identities.is_empty());
+        assert_eq!(vault.records().count(), 1);
     }
 
     #[test]

@@ -1,6 +1,11 @@
 //! The on-disk contract of a v4 box: header, chunked records, encrypted manifest.
 
-pub(crate) const MAGIC: &[u8] = b"PANDORA4\n";
+/// The first bytes of a box. The version is in the marker, so a reader can refuse a
+/// newer box before it parses anything.
+pub(crate) const MAGIC_V4: &[u8] = b"PANDORA4\n";
+pub(crate) const MAGIC_V5: &[u8] = b"PANDORA5\n";
+/// What this version writes.
+pub(crate) const MAGIC: &[u8] = MAGIC_V5;
 
 /// Fixed so the header can be read and patched without knowing the manifest's size.
 pub(crate) const HEADER_BLOCK: usize = 4096;

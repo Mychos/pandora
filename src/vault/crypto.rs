@@ -43,13 +43,23 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     b
 }
 
-/// The password plus a BLAKE2b digest of the keyfile: the file alone is never a key.
-pub fn material(password: &str, keyfile: Option<&[u8]>) -> Zeroizing<Vec<u8>> {
+/// The password plus a BLAKE2b digest of every secret handed with it — a keyfile, a
+/// YubiKey's challenge-response, both at once — so no one of them is the key alone and
+/// the order they arrive in is part of it. [`keyed`] is the one-factor case.
+pub fn material(password: &str, secrets: &[&[u8]]) -> Zeroizing<Vec<u8>> {
     let mut out = Zeroizing::new(password.as_bytes().to_vec());
-    if let Some(k) = keyfile {
-        out.extend_from_slice(&Blake2b512::digest(k));
+    for secret in secrets {
+        out.extend_from_slice(&Blake2b512::digest(secret));
     }
     out
+}
+
+/// The password with the one optional secret a box has today: the keyfile slot.
+pub fn keyed(password: &str, keyfile: Option<&[u8]>) -> Zeroizing<Vec<u8>> {
+    keyfile.map_or_else(
+        || material(password, &[]),
+        |keyfile| material(password, &[keyfile]),
+    )
 }
 
 pub fn derive_key(secret: &[u8], salt: &[u8], params: &KdfParams) -> Result<Key, String> {
@@ -208,7 +218,7 @@ mod tests {
     use super::*;
 
     fn key(password: &str, salt: &[u8]) -> Key {
-        derive_key(&material(password, None), salt, &KdfParams::default()).unwrap()
+        derive_key(&keyed(password, None), salt, &KdfParams::default()).unwrap()
     }
 
     /// The one-shot shape the tests read better with: encrypt, and hand back the nonce
@@ -289,7 +299,7 @@ mod tests {
     fn keyfile_changes_the_key() {
         let salt = random_bytes::<SALT_LEN>();
         let with = derive_key(
-            &material("pw", Some(b"keyfile bytes")),
+            &keyed("pw", Some(b"keyfile bytes")),
             &salt,
             &KdfParams::default(),
         )
@@ -297,12 +307,27 @@ mod tests {
         let without = key("pw", &salt);
         assert_ne!(with.as_ref(), without.as_ref());
         let again = derive_key(
-            &material("pw", Some(b"keyfile bytes")),
+            &keyed("pw", Some(b"keyfile bytes")),
             &salt,
             &KdfParams::default(),
         )
         .unwrap();
         assert_eq!(with.as_ref(), again.as_ref());
+    }
+
+    /// A second factor is a second digest, and which one comes first is part of the key:
+    /// the same secrets in another order are another box.
+    #[test]
+    fn a_second_secret_changes_the_key_and_its_order_matters() {
+        let salt = random_bytes::<SALT_LEN>();
+        let derive = |secrets: &[&[u8]]| {
+            derive_key(&material("pw", secrets), &salt, &KdfParams::default()).unwrap()
+        };
+        let one = derive(&[b"a"]);
+        let two = derive(&[b"a", b"b"]);
+        let swapped = derive(&[b"b", b"a"]);
+        assert_ne!(one.as_ref(), two.as_ref());
+        assert_ne!(two.as_ref(), swapped.as_ref());
     }
 
     #[test]

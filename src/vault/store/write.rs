@@ -432,6 +432,9 @@ fn write_v4(
             manifest_offset,
             manifest_len: 0,
             manifest_nonce: String::new(),
+            // A save carries the slot the session holds: clearing it is a decision,
+            // not something a write does on its own.
+            recovery: creds.recovery.clone(),
         };
         let nonce = crypto::encrypt_in_place(&mut manifest, &creds.key, &v4_aad(&header))?;
         header.manifest_len = manifest.len() as u64;
