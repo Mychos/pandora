@@ -76,6 +76,12 @@ pub fn take_resumed() -> bool {
     flag("takeResumed")
 }
 
+/// The activity went to the background since the last frame: the only moment a
+/// phone is still ours to write to.
+pub fn take_paused() -> bool {
+    flag("takePaused")
+}
+
 /// `Pandora.<name>()` answering a number; anything unreadable is zero.
 fn number(name: &str) -> f32 {
     let name = JNIString::new(name);
@@ -119,23 +125,45 @@ pub fn text_with(name: &str, arg: &str) -> Result<Option<String>, String> {
     })
 }
 
-/// `Pandora.<name>() : byte[]`. The one call that carries more than a sentence:
-/// a camera frame, which is a few hundred kilobytes of pixels.
+/// The bytes behind a `byte[]` the class answered, or `None` for its `null`.
+fn array_of(env: &mut Env, out: JValueOwned) -> jni::errors::Result<Option<Vec<u8>>> {
+    let obj = out.l()?;
+    if obj.is_null() {
+        return Ok(None);
+    }
+    let array = env.cast_local::<JByteArray>(obj)?;
+    let mut bytes = vec![0i8; array.len(env)?];
+    array.get_region(env, 0, &mut bytes)?;
+    Ok(Some(
+        bytes.into_iter().map(|b| b as u8).collect::<Vec<u8>>(),
+    ))
+}
+
+/// `Pandora.<name>() : byte[]`. A camera frame, which is a few hundred
+/// kilobytes of pixels.
 pub fn bytes(name: &str) -> Result<Option<Vec<u8>>, String> {
     let name = JNIString::new(name);
     call(|env| {
         let class = class(env)?;
         let out = env.call_static_method(class, &name, jni_sig!("()[B"), &[])?;
-        let obj = out.l()?;
-        if obj.is_null() {
-            return Ok(None);
-        }
-        let array = env.cast_local::<JByteArray>(obj)?;
-        let mut bytes = vec![0i8; array.len(env)?];
-        array.get_region(env, 0, &mut bytes)?;
-        Ok(Some(
-            bytes.into_iter().map(|b| b as u8).collect::<Vec<u8>>(),
-        ))
+        array_of(env, out)
+    })
+}
+
+/// `Pandora.<name>(text) : byte[]`. A whole file the class kept for us: one
+/// version out of the folder mirror.
+pub fn bytes_with(name: &str, arg: &str) -> Result<Option<Vec<u8>>, String> {
+    let name = JNIString::new(name);
+    call(|env| {
+        let class = class(env)?;
+        let arg = env.new_string(arg)?;
+        let out = env.call_static_method(
+            class,
+            &name,
+            jni_sig!("(Ljava/lang/String;)[B"),
+            &[JValue::Object(&arg)],
+        )?;
+        array_of(env, out)
     })
 }
 
@@ -152,6 +180,24 @@ pub fn send(name: &str, arg: &str) -> Result<(), String> {
             &[JValue::Object(&arg)],
         )?;
         Ok(())
+    })
+}
+
+/// `Pandora.<name>(text, bytes) : String?`. A whole file handed over to the
+/// class; anything it answers is its own sentence saying why it did not take it.
+pub fn send_bytes_with(name: &str, arg: &str, bytes: &[u8]) -> Result<Option<String>, String> {
+    let name = JNIString::new(name);
+    call(|env| {
+        let class = class(env)?;
+        let arg = env.new_string(arg)?;
+        let array = env.byte_array_from_slice(bytes)?;
+        let out = env.call_static_method(
+            class,
+            &name,
+            jni_sig!("(Ljava/lang/String;[B)Ljava/lang/String;"),
+            &[JValue::Object(&arg), JValue::Object(&array)],
+        )?;
+        text_of(env, out)
     })
 }
 
@@ -247,4 +293,54 @@ fn press(input: &mut egui::InputState, key: egui::Key) {
         repeat: false,
         modifiers: egui::Modifiers::NONE,
     });
+}
+
+/// Read a single document by its content uri.
+pub fn document_read(uri: &str) -> Result<Option<Vec<u8>>, String> {
+    bytes_with("documentRead", uri)
+}
+
+/// Write bytes to a single document by its content uri; Ok(()) on success.
+pub fn document_write(uri: &str, bytes: &[u8]) -> Result<(), String> {
+    let name = JNIString::new("documentWrite");
+    let why: Option<String> = call(|env| {
+        let class = class(env)?;
+        let arg = env.new_string(uri)?;
+        let arr = env.new_byte_array(bytes.len())?;
+        if !bytes.is_empty() {
+            let signed: Vec<i8> = bytes.iter().map(|b| *b as i8).collect();
+            arr.set_region(env, 0, &signed)?;
+        }
+        let out = env.call_static_method(
+            class,
+            &name,
+            jni_sig!("(Ljava/lang/String;[B)Ljava/lang/String;"),
+            &[JValue::Object(&arg), JValue::Object(&arr)],
+        )?;
+        text_of(env, out)
+    })?;
+    if let Some(msg) = why {
+        if !msg.is_empty() {
+            return Err(msg);
+        }
+    }
+    Ok(())
+}
+
+
+/// Ask the system to create (or pick) a document and return its content uri.
+pub fn document_create(mime: &str, name: &str) -> Result<Option<String>, String> {
+    let namej = JNIString::new("documentCreate");
+    call(|env| {
+        let class = class(env)?;
+        let m = env.new_string(mime)?;
+        let n = env.new_string(name)?;
+        let out = env.call_static_method(
+            class,
+            &namej,
+            jni_sig!("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+            &[JValue::Object(&m), JValue::Object(&n)],
+        )?;
+        text_of(env, out)
+    })
 }

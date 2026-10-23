@@ -63,6 +63,8 @@ pub struct Palette {
     pub note: Color32,
     pub file: Color32,
     pub otp: Color32,
+    pub card: Color32,
+    pub identity: Color32,
     pub shadow: egui::Shadow,
     /// Dark enough to read the drop message on, light enough to see the window under it.
     pub scrim: Color32,
@@ -86,6 +88,8 @@ const DARK: Palette = Palette {
     note: Color32::from_rgb(0x6f, 0x8f, 0xbf),
     file: Color32::from_rgb(0x9d, 0x8b, 0xd0),
     otp: Color32::from_rgb(0xcf, 0x8b, 0x5e),
+    card: Color32::from_rgb(0xc9, 0xa3, 0x63),
+    identity: Color32::from_rgb(0xc0, 0x8a, 0x8a),
     shadow: egui::Shadow {
         offset: [0, 10],
         blur: 28,
@@ -115,6 +119,8 @@ const LIGHT: Palette = Palette {
     note: Color32::from_rgb(0x2f, 0x55, 0x94),
     file: Color32::from_rgb(0x5b, 0x45, 0x96),
     otp: Color32::from_rgb(0x8a, 0x4f, 0x1f),
+    card: Color32::from_rgb(0x80, 0x5c, 0x14),
+    identity: Color32::from_rgb(0x94, 0x3f, 0x4f),
     shadow: egui::Shadow {
         offset: [0, 6],
         blur: 20,
@@ -153,6 +159,10 @@ pub fn tag_color(kind: crate::vault::model::Kind) -> Color32 {
     let p = palette();
     match kind {
         Kind::Login => ACCENT,
+        Kind::Card => p.card,
+        Kind::Identity => p.identity,
+        // A passkey is a credential of the same family as a login.
+        Kind::Passkey => ACCENT,
         Kind::Note => p.note,
         Kind::File => p.file,
         Kind::Otp => p.otp,
