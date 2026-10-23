@@ -52,6 +52,10 @@ impl App {
             session
         });
         self.shell.activity = Some(std::time::Instant::now());
+        // A box just opened is looked at once, even when it was the last one on
+        // screen before it was locked.
+        self.sync.folder_seen = None;
+        self.sync.folder_resume = false;
         self.screen = Screen::Main;
     }
 
@@ -79,20 +83,45 @@ impl App {
             return;
         }
         let mut pwd = self.auth.unlock_password.clone();
+        let mut code = Zeroizing::new(std::mem::take(&mut self.auth.unlock_code));
         let keyfile_path = self.auth.unlock_keyfile.trim().to_owned();
         self.auth.task(OpKind::Unlock, move || {
             let res = (|| -> Result<OpOutcome, String> {
+                // A printed code is the other door: it wraps the key the password
+                // would have derived, and it is only asked for when one was typed.
+                if !code.trim().is_empty() {
+                    let (c, v) = store::open_with_code(&path, code.trim())?;
+                    return Ok(OpOutcome::Entered(path.clone(), c, v));
+                }
                 let keyfile = open_keyfile(&keyfile_path)?;
                 let kf = keyfile.as_ref().map(|k| k.as_slice());
-                let (c, v) = store::open(&path, &pwd, kf)?;
+                // A box enrolled with a key asks for it here; a box without one never
+                // touches the key, even when it is plugged in.
+                let key = crate::shared::yubikey::Usb;
+                let factor =
+                    crate::shared::yubikey::present().then_some(&key as &dyn store::Factor);
+                let (c, v) = store::open_with(&path, &pwd, kf, factor)?;
                 Ok(OpOutcome::Entered(path.clone(), c, v))
             })();
             pwd.zeroize();
+            code.zeroize();
             res
         });
     }
 
+    /// The agent follows the box: started when the switch is on, handed the keys the
+    /// user allowed, emptied when the box locks or closes.
+    fn pump_agent(&mut self) {
+        let wanted = self
+            .prefs
+            .ssh_agent
+            .then(|| crate::features::agent::socket_path(&self.prefs.ssh_socket));
+        let vault = self.boxes.session.as_ref().map(|s| &s.vault);
+        self.agent.poll(wanted.as_deref(), vault);
+    }
+
     pub fn pump(&mut self) {
+        self.pump_agent();
         let Some(op) = self.auth.op.take() else {
             return;
         };
@@ -181,10 +210,47 @@ impl App {
                     }
                 }
             }
+            Ok(OpOutcome::KeyChanged(path, creds, enrolled)) => {
+                // Same guards as a password change: the derivation ran on a box that
+                // may have left the screen, and rewriting the file under a conflict
+                // would leave the other copy unopenable.
+                if !self.boxes.session.as_ref().is_some_and(|s| s.path == path) {
+                    self.shell
+                        .fail("that box left the screen — the key is unchanged");
+                } else if self.boxes.session.as_ref().is_some_and(|s| s.conflict) {
+                    self.shell
+                        .fail("settle the disk conflict before changing the key");
+                } else {
+                    // The derived key moved, so the seal made from the old one goes.
+                    biometric::forget(&path);
+                    self.keep_for_reader(&path, creds.key.clone());
+                    self.boxes.session.as_mut().unwrap().creds = creds;
+                    if self.boxes.overwrite(&mut self.shell) {
+                        // What the copy beside the box holds is sealed with the key
+                        // this change replaced.
+                        store::forget_stash(&path);
+                        self.shell.set_status(
+                            if enrolled {
+                                "the key is now part of this box — without it the box cannot be opened"
+                            } else {
+                                "this box no longer asks for a key"
+                            },
+                            StatusKind::Saved,
+                        );
+                    }
+                }
+            }
             Ok(OpOutcome::Picked(path)) => {
                 self.auth.unlock_path = path.display().to_string();
                 self.shell.set_status(
                     "box file imported — enter its master password",
+                    StatusKind::Info,
+                );
+            }
+            Ok(OpOutcome::Destination(uri)) => {
+                self.auth.welcome.path = uri;
+                self.shell.set_status(
+                    "destination chosen — create the box",
                     StatusKind::Info,
                 );
             }
@@ -252,6 +318,21 @@ impl App {
             };
             let (creds, vault) = store::open_keyed(&path, key)?;
             Ok(OpOutcome::Entered(path.clone(), creds, vault))
+        });
+    }
+
+    /// Choose where a new box will live, through the system's own picker (Android).
+    #[cfg(target_os = "android")]
+    pub fn create_box_destination(&mut self) {
+        if self.auth.op.is_some() {
+            return;
+        }
+        self.auth.task(OpKind::Pick, || {
+            match crate::shared::android::document_create("application/octet-stream", "vault.pandora") {
+                Ok(Some(uri)) => Ok(OpOutcome::Destination(uri)),
+                Ok(None) => Err("no destination chosen".to_owned()),
+                Err(e) => Err(e),
+            }
         });
     }
 
@@ -421,6 +502,50 @@ impl Auth {
         self.change = form;
     }
 
+    /// Enrol the YubiKey into the box on screen, or drop it from it. The password is
+    /// asked again because the box's key is derived from it; the touch is the key's
+    /// only proof that it is here. The worker does all of it: the derivation and the
+    /// USB exchange both take long enough to freeze a frame.
+    pub fn enrol_key(&mut self, boxes: &Boxes, enrol: bool) {
+        if self.op.is_some() {
+            return;
+        }
+        let Some(path) = boxes.session.as_ref().map(|s| s.path.clone()) else {
+            return;
+        };
+        let mut password = mem::take(&mut self.key.password);
+        let keyfile_path = self.key.keyfile.trim().to_owned();
+        self.task(OpKind::EnrolKey, move || {
+            let result = (|| -> Result<OpOutcome, String> {
+                if password.is_empty() {
+                    return Err(t("enter the master password").to_owned());
+                }
+                let keyfile = open_keyfile(&keyfile_path)?;
+                let keyfile = keyfile.as_ref().map(|key| key.as_slice());
+
+                // One touch, one answer: the open below and the new material use the
+                // same response, so a key waiting for a finger is asked once.
+                let answer = crate::shared::yubikey::respond(&store::challenge(&path)?)?;
+                // Every combination the box could have been written with, tried with
+                // that answer. Succeeding is the proof the password is right.
+                let (opened, _) = store::open_with(&path, &password, keyfile, Some(&Answered(&answer)))
+                    .map_err(|_| {
+                        "the master password is incorrect, this box needs its keyfile or its key, or its file changed"
+                            .to_owned()
+                    })?;
+                let keeps = opened.needs_keyfile().unwrap_or(false);
+                let creds = Credentials::rekey_with(
+                    &password,
+                    keyfile.filter(|_| keeps),
+                    enrol.then_some(answer.as_slice()),
+                )?;
+                Ok(OpOutcome::KeyChanged(path, creds, enrol))
+            })();
+            password.zeroize();
+            result
+        });
+    }
+
     fn task(
         &mut self,
         kind: OpKind,
@@ -431,6 +556,15 @@ impl Auth {
             let _ = tx.send(job());
         });
         self.op = Some(Op { kind, rx });
+    }
+}
+
+/// The answer the key already gave, so a derivation does not touch it a second time.
+struct Answered<'a>(&'a [u8]);
+
+impl store::Factor for Answered<'_> {
+    fn respond(&self, _challenge: &[u8]) -> Result<Vec<u8>, String> {
+        Ok(self.0.to_vec())
     }
 }
 

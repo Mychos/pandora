@@ -112,12 +112,23 @@ pub struct ChangeForm {
     pub erase_remote: bool,
 }
 
+/// The box's key, enrolled or dropped: the master password is asked again because the
+/// key is derived from it, and a keyfile is required again when the box uses one.
+#[derive(Default)]
+pub struct KeyForm {
+    pub password: String,
+    pub keyfile: String,
+}
+
 /// Long operations run on a worker thread (Argon2 takes seconds), so the UI never freezes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OpKind {
     Create,
     Unlock,
     ChangePassword,
+    /// Enrolling the YubiKey, or dropping it from a box. A touch and a derivation,
+    /// both slow enough that the frame cannot wait for them.
+    EnrolKey,
     /// Opening a box with the device's reader. The prompt itself is what takes
     /// the time; the vault then opens with the key the keystore released.
     Biometric,
@@ -128,13 +139,18 @@ pub enum OpKind {
     Pick,
 }
 
+#[allow(clippy::large_enum_variant)] // the vault rides out of the worker once and is taken, not kept
 pub enum OpOutcome {
     Entered(PathBuf, Credentials, Vault),
     /// Carries the file it was rotated on: the vault may have left the screen while the derivation ran.
     /// The flag is the "erase the repo's copy" the form was answered with.
     PasswordChanged(PathBuf, Credentials, bool),
+    /// The box was re-derived with the key mixed in, or without it. The flag is which.
+    KeyChanged(PathBuf, Credentials, bool),
     /// The box file the picker brought in, to be filled into the form.
     Picked(PathBuf),
+    /// A destination uri the picker chose for a new box.
+    Destination(String),
     /// The reader kept the open box's key. Backing out of the prompt is not this:
     /// it is a cancelled operation, and nothing is said about it.
     Kept,
@@ -194,11 +210,16 @@ pub struct Auth {
     pub unlock_password: String,
     /// Optional keyfile path on the unlock screen. Never stored in the box.
     pub unlock_keyfile: String,
+    /// A printed recovery code, when the password is what was lost.
+    pub unlock_code: String,
+    /// The code a box just made, shown once and zeroized when the card is done with it.
+    pub code_shown: Option<zeroize::Zeroizing<String>>,
     /// Boxes opened before, most recent first. Outside any box.
     pub recents: Vec<Recent>,
     pub recent_search: String,
     pub welcome: WelcomeForm,
     pub change: ChangeForm,
+    pub key: KeyForm,
     pub op: Option<Op>,
     pub login: Option<Login>,
 }

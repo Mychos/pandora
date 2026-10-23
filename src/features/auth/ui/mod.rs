@@ -231,6 +231,13 @@ pub fn welcome(ui: &mut egui::Ui, app: &mut App) {
                                     "box file",
                                     true,
                                 );
+                                #[cfg(target_os = "android")]
+                                {
+                                    if theme::secondary_button(ui, &app.icons, Some(theme::Icon::Folder), "Choose destination…").clicked() {
+                                        app.create_box_destination();
+                                    }
+                                    ui.add_space(6.0);
+                                }
                                 ui.add_space(12.0);
                                 let confirm = secret_pair(
                                     ui,
@@ -331,6 +338,13 @@ pub fn unlock(ui: &mut egui::Ui, app: &mut App) {
                                     "box file",
                                     false,
                                 );
+                                #[cfg(target_os = "android")]
+                                {
+                                    if theme::secondary_button(ui, &app.icons, Some(theme::Icon::Folder), "Choose a box file…").clicked() {
+                                        app.import_box();
+                                    }
+                                    ui.add_space(6.0);
+                                }
                                 ui.add_space(12.0);
                                 let resp = secret_field(
                                     ui,
@@ -346,6 +360,14 @@ pub fn unlock(ui: &mut egui::Ui, app: &mut App) {
                                     &mut app.auth.unlock_keyfile,
                                     "keyfile (if this box uses one)",
                                     false,
+                                );
+                                ui.add_space(12.0);
+                                secret_field(
+                                    ui,
+                                    egui::Id::new("unlock-code"),
+                                    &app.icons,
+                                    &mut app.auth.unlock_code,
+                                    "recovery code (when the password is gone)",
                                 );
                                 ui.add_space(18.0);
                                 submit =
@@ -381,13 +403,7 @@ pub fn unlock(ui: &mut egui::Ui, app: &mut App) {
                             }
                         });
                         ui.add_space(18.0);
-                        #[cfg(target_os = "android")]
-                        {
-                            if ui.link(t("Import a box file from this phone")).clicked() {
-                                app.import_box();
-                            }
-                            ui.add_space(6.0);
-                        }
+
                         if ui.link(t("Create a new box")).clicked() {
                             app.screen = Screen::Welcome;
                         }
