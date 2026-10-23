@@ -252,6 +252,13 @@ pub struct App {
     /// The open document preview: the audio player and the rendered PDF page.
     /// Both stop when the entry they belong to is no longer selected.
     pub preview: crate::features::drive::preview::Preview,
+    /// The SSH agent: the box's allowed keys on a socket, empty while locked.
+    pub agent: crate::features::agent::Agent,
+    /// The share dialog: one record sealed out, or one file opened in.
+    pub share: crate::features::share::Share,
+    /// The review's one optional lookup: whether a password is in a public breach.
+    /// Off until the user turns it on, and it never leaves this process while off.
+    pub health: crate::features::health::Check,
     /// The Ctrl+K palette: what was typed and which hit the keyboard is on.
     pub find: crate::features::find::model::Find,
     /// Where a dropped file lands this frame: set by the drive while drawing, consumed
@@ -341,6 +348,9 @@ impl App {
             generate: GenerateForm::default(),
             preview: crate::features::drive::preview::Preview::default(),
             find: crate::features::find::model::Find::default(),
+            agent: crate::features::agent::Agent::default(),
+            share: crate::features::share::Share::default(),
+            health: crate::features::health::Check::default(),
             drop_at: None,
             drop_highlight: None,
             prefs_open: false,
@@ -377,6 +387,8 @@ impl App {
             self.send(false);
         }
         self.shell.take_back_clip();
+        // A recovery code on screen goes with the box: it is a copy of the key.
+        self.auth.code_shown = None;
         self.shell.activity = None;
         self.boxes.session = None; // drops keys + vaults: Zeroizing fields wipe secrets
                                    // The phone's autofill copy goes with the keys, not with the next frame:
@@ -407,6 +419,13 @@ impl App {
         if ctx.input(|i| !i.events.is_empty()) {
             self.shell.activity = Some(std::time::Instant::now());
         }
+        // A phone in a pocket paints no frame, so the first one after the pause is
+        // the last chance to put what is only in memory on disk. The box is not
+        // locked here: it is only written.
+        #[cfg(target_os = "android")]
+        if crate::shared::android::take_paused() {
+            self.boxes.flush_all(&mut self.shell);
+        }
         let state = self.idle.poll();
         if self.boxes.session.is_none() {
             self.idle.set_active(false);
@@ -416,6 +435,7 @@ impl App {
         #[cfg(target_os = "android")]
         if crate::shared::android::take_resumed() {
             self.shell.activity = Some(std::time::Instant::now());
+            self.sync.folder_resume = true;
         }
         #[cfg(not(target_os = "android"))]
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
@@ -659,6 +679,7 @@ impl App {
         self.pump_bridge(&ctx);
         self.pump_sync(&ctx);
         self.pump_update(&ctx);
+        self.health.pump(&ctx);
         // A preview belongs to its entry: closing the modal, changing pane or locking
         // puts the player and the PDF away.
         let watching = self.screen == Screen::Main
@@ -707,6 +728,11 @@ impl App {
         if self.boxes.session.is_some() {
             self.boxes.tick(&mut self.shell);
         }
+        // An editor marks the session on every frame it paints, so the flag a
+        // closed one may have left behind cannot hold the safety write back.
+        if let Some(s) = self.boxes.session.as_mut() {
+            s.editing = false;
+        }
         // What a phone's autofill may offer, kept in step after the tick that can
         // save and the watch that can lock: one call, so no transition forgets it.
         #[cfg(target_os = "android")]
@@ -754,7 +780,7 @@ impl App {
         // The Ctrl+K palette is an overlay: it searches the box on screen.
         crate::features::find::ui::modal(&ctx, self);
         // Last, over whatever screen is behind: a browser asking in can arrive on any.
-        crate::features::bridge::ui::modal(&ctx, self);
+        crate::features::bridge::modal(&ctx, self);
 
         // While files are dragged, cover the viewport (bar included) and outline the
         // hovered folder.
@@ -872,6 +898,9 @@ impl App {
             generate: GenerateForm::default(),
             preview: crate::features::drive::preview::Preview::default(),
             find: crate::features::find::model::Find::default(),
+            agent: crate::features::agent::Agent::default(),
+            share: crate::features::share::Share::default(),
+            health: crate::features::health::Check::default(),
             drop_at: None,
             drop_highlight: None,
             prefs_open: false,
