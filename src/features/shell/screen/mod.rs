@@ -2,9 +2,11 @@ use crate::app::{App, Tab};
 use crate::features::codes::ui as codes;
 use crate::features::drive::ui as drive;
 use crate::features::entries::ui::list as passwords;
+use crate::features::health::ui as review;
 use crate::features::settings::ui as settings;
 use crate::shared::theme;
 use crate::shared::ui::responsive;
+use crate::vault::model::Kind;
 use egui::{Color32, Context, Layout, RichText, Ui};
 
 pub fn main(ui: &mut Ui, app: &mut App) {
@@ -70,13 +72,18 @@ pub fn main(ui: &mut Ui, app: &mut App) {
         .unwrap_or(Tab::Passwords)
     {
         Tab::Passwords => passwords::main(ui, app, compact),
+        Tab::Cards | Tab::Identities => passwords::main(ui, app, compact),
         Tab::Drive => drive::main(ui, app, compact),
         Tab::Codes => codes::main(ui, app, compact),
+        Tab::Health => review::main(ui, app, compact),
         Tab::Settings => settings::run(ui, app, compact),
     }
 
     // The entry's own generator, over the modal the drive opens it in.
     crate::features::generator::ui::modal(&ctx, app);
+
+    // Sealing one record out, or opening one in.
+    crate::features::share::ui::modal(&ctx, app);
 
     // Last, so the confirmation sits above the modal it was opened from.
     crate::features::shell::confirm::modal(&ctx, app);
@@ -147,8 +154,11 @@ fn tabs(ui: &mut Ui, app: &mut App) {
                 ui.add_space(12.0);
                 for (pane, icon, label) in [
                     (Tab::Passwords, theme::Icon::Key, "Passwords"),
+                    (Tab::Cards, theme::Icon::CreditCard, "Cards"),
+                    (Tab::Identities, theme::Icon::User, "Identities"),
                     (Tab::Drive, theme::Icon::Folder, "Files"),
                     (Tab::Codes, theme::Icon::RefreshCw, "Codes"),
+                    (Tab::Health, theme::Icon::History, "Review"),
                 ] {
                     if tab(ui, &app.icons, icon, label, want == pane) {
                         picked = pane;
@@ -269,6 +279,8 @@ fn new_modal(ctx: &Context, app: &mut App) {
     if tab != Tab::Drive {
         match tab {
             Tab::Codes => app.boxes.add_otp(),
+            Tab::Cards => app.boxes.add(Kind::Card),
+            Tab::Identities => app.boxes.add(Kind::Identity),
             _ => app.boxes.add_login(),
         }
         if let Some(s) = app.boxes.session.as_mut() {

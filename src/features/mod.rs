@@ -1,4 +1,6 @@
+pub mod agent;
 pub mod auth;
+pub mod autotype;
 pub mod boxes;
 pub mod bridge;
 pub mod codes;
@@ -6,7 +8,9 @@ pub mod drive;
 pub mod entries;
 pub mod find;
 pub mod generator;
+pub mod health;
 pub mod settings;
+pub mod share;
 pub mod shell;
 pub mod sync;
 pub mod update;

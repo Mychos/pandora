@@ -30,6 +30,12 @@ pub enum Confirm {
     /// Not a delete: the copy beside the box replaces it, and what is on screen
     /// goes into that same copy.
     RestoreVersion,
+    /// Not a delete: a file from another manager is about to be read into this box.
+    /// `format` is what the sniff found, and `None` is the CSV reader's own door.
+    Import {
+        path: std::path::PathBuf,
+        format: Option<crate::shared::utils::import::Format>,
+    },
 }
 
 impl Confirm {
@@ -87,6 +93,7 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
         );
         ui.add_space(16.0);
         let (icon, color, label) = match asked {
+            Confirm::Import { .. } => (theme::Icon::Upload, theme::ACCENT, "Import"),
             Confirm::Export { .. } => (theme::Icon::Download, theme::ACCENT, "Export"),
             Confirm::File { .. } => (theme::Icon::Download, theme::ACCENT, "Save to disk"),
             Confirm::Reload => (theme::Icon::RefreshCw, theme::ACCENT, "Reload"),
@@ -221,6 +228,25 @@ fn describe(app: &App, c: &Confirm) -> (String, String) {
                 ),
             )
         }
+        Confirm::Import { path, format } => {
+            let file = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| t("that file").to_owned());
+            let said = match format {
+                Some(crate::shared::utils::import::Format::Bitwarden) => "Bitwarden",
+                Some(crate::shared::utils::import::Format::OnePux) => "1Password",
+                Some(crate::shared::utils::import::Format::KeePass) => "KeePass",
+                None => t("a CSV file"),
+            };
+            (
+                t("Import?").to_owned(),
+                tf(
+                    "“{file}” is read as {format} and its records land in this box. Nothing already here is replaced, and the file is left where it is.",
+                    &[("file", &file), ("format", &said)],
+                ),
+            )
+        }
     }
 }
 
@@ -252,6 +278,12 @@ fn apply(app: &mut App, c: &Confirm) {
         }
         Confirm::RestoreVersion => {
             app.restore_backup();
+        }
+        Confirm::Import { path, format } => {
+            if let Some(s) = app.boxes.session.as_mut() {
+                s.confirm = None;
+            }
+            crate::features::settings::import::land(app, path, *format);
         }
     }
 }
