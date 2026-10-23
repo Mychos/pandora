@@ -7,6 +7,7 @@ use crate::features::boxes::logic::Secret;
 use crate::features::entries::model::{Axis, View};
 use crate::features::entries::tree;
 use crate::features::entries::ui::editor as entry;
+use crate::features::entries::ui::flat;
 use crate::features::settings::model as prefs;
 use crate::shared::theme;
 use crate::shared::ui::drop::{landing, mark, Landing};
@@ -16,6 +17,18 @@ use crate::vault::model::{Kind, Login, Vault};
 use egui::{Layout, RichText, Sense, Ui};
 
 pub fn main(ui: &mut Ui, app: &mut App, compact: bool) {
+    // A card or an identity is the same pane, with a shape of its own: this one keeps
+    // the generated folders and the drag order for logins.
+    let pane = app
+        .boxes
+        .session
+        .as_ref()
+        .and_then(|s| s.tab.kind())
+        .unwrap_or(Kind::Login);
+    if pane != Kind::Login {
+        flat::main(ui, app, compact, pane);
+        return;
+    }
     if compact {
         egui::CentralPanel::default()
             .frame(theme::pane(true))
@@ -348,6 +361,8 @@ struct Wanted {
     select: Option<String>,
     del: Option<String>,
     copy: Option<(String, Secret)>,
+    /// The record whose share dialog the row's own menu asked for.
+    share: Option<String>,
     /// Where a dragged row would land: (anchor id, below it).
     land: Option<(String, bool)>,
 }
@@ -375,6 +390,9 @@ fn apply(ui: &Ui, app: &mut App, wanted: Wanted) {
     }
     if wanted.new {
         app.boxes.add_login();
+    }
+    if let Some(id) = wanted.share {
+        app.share.send(&id);
     }
     if let Some((id, secret)) = wanted.copy {
         app.copy_secret(ui.ctx(), &id, secret);
@@ -461,6 +479,19 @@ fn rows(
                         ui.close();
                     }
                     ui.separator();
+                    if icons
+                        .labeled(
+                            ui,
+                            theme::Icon::Upload,
+                            15.0,
+                            theme::palette().text,
+                            "Share…",
+                        )
+                        .clicked()
+                    {
+                        wanted.share = Some(id.to_owned());
+                        ui.close();
+                    }
                     if icons
                         .labeled(
                             ui,

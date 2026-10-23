@@ -1,12 +1,14 @@
-//! The login editor, beside the passwords list or over it as a modal.
+//! The record editor, beside its list or over it as a modal: a login, a card and an
+//! identity each draw their own fields, and share the head, the notes and the end.
 
 use crate::app::{App, Confirm, Field, StatusKind};
 use crate::shared::theme;
 use crate::shared::ui::entry as record;
 use crate::shared::ui::responsive;
 
+use crate::features::autotype::DEFAULT;
 use crate::vault::matching::{self, Rule, Uri};
-use crate::vault::model::{now_secs, Kind};
+use crate::vault::model::{now_secs, Field as Custom, Kind};
 use egui::{Layout, RichText, TextEdit, TextStyle, Ui};
 
 pub fn show(ui: &mut Ui, app: &mut App) {
@@ -43,6 +45,7 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
     let max_h = (screen.height() - 48.0).max(200.0);
     let width = 520.0;
 
+    app.boxes.editing(true);
     let open = theme::dialog(ctx, egui::Id::new("entry"), |ui| {
         theme::width(ui, width);
         ui.set_max_height(max_h);
@@ -70,6 +73,8 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
         if let Some(s) = app.boxes.session.as_mut() {
             s.selected = None;
         }
+        app.boxes.editing(false);
+        app.boxes.flush(&mut app.shell);
     }
 }
 
@@ -170,18 +175,29 @@ fn picker(
     })
 }
 
-/// The login's face: its icon, the picker, and its name, with the dialog's cross
-/// after them when this is the modal's header. Returns `(closed, changed)`.
+/// The record's face: its icon, the picker when its shape carries a brand, and its
+/// name, with the dialog's cross after them when this is the modal's header.
+/// Returns `(closed, changed)`.
 fn face(ui: &mut Ui, app: &mut App, sel: &str, close: bool) -> (bool, bool) {
     let icons = &app.icons;
     let Some(s) = app.boxes.session.as_mut() else {
         return (false, false);
     };
-    let Some(it) = s.vault.logins.iter_mut().find(|i| i.id == sel) else {
+    let Some(mut it) = s.vault.any_mut(sel) else {
         return (false, false);
     };
-    let chosen = it.icon.as_deref().and_then(theme::Brand::from_slug);
-    let brand = theme::brand_of(it);
+    let kind = it.kind();
+    let branded = matches!(
+        it,
+        crate::vault::model::AnyMut::Login(_) | crate::vault::model::AnyMut::Card(_)
+    );
+    let brand = match &it {
+        crate::vault::model::AnyMut::Login(login) => theme::brand_of(login),
+        crate::vault::model::AnyMut::Card(card) => {
+            card.icon.as_deref().and_then(theme::Brand::from_slug)
+        }
+        _ => None,
+    };
     let mut picked = None;
     let (closed, mut changed, _) = theme::record_head(
         ui,
@@ -190,9 +206,9 @@ fn face(ui: &mut Ui, app: &mut App, sel: &str, close: bool) -> (bool, bool) {
         |ui| {
             if let Some(img) = icons.glyph(
                 brand,
-                theme::kind_icon(Kind::Login),
+                theme::kind_icon(kind),
                 responsive::grow(ui.ctx(), 16.0),
-                theme::ACCENT,
+                theme::tag_color(kind),
             ) {
                 let side = responsive::target(ui.ctx());
                 let resp = ui
@@ -202,32 +218,36 @@ fn face(ui: &mut Ui, app: &mut App, sel: &str, close: bool) -> (bool, bool) {
                             .small(),
                     )
                     .on_hover_text("choose icon");
-                picked = picker(ui, icons, resp, chosen);
+                if branded {
+                    picked = picker(ui, icons, resp, brand);
+                }
             }
         },
-        &mut it.name,
+        it.name_mut(),
         "name",
         |_| {},
     );
     let closed = if close { closed } else { false };
     if let Some(p) = picked {
-        match p {
-            theme::Pick::Set(b) => {
-                it.icon = Some(b.slug().to_owned());
-                changed = true;
+        if let Some(icon) = it.icon_mut() {
+            match p {
+                theme::Pick::Set(b) => {
+                    *icon = Some(b.slug().to_owned());
+                    changed = true;
+                }
+                theme::Pick::Clear => {
+                    *icon = None;
+                    changed = true;
+                }
+                theme::Pick::None => {}
             }
-            theme::Pick::Clear => {
-                it.icon = None;
-                changed = true;
-            }
-            theme::Pick::None => {}
         }
     }
     if changed {
         it.touched(now_secs());
-        // `s` is still borrowed via `it`; the borrow ends here.
     }
-    let _ = s;
+    // `it` borrows the session; its last use is above, so the mark below is free to
+    // take the session again.
     if changed {
         if let Some(s) = app.boxes.session.as_mut() {
             s.mark_dirty();
@@ -237,7 +257,25 @@ fn face(ui: &mut Ui, app: &mut App, sel: &str, close: bool) -> (bool, bool) {
     (closed, changed)
 }
 
+/// The fields a shape draws between the head and the notes, and the end every shape
+/// shares. One dispatch, three bodies: a shape is a form, not a pane.
 fn body(ui: &mut Ui, app: &mut App, sel: &str) {
+    let kind = app
+        .boxes
+        .session
+        .as_ref()
+        .and_then(|s| s.vault.any(sel))
+        .map(|it| it.kind());
+    match kind {
+        Some(Kind::Login) => body_login(ui, app, sel),
+        Some(Kind::Card) => body_card(ui, app, sel),
+        Some(Kind::Identity) => body_identity(ui, app, sel),
+        Some(Kind::Passkey) => body_passkey(ui, app, sel),
+        _ => {}
+    }
+}
+
+fn body_login(ui: &mut Ui, app: &mut App, sel: &str) {
     let icons = &app.icons;
     let Some(s) = app.boxes.session.as_mut() else {
         return;
@@ -251,6 +289,9 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
 
     let it = s.vault.logins.iter_mut().find(|i| i.id == sel);
     let Some(it) = it else { return };
+    // The field is bound in place, so what it displaces is only readable before the
+    // edit: copied here, kept when the edit reports itself.
+    let mut previous = it.password.clone();
 
     let m = egui::Margin::symmetric(10, 7);
     changed |= ui
@@ -381,6 +422,9 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
                 .margin(m),
         );
         changed |= field.changed();
+        if field.changed() {
+            it.remember(std::mem::take(&mut previous));
+        }
         let (toggle, copy) = record::secret_actions(ui, icons, show_secret);
         if toggle {
             show_secret = !show_secret;
@@ -398,16 +442,317 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
     });
 
     ui.add_space(14.0);
+    let (notes_changed, notes_copied) = notes(
+        ui,
+        &mut app.shell,
+        icons,
+        sel,
+        &mut it.notes,
+        &mut show_notes,
+    );
+    changed |= notes_changed;
+    copied |= notes_copied;
+
+    changed |= fields(ui, icons, &mut it.fields);
+
+    ui.add_space(12.0);
+    ui.label(
+        RichText::new(crate::shared::i18n::t("AUTO-TYPE"))
+            .small()
+            .color(theme::palette().muted),
+    );
+    ui.add_space(4.0);
+    changed |= ui
+        .add(
+            TextEdit::singleline(&mut it.sequence)
+                .hint_text(DEFAULT)
+                .desired_width(f32::INFINITY)
+                .margin(m),
+        )
+        .changed();
+    ui.add_space(2.0);
+    theme::hint(
+        ui,
+        crate::shared::i18n::t("{USERNAME}, {PASSWORD}, {OTP}, {ENTER}, {TAB}, {WAIT 250} — Ctrl+T types it into the focused window"),
+    );
+
+    // The passkeys this login's sites answer for, read before the list is borrowed.
+    let mine: Vec<String> = s
+        .vault
+        .passkeys
+        .iter()
+        .filter(|passkey| matching::claims(it, &passkey.rp_id))
+        .map(|it| it.id.clone())
+        .collect();
+    if !mine.is_empty() {
+        changed |= passkeys(ui, icons, &mut s.vault.passkeys, &mine, &mut s.confirm);
+    }
+
+    tail(
+        ui,
+        app,
+        sel,
+        changed,
+        &[
+            (Field::Password, show_secret, secret_was),
+            (Field::Notes, show_notes, notes_was),
+        ],
+    );
+
+    if copied {
+        app.shell
+            .set_status("copied to clipboard", StatusKind::Saved);
+    }
+}
+
+fn body_card(ui: &mut Ui, app: &mut App, sel: &str) {
+    let icons = &app.icons;
+    let Some(s) = app.boxes.session.as_mut() else {
+        return;
+    };
+    let mut changed = false;
+    let mut copied = false;
+    let mut show_number = s.shown(sel, Field::Password);
+    let number_was = show_number;
+    let mut show_notes = s.shown(sel, Field::Notes);
+    let notes_was = show_notes;
+
+    let Some(it) = s.vault.cards.iter_mut().find(|i| i.id == sel) else {
+        return;
+    };
+    let m = egui::Margin::symmetric(10, 7);
+
+    ui.horizontal(|ui| {
+        let w = record::width(ui, 3, 90.0);
+        let field = ui.add(
+            TextEdit::singleline(&mut *it.number)
+                .password(!show_number)
+                .font(TextStyle::Monospace)
+                .hint_text(crate::shared::i18n::t("card number"))
+                .desired_width(w)
+                .margin(m),
+        );
+        changed |= field.changed();
+        let (toggle, copy) = record::secret_actions(ui, icons, show_number);
+        if toggle {
+            show_number = !show_number;
+        }
+        if copy {
+            app.shell.copy_text(ui.ctx(), it.number.as_str());
+            copied = true;
+        }
+    });
+
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        let w = record::width(ui, 1, 90.0);
+        changed |= ui
+            .add(
+                TextEdit::singleline(&mut it.holder)
+                    .hint_text(crate::shared::i18n::t("cardholder"))
+                    .desired_width(w)
+                    .margin(m),
+            )
+            .changed();
+        changed |= ui
+            .add(
+                TextEdit::singleline(&mut it.expiry)
+                    .hint_text(crate::shared::i18n::t("MM/YY"))
+                    .desired_width(84.0)
+                    .margin(m),
+            )
+            .changed();
+    });
+
+    ui.add_space(14.0);
+    let (notes_changed, notes_copied) = notes(
+        ui,
+        &mut app.shell,
+        icons,
+        sel,
+        &mut it.notes,
+        &mut show_notes,
+    );
+    changed |= notes_changed;
+    copied |= notes_copied;
+    changed |= fields(ui, icons, &mut it.fields);
+
+    tail(
+        ui,
+        app,
+        sel,
+        changed,
+        &[
+            (Field::Password, show_number, number_was),
+            (Field::Notes, show_notes, notes_was),
+        ],
+    );
+
+    if copied {
+        app.shell
+            .set_status("copied to clipboard", StatusKind::Saved);
+    }
+}
+
+fn body_identity(ui: &mut Ui, app: &mut App, sel: &str) {
+    let icons = &app.icons;
+    let Some(s) = app.boxes.session.as_mut() else {
+        return;
+    };
+    let mut changed = false;
+    let mut copied = false;
+    let mut show_notes = s.shown(sel, Field::Notes);
+    let notes_was = show_notes;
+
+    let Some(it) = s.vault.identities.iter_mut().find(|i| i.id == sel) else {
+        return;
+    };
+
+    let (notes_changed, notes_copied) = notes(
+        ui,
+        &mut app.shell,
+        icons,
+        sel,
+        &mut it.notes,
+        &mut show_notes,
+    );
+    changed |= notes_changed;
+    copied |= notes_copied;
+    changed |= fields(ui, icons, &mut it.fields);
+
+    tail(
+        ui,
+        app,
+        sel,
+        changed,
+        &[(Field::Notes, show_notes, notes_was)],
+    );
+
+    if copied {
+        app.shell
+            .set_status("copied to clipboard", StatusKind::Saved);
+    }
+}
+
+/// A passkey as the app shows it: what it answers for, what it signs with, and the
+/// two things the user may do here — rename it in the head, delete it through the
+/// trash. The key itself is never drawn, printed or copied.
+fn body_passkey(ui: &mut Ui, app: &mut App, sel: &str) {
+    let Some(s) = app.boxes.session.as_mut() else {
+        return;
+    };
+    let Some(it) = s.vault.passkeys.iter().find(|it| it.id == sel) else {
+        return;
+    };
+    let site = it.rp_id.clone();
+    let alg = alg_label(it.alg);
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(crate::shared::i18n::tf(
+            "answers for {site}",
+            &[("site", &site)],
+        ))
+        .color(theme::palette().text),
+    );
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(crate::shared::i18n::tf(
+            "signed with {alg}, and used from the extension on Chrome",
+            &[("alg", &alg)],
+        ))
+        .small()
+        .color(theme::palette().muted),
+    );
+    tail(ui, app, sel, false, &[]);
+}
+
+/// The name a COSE algorithm goes by on screen.
+fn alg_label(alg: i32) -> String {
+    match alg {
+        -8 => "EdDSA".to_owned(),
+        -7 => "ES256".to_owned(),
+        other => format!("COSE {other}"),
+    }
+}
+
+/// The passkeys that answer for a login's sites: renamed in place, deleted through the
+/// trash like any other record. `mine` is the ids, read before the list is borrowed.
+fn passkeys(
+    ui: &mut Ui,
+    icons: &theme::Icons,
+    list: &mut [crate::vault::model::Passkey],
+    mine: &[String],
+    confirm: &mut Option<Confirm>,
+) -> bool {
+    let mut changed = false;
+    ui.add_space(12.0);
+    ui.label(
+        RichText::new(crate::shared::i18n::t("PASSKEYS"))
+            .small()
+            .color(theme::palette().muted),
+    );
+    ui.add_space(4.0);
+    for id in mine {
+        let Some(it) = list.iter_mut().find(|it| &it.id == id) else {
+            continue;
+        };
+        ui.horizontal(|ui| {
+            let w = record::width(ui, 2, 80.0);
+            changed |= ui
+                .add(
+                    TextEdit::singleline(&mut it.name)
+                        .hint_text(crate::shared::i18n::t("name"))
+                        .desired_width(w),
+                )
+                .changed();
+            ui.label(
+                RichText::new(format!("{} · {}", alg_label(it.alg), it.rp_id))
+                    .small()
+                    .color(theme::palette().muted),
+            );
+            if icons
+                .button(
+                    ui,
+                    theme::Icon::Trash,
+                    13.0,
+                    theme::palette().error,
+                    "Delete",
+                )
+                .clicked()
+            {
+                *confirm = Some(Confirm::Entry(it.id.clone()));
+            }
+        });
+    }
+    if changed {
+        for id in mine {
+            if let Some(it) = list.iter_mut().find(|it| &it.id == id) {
+                it.touched(now_secs());
+            }
+        }
+    }
+    changed
+}
+
+/// The free text every shape carries. Returns `(changed, copied)`.
+fn notes(
+    ui: &mut Ui,
+    shell: &mut crate::features::shell::model::Shell,
+    icons: &theme::Icons,
+    _sel: &str,
+    text: &mut zeroize::Zeroizing<String>,
+    shown: &mut bool,
+) -> (bool, bool) {
     let (field, copy) = record::secret(
         ui,
         icons,
-        &mut show_notes,
+        shown,
         2,
         80.0,
         egui::Align::Center,
         |ui, w, shown| {
             ui.add(
-                TextEdit::multiline(&mut *it.notes)
+                TextEdit::multiline(&mut **text)
                     .password(!shown)
                     .desired_rows(7)
                     .hint_text(crate::shared::i18n::t("notes…"))
@@ -416,34 +761,133 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
             )
         },
     );
-    changed |= field.changed();
     if copy {
-        app.shell.copy_text(ui.ctx(), it.notes.as_str());
-        copied = true;
+        shell.copy_text(ui.ctx(), text.as_str());
     }
+    (field.changed(), copy)
+}
 
+/// The rows a record carries beyond its own shape: a label, a value, and whether the
+/// value is a secret. Returns whether anything about them changed.
+fn fields(ui: &mut Ui, icons: &theme::Icons, list: &mut Vec<Custom>) -> bool {
+    let mut changed = false;
+    let mut drop: Option<usize> = None;
+    ui.add_space(12.0);
+    ui.label(
+        RichText::new(crate::shared::i18n::t("FIELDS"))
+            .small()
+            .color(theme::palette().muted),
+    );
+    ui.add_space(4.0);
+    egui::Grid::new(ui.id().with("fields"))
+        .num_columns(4)
+        .spacing(egui::vec2(6.0, 6.0))
+        .show(ui, |ui| {
+            for (index, field) in list.iter_mut().enumerate() {
+                changed |= ui
+                    .add(
+                        TextEdit::singleline(&mut field.label)
+                            .hint_text(crate::shared::i18n::t("label"))
+                            .desired_width(104.0),
+                    )
+                    .changed();
+                let id = ui.id().with(("field-shown", index));
+                let shown = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+                changed |= ui
+                    .add(
+                        TextEdit::singleline(&mut *field.value)
+                            .password(field.secret && !shown)
+                            .hint_text(crate::shared::i18n::t("value")),
+                    )
+                    .changed();
+                ui.horizontal(|ui| {
+                    if field.secret
+                        && icons
+                            .button(
+                                ui,
+                                if shown {
+                                    theme::Icon::EyeOff
+                                } else {
+                                    theme::Icon::Eye
+                                },
+                                13.0,
+                                theme::palette().muted,
+                                if shown { "hide" } else { "show" },
+                            )
+                            .clicked()
+                    {
+                        ui.data_mut(|d| d.insert_temp(id, !shown));
+                    }
+                    if icons
+                        .button(
+                            ui,
+                            if field.secret {
+                                theme::Icon::LockKeyhole
+                            } else {
+                                theme::Icon::LockKeyholeOpen
+                            },
+                            13.0,
+                            if field.secret {
+                                theme::ACCENT
+                            } else {
+                                theme::palette().muted
+                            },
+                            "secret",
+                        )
+                        .clicked()
+                    {
+                        field.secret = !field.secret;
+                        changed = true;
+                    }
+                    if icons
+                        .button(
+                            ui,
+                            theme::Icon::Trash,
+                            13.0,
+                            theme::palette().error,
+                            "Delete",
+                        )
+                        .clicked()
+                    {
+                        drop = Some(index);
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    if let Some(index) = drop {
+        list.remove(index);
+        changed = true;
+    }
+    if icons
+        .labeled(ui, theme::Icon::Plus, 13.0, theme::ACCENT, "add field")
+        .clicked()
+    {
+        list.push(Custom::new("", "", false));
+        changed = true;
+    }
+    changed
+}
+
+/// The end every shape shares: the delete mark, the save, and the eye's memory.
+fn tail(ui: &mut Ui, app: &mut App, sel: &str, changed: bool, flags: &[(Field, bool, bool)]) {
+    let icons = &app.icons;
+    let Some(s) = app.boxes.session.as_mut() else {
+        return;
+    };
     if record::delete(ui, icons, 28.0) {
         s.confirm = Some(Confirm::Entry(sel.to_owned()));
     }
-
     if changed {
-        if let Some(it) = s.vault.logins.iter_mut().find(|i| i.id == sel) {
+        if let Some(mut it) = s.vault.any_mut(sel) {
             it.touched(now_secs());
         }
         s.mark_dirty();
     }
-    for (field, show, was) in [
-        (Field::Password, show_secret, secret_was),
-        (Field::Notes, show_notes, notes_was),
-    ] {
+    for (field, show, was) in flags {
         if show != was {
-            s.show(sel, field, show);
+            s.show(sel, *field, *show);
         }
-    }
-
-    if copied {
-        app.shell
-            .set_status("copied to clipboard", StatusKind::Saved);
     }
 }
 
@@ -469,12 +913,15 @@ pub(crate) mod tests {
             parked: false,
             parked_seq: 0,
             dirty: false,
+            immediate: false,
+            editing: false,
             last_edit: None,
             last_mtime: None,
             conflict: false,
             ignore_mtime: None,
             remote: None,
             baseline: None,
+            saved: None,
             push_at: None,
             behind: false,
             selected,
@@ -501,11 +948,16 @@ pub(crate) mod tests {
 
     /// One login painted through the editor twice, the second frame settled.
     pub(crate) fn painted(item: Login) -> Vec<ClippedShape> {
-        let ctx = egui::Context::default();
-        theme::apply(&ctx);
         let id = item.id.clone();
         let mut vault = Vault::new("Test");
         vault.logins = vec![item];
+        painted_with(vault, id)
+    }
+
+    /// Any box painted through the editor, for the records that need their neighbours.
+    pub(crate) fn painted_with(vault: Vault, id: String) -> Vec<ClippedShape> {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
         let mut app = App::blank(&ctx);
         app.screen = Screen::Main;
         app.boxes.session = Some(session(vault, Some(id.clone())));
@@ -519,6 +971,96 @@ pub(crate) mod tests {
             face(ui, &mut app, &id, false);
             body(ui, &mut app, &id);
         })
+    }
+
+    /// One card painted through the editor twice, the second frame settled.
+    pub(crate) fn painted_card(item: crate::vault::model::Card) -> Vec<ClippedShape> {
+        let id = item.id.clone();
+        let mut vault = Vault::new("Test");
+        vault.cards = vec![item];
+        painted_with(vault, id)
+    }
+
+    /// One passkey painted the way the pane shows it.
+    pub(crate) fn painted_passkey(item: crate::vault::model::Passkey) -> Vec<ClippedShape> {
+        let id = item.id.clone();
+        let mut vault = Vault::new("Test");
+        vault.passkeys = vec![item];
+        painted_with(vault, id)
+    }
+
+    /// Every string a frame painted.
+    pub(crate) fn words(shapes: &[ClippedShape]) -> Vec<String> {
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A passkey is drawn as what it answers for and what signs, never as a key.
+    #[test]
+    fn a_passkey_says_what_it_answers_for() {
+        let mut item = crate::vault::model::Passkey::new(1, "example.com");
+        item.id = "pk".to_owned();
+        item.name = "Example".to_owned();
+        let said = words(&painted_passkey(item));
+        for line in [
+            "answers for example.com",
+            "signed with ES256, and used from the extension on Chrome",
+        ] {
+            assert!(
+                said.iter().any(|word| word == line),
+                "{line:?} is missing: {said:?}"
+            );
+        }
+    }
+
+    /// The login a passkey belongs to lists it, by the site they share, and lets it be
+    /// The section draws only the ids it is given — the login's own sites — and each
+    /// row is the name, editable, with the algorithm and the site beside it.
+    #[test]
+    fn the_passkey_section_draws_only_the_ids_it_is_given() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut list = vec![
+            crate::vault::model::Passkey::new(1, "bank.example"),
+            crate::vault::model::Passkey::new(1, "other.example"),
+        ];
+        list[0].id = "mine".to_owned();
+        list[0].name = "ana".to_owned();
+        list[1].id = "not-mine".to_owned();
+        list[1].name = "someone else".to_owned();
+        let mine = ["mine".to_owned()];
+        let mut confirm: Option<Confirm> = None;
+        let shapes = shot::frame(&ctx, egui::vec2(900.0, 300.0), Vec::new(), |ui| {
+            let app = App::blank(&ctx);
+            passkeys(ui, &app.icons, &mut list, &mine, &mut confirm);
+        });
+        let said = words(&shapes);
+        assert!(said.iter().any(|word| word == "PASSKEYS"), "{said:?}");
+        assert!(said.iter().any(|word| word == "ana"), "the name is drawn");
+        assert!(
+            !said.iter().any(|word| word == "someone else"),
+            "another site's passkey stays out: {said:?}"
+        );
+    }
+
+    #[test]
+    fn a_card_draws_its_own_fields_beside_the_shared_ones() {
+        let mut card = crate::vault::model::Card::new(1);
+        card.id = "card".to_owned();
+        card.fields
+            .push(crate::vault::model::Field::new("PIN", "", true));
+        let said = words(&painted_card(card));
+        for hint in ["card number", "cardholder", "MM/YY", "notes…", "value"] {
+            assert!(
+                said.iter().any(|word| word == hint),
+                "{hint:?} is missing: {said:?}"
+            );
+        }
     }
 
     /// The field under the glyphs reading `text`: the smallest box around them,
