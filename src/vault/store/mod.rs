@@ -108,9 +108,20 @@ pub fn data_dir() -> PathBuf {
     if let Some(dir) = DATA_DIR.get() {
         return dir.clone();
     }
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("pandora")
+    // The suite saves prefs, recents and working copies through this path in
+    // test builds. On the machine's own dir that write lands on the settings and
+    // the sources of whoever runs it, so a test build gets a dir of its own —
+    // left for the OS to reap rather than removed under a running test.
+    #[cfg(test)]
+    {
+        std::env::temp_dir().join(format!("pandora-tests-{}", std::process::id()))
+    }
+    #[cfg(not(test))]
+    {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("pandora")
+    }
 }
 
 pub fn default_path() -> PathBuf {

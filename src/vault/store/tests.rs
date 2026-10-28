@@ -79,6 +79,19 @@ fn header(path: &Path) -> V4Header {
 }
 
 #[test]
+fn a_test_build_keeps_its_files_out_of_the_real_data_dir() {
+    let ours = data_dir();
+    assert!(ours.starts_with(std::env::temp_dir()), "{ours:?}");
+    let real = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("pandora");
+    assert_ne!(
+        ours, real,
+        "the suite must not write the app's own prefs and sources"
+    );
+}
+
+#[test]
 fn a_source_dir_is_derived_and_stays_inside() {
     let dir = source_dir("github", "octocat/boxes");
     assert_eq!(dir.parent(), Some(data_dir().join("sources").as_path()));
