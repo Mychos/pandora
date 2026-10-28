@@ -74,6 +74,11 @@ done
 install -m 0644 assets/app/linux/pandora.desktop "$appdir/pandora.desktop"
 install -m 0644 assets/app/linux/pandora.desktop \
   "$appdir/usr/share/applications/pandora.desktop"
+# Gearlever and the desktop integration read the version out of the entry. Without
+# it the menu row is called after a hash of the file instead of "Pandora [0.2.0]".
+for entry in "$appdir/pandora.desktop" "$appdir/usr/share/applications/pandora.desktop";
+  do sed -i "/^Name=/a X-AppImage-Version=$version" "$entry"
+done
 # The desktop reads the size it needs from hicolor; a single 256 image is
 # what makes a taskbar icon look soft. The root icon stays 512 for the AppImage
 # integration that only looks at `.DirIcon`.
