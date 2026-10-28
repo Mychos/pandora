@@ -392,3 +392,12 @@ well-known one from the RustCrypto crates, chosen for what it is.
 The project is pre-1.0 and single-track: fixes land on `main`. This version only
 reads and writes v4; an older container is refused rather than migrated. The
 format is not frozen yet, so a new persisted field is always optional.
+
+## Audit checklist (for an external review)
+
+- Verify Argon2id parameters and that derivation never runs on the UI thread.
+- Verify chunk AAD binding and that chunks cannot be replayed across records.
+- Verify atomic writes, fsync and `.bak` handling.
+- Verify bridge protocol never returns a password in listing/match.
+- Verify autofill copy lifetime and lock behavior.
+- Verify update download hash verification and install flow.
