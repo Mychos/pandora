@@ -89,6 +89,15 @@ pub struct Prefs {
     /// point of a manager on a phone. Off keeps the box to this window.
     #[serde(skip_serializing_if = "is_true")]
     pub autofill: bool,
+    /// Whether the window may be recorded by a screen capture. On by default, so a
+    /// screenshot taken before the switch is ever touched still shows the app; the
+    /// switch in Privacy keeps it out of a screen share or a recording.
+    #[serde(skip_serializing_if = "is_true")]
+    pub allow_capture: bool,
+    /// Whether a window without focus shows only the logo. On by default: a screen
+    /// share or a look over a shoulder is most likely while the user is elsewhere.
+    #[serde(skip_serializing_if = "is_true")]
+    pub hide_unfocused: bool,
     /// How the passwords pane last drew a box, and what it grouped by, so a fresh
     /// unlock lands where the user left off instead of asking again.
     pub view: View,
@@ -208,6 +217,8 @@ impl Default for Prefs {
             unlock_from_browser: false,
             browsers: Vec::new(),
             autofill: true,
+            allow_capture: true,
+            hide_unfocused: true,
             view: View::List,
             axis: Axis::Target,
             lang: Lang::En,
@@ -754,6 +765,78 @@ mod tests {
             "an explicit no is written down"
         );
         assert!(!read(&dir).remember, "and it is what comes back");
+    }
+
+    /// The curtain is on unless the user says otherwise, so an older file reads as
+    /// on, and only an explicit "no" is written down.
+    #[test]
+    fn hiding_an_unfocused_window_is_on_unless_it_is_turned_off() {
+        let dir = tmp("unfocused");
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("prefs.json"), br#"{"lock_after":30}"#).unwrap();
+        assert!(read(&dir).hide_unfocused, "an older file hides on blur");
+
+        write(&dir, &Prefs::default());
+        let written = fs::read(dir.join("prefs.json")).unwrap();
+        assert!(
+            !String::from_utf8(written)
+                .unwrap()
+                .contains("hide_unfocused"),
+            "the default is silence, which is now yes"
+        );
+
+        write(
+            &dir,
+            &Prefs {
+                hide_unfocused: false,
+                ..Default::default()
+            },
+        );
+        let written = fs::read(dir.join("prefs.json")).unwrap();
+        assert!(
+            String::from_utf8(written)
+                .unwrap()
+                .contains("\"hide_unfocused\":false"),
+            "an explicit no is written down"
+        );
+        assert!(!read(&dir).hide_unfocused, "and it is what comes back");
+    }
+
+    /// The window is recordable unless the user says otherwise, so an older file
+    /// reads as on, and only an explicit "no" is written down.
+    #[test]
+    fn capturing_the_window_is_on_unless_it_is_turned_off() {
+        let dir = tmp("capture");
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("prefs.json"), br#"{"lock_after":30}"#).unwrap();
+        assert!(read(&dir).allow_capture, "an older file allows captures");
+
+        write(&dir, &Prefs::default());
+        let written = fs::read(dir.join("prefs.json")).unwrap();
+        assert!(
+            !String::from_utf8(written)
+                .unwrap()
+                .contains("allow_capture"),
+            "the default is silence, which is now yes"
+        );
+
+        write(
+            &dir,
+            &Prefs {
+                allow_capture: false,
+                ..Default::default()
+            },
+        );
+        let written = fs::read(dir.join("prefs.json")).unwrap();
+        assert!(
+            String::from_utf8(written)
+                .unwrap()
+                .contains("\"allow_capture\":false"),
+            "an explicit no is written down"
+        );
+        assert!(!read(&dir).allow_capture, "and it is what comes back");
     }
 
     /// The pane's last view and grouping ride along, so a fresh unlock lands where

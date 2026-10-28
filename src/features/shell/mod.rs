@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod confirm;
+pub mod cover;
 pub mod model;
 pub mod pick;
 pub mod screen;

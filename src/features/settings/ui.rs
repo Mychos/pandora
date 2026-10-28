@@ -1041,6 +1041,11 @@ pub fn general(ctx: &egui::Context, app: &mut App) {
         appearance(ui, app);
         ui.add_space(ACT);
         languages(ui, app);
+        #[cfg(not(target_os = "android"))]
+        {
+            ui.add_space(ACT);
+            privacy(ui, app);
+        }
         closed
     });
     if !open {
@@ -1164,6 +1169,68 @@ fn scheme_tile(
         egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, scheme.name())
     });
     resp
+}
+
+/// What the window shows while nobody is looking at it, and — where the system
+/// has the API — whether a capture can pick it up at all. Linux has neither X11
+/// nor Wayland support for the second, so only the curtain is offered there.
+#[cfg(not(target_os = "android"))]
+fn privacy(ui: &mut egui::Ui, app: &mut App) {
+    let supported = crate::shared::capture::supported();
+    card(ui, "Privacy", |ui| {
+        if supported {
+            let mut on = app.prefs.allow_capture;
+            if theme::check(ui, &mut on, "Allow screen capture").changed() {
+                app.prefs.allow_capture = on;
+                prefs::save(&app.prefs);
+                app.capture();
+            }
+            ui.add_space(HINT);
+            balance::label(
+                ui,
+                RichText::new(t(capture_state(on)))
+                    .small()
+                    .color(theme::palette().muted),
+            );
+            ui.add_space(ROW);
+        }
+        let mut hide = app.prefs.hide_unfocused;
+        if theme::check(ui, &mut hide, "Hide this window when it loses focus").changed() {
+            app.prefs.hide_unfocused = hide;
+            prefs::save(&app.prefs);
+        }
+        ui.add_space(HINT);
+        balance::label(
+            ui,
+            RichText::new(t(cover_state(hide)))
+                .small()
+                .color(theme::palette().muted),
+        );
+        if !supported {
+            ui.add_space(HINT);
+            theme::hint(ui, t("this system cannot block captures"));
+        }
+    });
+}
+
+/// What a tick alone cannot say: whether the window is in the next capture.
+#[cfg(not(target_os = "android"))]
+fn capture_state(on: bool) -> &'static str {
+    if on {
+        t("on — screenshots, recordings and shares include this window")
+    } else {
+        t("off — this window is left out of screenshots, recordings and shares")
+    }
+}
+
+/// What the curtain does, in one line.
+#[cfg(not(target_os = "android"))]
+fn cover_state(on: bool) -> &'static str {
+    if on {
+        t("on — only the logo shows while another window has focus")
+    } else {
+        t("off — the window stays visible while another window has focus")
+    }
 }
 
 /// The languages, one row each.
@@ -1849,7 +1916,9 @@ mod tests {
             );
         }
 
-        let shapes = app_settings((420.0, 620.0));
+        // The window the app opens with: the dialog holds four cards now, and a
+        // dialog does not scroll, so it is measured at the size it is given there.
+        let shapes = app_settings((420.0, 700.0));
         let drawn = shot::words(&shapes);
         for want in [
             "GENERAL SETTINGS",
@@ -1865,6 +1934,20 @@ mod tests {
                 "missing {want}: {drawn:?}"
             );
         }
+        // The curtain and, where the system has the API, the capture switch are
+        // the app's own promises, not the box's.
+        #[cfg(not(target_os = "android"))]
+        for want in ["PRIVACY", "Hide this window when it loses focus"] {
+            assert!(
+                drawn.iter().any(|word| word == want),
+                "missing {want}: {drawn:?}"
+            );
+        }
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        assert!(
+            drawn.iter().any(|word| word == "Allow screen capture"),
+            "missing the capture switch: {drawn:?}"
+        );
         // Each tile is painted in the scheme it offers, not the one in use: the
         // preview is the choice, so a wrong palette is the one bug that would
         // still read as a working switch.
@@ -1888,7 +1971,7 @@ mod tests {
                 rect.min.x >= -1.0
                     && rect.max.x <= 421.0
                     && rect.min.y >= -1.0
-                    && rect.max.y <= 621.0,
+                    && rect.max.y <= 701.0,
                 "the app's settings stay in their window: {rect:?}"
             );
         }

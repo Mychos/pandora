@@ -127,6 +127,8 @@ yubikey-hmac-otp = "0.10"
 # and egui's own fonts.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = "0.36"
+# The window handle the OS takes to keep the app out of a screen capture.
+raw-window-handle = "0.6"
 rfd = "0.17.2"
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 # The GitHub token, when the user asks to keep it, goes to the platform's own
@@ -163,10 +165,18 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_StationsAndDesktops",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 system-idle-time = { version = "1.0.4", default-features = false }
+# The window's sharing type, which is what keeps it out of a capture. No `all`:
+# the view and its window are the only AppKit objects reached for here.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSView",
+    "NSWindow",
+] }
 
 # The activity, its JVM handle and the keystore. `game-activity` is the same
 # backend `eframe` asks winit for. glow and not wgpu: measured on the Mi 9T the

@@ -290,6 +290,9 @@ pub struct App {
     /// Whether this process draws through wgpu; the swapchain knob is a wgpu API.
     #[cfg(not(target_os = "android"))]
     wgpu: bool,
+    /// What the system needs to keep this window out of a screen capture.
+    #[cfg(not(target_os = "android"))]
+    handle: Option<raw_window_handle::RawWindowHandle>,
     nav: Nav,
 }
 
@@ -336,6 +339,11 @@ impl App {
             ..Auth::default()
         };
         let screen = auth.landing();
+        #[cfg(not(target_os = "android"))]
+        let handle = {
+            use raw_window_handle::HasWindowHandle as _;
+            cc.window_handle().ok().map(|handle| handle.as_raw())
+        };
         let mut app = Self {
             screen,
             icons,
@@ -365,14 +373,26 @@ impl App {
             last_size: egui::Vec2::ZERO,
             #[cfg(not(target_os = "android"))]
             wgpu: cc.wgpu_render_state.is_some(),
+            #[cfg(not(target_os = "android"))]
+            handle,
             nav: Nav::default(),
         };
+        // Before the first frame: a window painted once and hidden after would
+        // already be in whatever capture caught that frame.
+        #[cfg(not(target_os = "android"))]
+        crate::shared::capture::apply(app.handle.as_ref(), app.prefs.allow_capture);
         // One look at startup, and only when the switch allows it: a vault that
         // phones home on its own is the thing this app promises not to be.
         if app.prefs.update_check {
             app.update.check(&cc.egui_ctx);
         }
         app
+    }
+
+    /// Apply the capture switch to the window, for the change made in Settings.
+    #[cfg(not(target_os = "android"))]
+    pub fn capture(&self) {
+        crate::shared::capture::apply(self.handle.as_ref(), self.prefs.allow_capture);
     }
 
     /// Lock every vault and land on Unlock; unsaved edits are written first.
@@ -678,6 +698,12 @@ impl App {
 
     pub fn run_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // A native move can take the focus away for as long as the gesture lasts;
+        // that is not the user walking away from the window.
+        self.shell.settle(
+            ctx.input(|i| i.focused),
+            ctx.input(|i| i.pointer.any_released()),
+        );
         // Before anything draws: a phone's typed character must land on the focused widget.
         #[cfg(target_os = "android")]
         crate::shared::android::feed_keyboard(&ctx);
@@ -759,6 +785,13 @@ impl App {
             // Still drained when it is off: a login queued a moment before the
             // switch was turned off is the user's, not the setting's.
             self.boxes.drain_autofill();
+        }
+        // A window nobody is looking at shows only the logo: the app keeps ticking
+        // above, but no screen, status or modal paints through it.
+        #[cfg(not(target_os = "android"))]
+        if self.prefs.hide_unfocused && !self.shell.moving() && !ctx.input(|i| i.focused) {
+            crate::features::shell::cover::show(&ctx, self);
+            return;
         }
         // The bar runs everywhere; only a desktop has edges, on the bar's layer so a
         // modal cannot cover them.
@@ -924,6 +957,8 @@ impl App {
             last_size: egui::Vec2::ZERO,
             #[cfg(not(target_os = "android"))]
             wgpu: true,
+            #[cfg(not(target_os = "android"))]
+            handle: None,
             nav: Nav::default(),
         }
     }

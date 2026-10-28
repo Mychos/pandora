@@ -1,4 +1,6 @@
 pub mod autofill;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod capture;
 pub mod i18n;
 pub mod idle;
 pub mod theme;

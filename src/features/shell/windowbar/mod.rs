@@ -77,7 +77,7 @@ fn tail(ctx: &Context) -> f32 {
 
 /// Called after the window bar, in the same area, so the strips win the outer border.
 #[cfg(not(any(target_os = "android", target_os = "macos")))]
-pub fn resize(ui: &mut Ui) {
+pub fn resize(ui: &mut Ui, app: &mut App) {
     let ctx = ui.ctx().clone();
     if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
         return;
@@ -87,6 +87,7 @@ pub fn resize(ui: &mut Ui) {
             .interact(rect, Id::new(("pandora-resize", i)), Sense::DRAG)
             .on_hover_cursor(cursor);
         if resp.drag_started() {
+            app.shell.moved();
             ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
             handoff(&ctx);
         }
@@ -183,7 +184,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             bar(ui, app);
             // After the bar, so the strips win the outer edge, even under a tab or a button.
             #[cfg(not(any(target_os = "android", target_os = "macos")))]
-            resize(ui);
+            resize(ui, app);
         });
     if floor > 0.0 {
         egui::Area::new(Id::new("pandora-nav"))
@@ -216,7 +217,7 @@ fn bar(ui: &mut Ui, app: &mut App) {
                 pos2(strip.max.x - EDGE, strip.max.y),
             )
         };
-        drag(ui, &ctx, grab);
+        drag(ui, app, &ctx, grab);
     }
     ui.spacing_mut().item_spacing.x = 0.0;
     ui.allocate_ui_with_layout(strip.size(), Layout::top_down(Align::Min), |ui| {
@@ -498,7 +499,7 @@ fn paint_nav(ui: &Ui, strip: Rect, bar: Rect) {
 
 /// Move the window from the bar; only a desktop has one to move.
 #[cfg(not(target_os = "android"))]
-fn drag(ui: &mut Ui, ctx: &Context, grab: Rect) {
+fn drag(ui: &mut Ui, app: &mut App, ctx: &Context, grab: Rect) {
     // `CLICK | DRAG`: a press alone must not start a move, or the release never returns.
     let resp = ui
         .interact(
@@ -508,6 +509,7 @@ fn drag(ui: &mut Ui, ctx: &Context, grab: Rect) {
         )
         .on_hover_cursor(CursorIcon::Grab);
     if resp.drag_started_by(PointerButton::Primary) {
+        app.shell.moved();
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         handoff(ctx);
     }
