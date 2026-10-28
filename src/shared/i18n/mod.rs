@@ -15,15 +15,17 @@ pub enum Lang {
     #[default]
     En = 0,
     Es = 1,
+    Fr = 2,
 }
 
 impl Lang {
-    pub const ALL: [Self; 2] = [Self::En, Self::Es];
+    pub const ALL: [Self; 3] = [Self::En, Self::Es, Self::Fr];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::En => "English",
             Self::Es => "Español",
+            Self::Fr => "Français",
         }
     }
 
@@ -60,6 +62,7 @@ pub fn set(lang: Lang) {
 pub fn lang() -> Lang {
     match LANG.load(Ordering::Relaxed) {
         1 => Lang::Es,
+        2 => Lang::Fr,
         _ => Lang::En,
     }
 }
@@ -79,12 +82,13 @@ pub fn tf(key: &str, args: &[(&str, &dyn Display)]) -> String {
     lang().tf(key, args)
 }
 
-fn catalogs() -> &'static [HashMap<&'static str, &'static str>; 2] {
-    static CATALOGS: OnceLock<[HashMap<&'static str, &'static str>; 2]> = OnceLock::new();
+fn catalogs() -> &'static [HashMap<&'static str, &'static str>; 3] {
+    static CATALOGS: OnceLock<[HashMap<&'static str, &'static str>; 3]> = OnceLock::new();
     CATALOGS.get_or_init(|| {
         [
             parse(include_str!("en.json")),
             parse(include_str!("es.json")),
+            parse(include_str!("fr.json")),
         ]
     })
 }
@@ -110,6 +114,14 @@ mod tests {
                 .keys()
                 .collect::<std::collections::HashSet<_>>(),
         );
+        assert_eq!(
+            catalogs[Lang::En as usize]
+                .keys()
+                .collect::<std::collections::HashSet<_>>(),
+            catalogs[Lang::Fr as usize]
+                .keys()
+                .collect::<std::collections::HashSet<_>>(),
+        );
         assert!(catalogs
             .iter()
             .all(|catalog| catalog.values().all(|value| !value.is_empty())));
@@ -118,6 +130,11 @@ mod tests {
                 placeholders(catalogs[Lang::En as usize][key]),
                 placeholders(catalogs[Lang::Es as usize][key]),
                 "placeholder mismatch for {key}"
+            );
+            assert_eq!(
+                placeholders(catalogs[Lang::En as usize][key]),
+                placeholders(catalogs[Lang::Fr as usize][key]),
+                "placeholder mismatch for {key} (fr)"
             );
         }
         assert_eq!(Lang::Es.tr("{count} minutes"), "{count} minutos");
@@ -141,6 +158,41 @@ mod tests {
             "a sentence nobody translated"
         );
         assert_eq!(entry(Lang::En, "a sentence nobody translated"), None);
+    }
+
+    /// Every word the auto-type pane paints is in both hand-written catalogs: the
+    /// lookup falls back to English, so a key missing from `es` reads as English on
+    /// a Spanish screen and no other test would say so.
+    #[test]
+    fn the_auto_type_pane_is_translated() {
+        let [en, es, fr] = catalogs();
+        for key in [
+            "Auto-type",
+            "Current",
+            "Fields",
+            "Custom",
+            "Types into another window",
+            "Only when the focused window is",
+            "window title, optional",
+            "the login's username",
+            "the login's password",
+            "the one-time code",
+            "waits 250 ms",
+            "{key} types it into the focused window",
+            "you have {seconds} seconds to click the field",
+            "not checked in this session — this desktop cannot report the window title",
+            "this session cannot type for you — install xdotool (X11) or wtype (Wayland)",
+            "no way to type on this session — install xdotool (X11) or wtype (Wayland)",
+            "typing into {title} — it does not match {wanted}",
+            "choose icon",
+            "no site will match this address",
+        ] {
+            assert!(en.contains_key(key), "en has no {key}");
+            assert!(es.contains_key(key), "es has no {key}");
+            assert!(fr.contains_key(key), "fr has no {key}");
+            assert_ne!(en[key], es[key], "es still says {key}");
+            assert_ne!(en[key], fr[key], "fr still says {key}");
+        }
     }
 
     fn placeholders(text: &str) -> std::collections::HashSet<&str> {
