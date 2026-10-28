@@ -4,7 +4,7 @@ use crate::vault::store::data_dir;
 use crate::vault::store::EXT;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// The one way this crate writes a box file: sibling tmp, fsync, rename, fsync dir.
@@ -23,13 +23,28 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     sync_dir(dir)
 }
 
-/// Keep the version a box is about to lose in one slot beside it, overwritten each
-/// time: a copy, not a link, and never a growing history.
+/// Where the stash of `path` lives: in the data dir, keyed by the box's digest,
+/// so the vault's own folder stays clean and the copy never travels with a sync.
+/// `backups/` is created on demand.
+pub fn stash_path(path: &Path) -> PathBuf {
+    data_dir().join("backups").join(format!(
+        "{}.{}.bak",
+        crate::vault::crypto::digest(path.display().to_string().as_bytes()),
+        EXT
+    ))
+}
+
+/// Keep the version a box is about to lose in one slot, overwritten each
+/// time: a copy, not a link, and never a growing history. Lives in the data dir,
+/// keyed by the box's digest, so the vault's folder stays clean.
 pub fn stash(path: &Path) {
     if !path.is_file() {
         return;
     }
-    let backup = path.with_extension(format!("{EXT}.bak"));
+    let backup = stash_path(path);
+    if let Some(dir) = backup.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
     let _ = fs::remove_file(&backup);
     let _ = copy_private(path, &backup);
 }
@@ -46,7 +61,16 @@ pub(super) fn copy_private(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Drop the stash. A password change owes it: what sits there is sealed with the
 /// old key. A deleted box owes it too, since the copy is a version of that box.
 pub fn forget_stash(path: &Path) {
-    let _ = fs::remove_file(path.with_extension(format!("{EXT}.bak")));
+    let _ = fs::remove_file(stash_path(path));
+}
+
+/// Drop a stash left by an older build beside the vault. Older versions kept
+/// `<vault>.pandora.bak` next to the box; the new layout stores it in the data
+/// dir, so the stray sidecar is just removed. No backward compatibility is
+/// kept: this project is in development.
+pub fn clear_legacy_stash(path: &Path) {
+    let old = path.with_extension(format!("{EXT}.bak"));
+    let _ = fs::remove_file(&old);
 }
 
 /// Every other file the app writes — prefs, recents, an export — goes out private too.
@@ -63,6 +87,21 @@ pub fn private_sink(path: &Path) -> Result<fs::File, String> {
 /// Drop the plaintext copies a phone's picker staged for a save that never happened.
 pub fn clear_staging() {
     let _ = fs::remove_dir_all(data_dir().join("staging"));
+}
+
+/// Sweep orphaned atomic-write temp files left by a crashed save. Names match
+/// `<box>.pandora.<uuid>.tmp`; anything else in the dir is left alone.
+pub fn clear_orphan_tmps(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".tmp") && name.contains(".pandora.") {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Readable and writable by its owner alone, so nobody else reads a box or an export.

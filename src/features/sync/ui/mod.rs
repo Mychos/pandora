@@ -393,7 +393,7 @@ pub(crate) fn folder(ui: &mut egui::Ui, app: &mut App) {
         app.folder_forget();
     }
     if choose {
-        app.folder_pick();
+        app.folder_pick(ui.ctx());
     }
     if now {
         app.folder_push();

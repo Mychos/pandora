@@ -317,22 +317,18 @@ fn to_array(bytes: &[u8]) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::model::{now_secs, Card, Login, Otp};
+    use crate::vault::model::{now_secs, Login, Otp};
     use zeroize::Zeroizing as Z;
 
     fn bundle() -> Bundle {
         let mut login = Login::new(1);
         login.name = "Bank".to_owned();
         login.password = Z::new("hunter2".to_owned());
-        let mut card = Card::new(1);
-        card.name = "Visa".to_owned();
-        card.number = Z::new("4111".to_owned());
         let mut otp = Otp::new(1);
         otp.name = "Mail".to_owned();
         otp.secret = Z::new("JBSWY3DPEHPK3PXP".to_owned());
         Bundle {
             logins: vec![login],
-            cards: vec![card],
             otps: vec![otp],
             ..Default::default()
         }
@@ -354,7 +350,6 @@ mod tests {
 
         let opened = open(&bytes, Some(&alice), None).unwrap();
         assert_eq!(opened.logins[0].password.as_str(), "hunter2");
-        assert_eq!(opened.cards[0].number.as_str(), "4111");
         assert_eq!(opened.otps[0].secret.as_str(), "JBSWY3DPEHPK3PXP");
 
         assert!(

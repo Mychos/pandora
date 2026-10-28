@@ -7,7 +7,7 @@ pub mod keepass;
 pub mod onepux;
 
 use crate::shared::i18n::t;
-use crate::vault::model::{Card, Entry, Identity, Login, Note, Otp, Vault};
+use crate::vault::model::{Entry, Login, Note, Otp, Vault};
 use crate::vault::tree;
 use serde::{Deserialize, Serialize};
 
@@ -31,8 +31,6 @@ pub enum Format {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Bundle {
     pub logins: Vec<Login>,
-    pub cards: Vec<Card>,
-    pub identities: Vec<Identity>,
     /// A note and the `a/b` path it sat at; empty for the drive root.
     pub notes: Vec<(String, Note)>,
     pub otps: Vec<Otp>,
@@ -40,11 +38,7 @@ pub struct Bundle {
 
 impl Bundle {
     pub fn count(&self) -> usize {
-        self.logins.len()
-            + self.cards.len()
-            + self.identities.len()
-            + self.notes.len()
-            + self.otps.len()
+        self.logins.len() + self.notes.len() + self.otps.len()
     }
 }
 
@@ -97,15 +91,13 @@ pub(crate) fn first<'a>(
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Placed {
     pub logins: usize,
-    pub cards: usize,
-    pub identities: usize,
     pub notes: usize,
     pub otps: usize,
 }
 
 impl Placed {
     pub fn total(&self) -> usize {
-        self.logins + self.cards + self.identities + self.notes + self.otps
+        self.logins + self.notes + self.otps
     }
 }
 
@@ -123,28 +115,6 @@ pub fn land(vault: &mut Vault, bundle: Bundle) -> Placed {
         }
         vault.logins.push(it);
         placed.logins += 1;
-    }
-    for it in bundle.cards {
-        if vault
-            .cards
-            .iter()
-            .any(|old| old.name == it.name && old.number == it.number)
-        {
-            continue;
-        }
-        vault.cards.push(it);
-        placed.cards += 1;
-    }
-    for it in bundle.identities {
-        if vault
-            .identities
-            .iter()
-            .any(|old| old.name == it.name && old.notes == it.notes)
-        {
-            continue;
-        }
-        vault.identities.push(it);
-        placed.identities += 1;
     }
     for (path, mut it) in bundle.notes {
         let at = tree::ensure(vault, &path);
@@ -223,10 +193,6 @@ mod tests {
         assert_eq!(vault.logins[0].name, "Example Login");
         assert_eq!(vault.logins[0].username, "someone@example.com");
         assert!(vault.logins[0].fields[0].secret);
-        assert_eq!(placed.cards, 1, "a card is not a login");
-        assert_eq!(vault.cards[0].expiry, "04/29");
-        assert_eq!(placed.identities, 1);
-        assert_eq!(vault.identities[0].fields[0].label, "passportNumber");
         assert_eq!(placed.otps, 1, "the seed came out of the login");
         assert_eq!(vault.otps[0].name, "Example Login");
         assert_eq!(placed.notes, 1);
@@ -257,12 +223,12 @@ mod tests {
         let mut vault = Vault::new("Box");
         let placed = land(&mut vault, bundle);
         assert_eq!(placed.logins, 1);
-        assert_eq!(placed.cards, 1);
-        assert_eq!(placed.identities, 1);
-        assert_eq!(placed.notes, 1);
+        assert_eq!(placed.notes, 3);
         assert_eq!(vault.logins[0].fields[0].label, "PIN");
-        assert_eq!(vault.cards[0].number.as_str(), "4111111111111111");
-        assert!(vault.drive[0].folder().is_some(), "the note has a folder");
+        assert!(
+            vault.drive.iter().any(|it| it.folder().is_some()),
+            "a note has a folder"
+        );
     }
 
     /// Landing the same file twice adds nothing: the second import is a no-op, which
@@ -271,7 +237,7 @@ mod tests {
     fn landing_the_same_file_twice_adds_nothing() {
         let mut vault = Vault::new("Box");
         let first = land(&mut vault, read(BITWARDEN).unwrap());
-        assert_eq!(first.total(), 5);
+        assert_eq!(first.total(), 3);
         let second = land(&mut vault, read(BITWARDEN).unwrap());
         assert_eq!(second.total(), 0, "nothing is duplicated");
         assert_eq!(vault.folders.len(), 1, "and no folder is created twice");

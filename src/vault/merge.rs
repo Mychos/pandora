@@ -46,8 +46,6 @@ pub fn merge(local: &Vault, other: &Vault, now: u64) -> Merged {
 
     vault.folders = union(&local.folders, &other.folders, now, &mut tally);
     vault.logins = union(&local.logins, &other.logins, now, &mut tally);
-    vault.cards = union(&local.cards, &other.cards, now, &mut tally);
-    vault.identities = union(&local.identities, &other.identities, now, &mut tally);
     vault.passkeys = union(&local.passkeys, &other.passkeys, now, &mut tally);
     vault.drive = union(&local.drive, &other.drive, now, &mut tally);
     vault.otps = union(&local.otps, &other.otps, now, &mut tally);
@@ -189,8 +187,6 @@ macro_rules! mergeable {
 
 mergeable!(crate::vault::model::Folder);
 mergeable!(crate::vault::model::Login);
-mergeable!(crate::vault::model::Card);
-mergeable!(crate::vault::model::Identity);
 mergeable!(crate::vault::model::Passkey);
 mergeable!(crate::vault::model::Otp);
 

@@ -5,42 +5,20 @@
 use crate::features::boxes::model::{Boxes, Tab};
 use crate::features::entries::model::View;
 use crate::features::shell::confirm::Confirm;
-use crate::vault::model::{now_secs, Card, Entry, Identity, Kind, Login, Note};
+use crate::vault::model::{now_secs, Entry, Kind, Login, Note};
 
 impl Boxes {
-    /// A record of the pane's own shape, created in the box on screen and selected.
-    pub fn add(&mut self, kind: Kind) {
+    /// A login, created in the box on screen and selected.
+    pub fn add_login(&mut self) {
         let now = now_secs();
         let Some(s) = self.session.as_mut() else {
             return;
         };
-        let id = match kind {
-            Kind::Card => {
-                let it = Card::new(now);
-                let id = it.id.clone();
-                s.vault.cards.push(it);
-                id
-            }
-            Kind::Identity => {
-                let it = Identity::new(now);
-                let id = it.id.clone();
-                s.vault.identities.push(it);
-                id
-            }
-            _ => {
-                let it = Login::new(now);
-                let id = it.id.clone();
-                s.vault.logins.push(it);
-                id
-            }
-        };
+        let it = Login::new(now);
+        let id = it.id.clone();
+        s.vault.logins.push(it);
         s.selected = Some(id);
         s.mark_now();
-    }
-
-    /// A login, created in the box on screen and selected.
-    pub fn add_login(&mut self) {
-        self.add(Kind::Login);
     }
 
     /// A note in the folder being browsed, created and selected. A file is not
@@ -221,38 +199,6 @@ mod tests {
         );
     }
 
-    /// Each pane creates its own shape, and the record lands in its own collection:
-    /// the pane a record is revealed on comes from the shape, never from a counter.
-    #[test]
-    fn a_card_and_an_identity_are_created_in_their_own_pane() {
-        use crate::vault::model::Kind;
-        let ctx = egui::Context::default();
-        let mut app = App::blank(&ctx);
-        app.open("t");
-
-        app.boxes.add(Kind::Card);
-        let id = app.boxes.selected().unwrap();
-        let s = app.boxes.session.as_ref().unwrap();
-        assert_eq!(s.vault.cards.len(), 1);
-        assert_eq!(s.vault.cards[0].name, "New card");
-        assert_eq!(Tab::of(Kind::Card), Tab::Cards);
-
-        app.boxes.add(Kind::Identity);
-        let s = app.boxes.session.as_ref().unwrap();
-        assert_eq!(s.vault.identities.len(), 1);
-        assert_eq!(Tab::of(Kind::Identity), Tab::Identities);
-        assert_eq!(Tab::Cards.kind(), Some(Kind::Card));
-
-        app.boxes.trash_item(&id);
-        app.boxes.undo_delete();
-        assert_eq!(app.boxes.session.as_ref().unwrap().vault.cards.len(), 1);
-        assert_eq!(
-            app.boxes.session.as_ref().unwrap().tab,
-            Tab::Cards,
-            "the restore lands on the pane that owns the shape"
-        );
-    }
-
     /// A delete is a move: the record leaves the pane, waits in the trash, and
     /// one Ctrl+Z puts it back. Only the last delete is undoable; anything older
     /// waits in the trash.
@@ -290,7 +236,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = App::blank(&ctx);
         app.open("t");
-        app.boxes.add_otp();
+        app.boxes.add_code("Vercel", "JBSWY3DPEHPK3PXP");
         let id = app.boxes.selected().unwrap();
         app.boxes.trash_item(&id);
 

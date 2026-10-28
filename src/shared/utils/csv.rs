@@ -2,9 +2,7 @@
 //! it exports it can read back. Plaintext, and it owns where an export lands.
 
 use crate::app::{App, StatusKind};
-use crate::vault::model::{
-    now_secs, Any, Card, Entry, Field, Identity, Kind, Login, Note, Otp, Vault,
-};
+use crate::vault::model::{now_secs, Any, Entry, Field, Kind, Login, Note, Otp, Vault};
 use crate::vault::store;
 use crate::vault::tree as folders;
 use std::mem;
@@ -13,8 +11,7 @@ use zeroize::Zeroizing;
 
 /// Every name is an alias the reader accepts, so an export always imports back;
 /// `kind` tells the four collections apart.
-pub const HEADER: &str =
-    "name,username,password,url,notes,folder,kind,totp,card_number,expiry,holder,fields";
+pub const HEADER: &str = "name,username,password,url,notes,folder,kind,totp,fields";
 
 /// Anything bigger is not a CSV export, and this file comes from outside.
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -47,19 +44,10 @@ pub fn write(vault: &Vault) -> Zeroizing<String> {
             // A private key has no shape in a text file, and a passkey has no row:
             // exporting one would put a credential in the clear for no reason.
             Any::Drive(Entry::File(_)) | Any::Passkey(_) => continue,
-            Any::Card(it) => ("", "", "", it.notes.as_str(), ""),
-            Any::Identity(it) => ("", "", "", it.notes.as_str(), ""),
             Any::Otp(it) => ("", "", "", "", it.secret.as_str()),
-        };
-        // The card's own three columns, empty for every other shape.
-        let (number, expiry, holder) = match it {
-            Any::Card(it) => (it.number.as_str(), it.expiry.as_str(), it.holder.as_str()),
-            _ => ("", "", ""),
         };
         let fields = match it {
             Any::Login(it) => encode_fields(&it.fields),
-            Any::Card(it) => encode_fields(&it.fields),
-            Any::Identity(it) => encode_fields(&it.fields),
             _ => String::new(),
         };
         for value in [
@@ -71,9 +59,6 @@ pub fn write(vault: &Vault) -> Zeroizing<String> {
             folder.as_str(),
             it.kind().label(),
             totp,
-            number,
-            expiry,
-            holder,
             fields.as_str(),
         ] {
             cell(&mut out, value);
@@ -192,9 +177,6 @@ struct Columns {
     folder: Option<usize>,
     kind: Option<usize>,
     totp: Option<usize>,
-    number: Option<usize>,
-    expiry: Option<usize>,
-    holder: Option<usize>,
     fields: Option<usize>,
 }
 
@@ -222,23 +204,6 @@ impl Columns {
             folder: find(&["folder", "group", "grouping", "path"]),
             kind: find(&["type", "kind"]),
             totp: find(&["totp", "totpsecret", "otp"]),
-            number: find(&[
-                "cardnumber",
-                "cardno",
-                "cardnum",
-                "number",
-                "ccnumber",
-                "creditcardnumber",
-            ]),
-            expiry: find(&[
-                "expiry",
-                "expirydate",
-                "expiration",
-                "expirationdate",
-                "expdate",
-                "expires",
-            ]),
-            holder: find(&["holder", "cardholder", "cardholdername", "nameoncard"]),
             fields: find(&["fields", "customfields", "extrafields"]),
         };
         if cols.name.is_none() && cols.password.is_none() {
@@ -260,9 +225,6 @@ impl Columns {
             self.folder,
             self.kind,
             self.totp,
-            self.number,
-            self.expiry,
-            self.holder,
             self.fields,
         ]
         .into_iter()
@@ -283,8 +245,8 @@ impl Columns {
         match self.cell(row, self.kind).to_ascii_lowercase().as_str() {
             "note" | "securenote" | "secure note" | "document" | "file" => Kind::Note,
             "otp" | "totp" => Kind::Otp,
-            "card" | "creditcard" | "credit card" | "paymentcard" => Kind::Card,
-            "identity" | "contact" | "idcard" | "identitycard" => Kind::Identity,
+            "card" | "creditcard" | "credit card" | "paymentcard" | "identity" | "contact"
+            | "idcard" | "identitycard" => Kind::Note,
             _ => Kind::Login,
         }
     }
@@ -302,25 +264,6 @@ impl Columns {
         it.username = self.cell(row, self.username).to_owned();
         it.password = Zeroizing::new(self.cell(row, self.password).to_owned());
         it.url = self.cell(row, self.url).to_owned();
-        it.notes = Zeroizing::new(self.cell(row, self.notes).to_owned());
-        it.fields = self.fields(row);
-        it
-    }
-
-    fn card(&self, row: &[String]) -> Card {
-        let mut it = Card::new(now_secs());
-        it.name = self.name(row, &it.name);
-        it.notes = Zeroizing::new(self.cell(row, self.notes).to_owned());
-        it.number = Zeroizing::new(self.cell(row, self.number).to_owned());
-        it.expiry = self.cell(row, self.expiry).to_owned();
-        it.holder = self.cell(row, self.holder).to_owned();
-        it.fields = self.fields(row);
-        it
-    }
-
-    fn identity(&self, row: &[String]) -> Identity {
-        let mut it = Identity::new(now_secs());
-        it.name = self.name(row, &it.name);
         it.notes = Zeroizing::new(self.cell(row, self.notes).to_owned());
         it.fields = self.fields(row);
         it
@@ -396,31 +339,6 @@ impl App {
                 &[("error", &e)],
             )),
         }
-    }
-
-    /// Additive, never destructive: nothing already in the box is overwritten. The
-    /// phone's picker blocks the frame, and `*/*` is used because providers mislabel CSV;
-    /// the size cap and the header validate it, not the MIME.
-    #[cfg(target_os = "android")]
-    pub fn import_csv(&mut self) {
-        match crate::shared::android::text_with("pick", "*/*") {
-            Ok(Some(path)) => self.import_copy(Path::new(&path)),
-            Ok(None) => {}
-            Err(e) => self.shell.fail(e),
-        }
-    }
-
-    #[cfg(not(target_os = "android"))]
-    pub fn import_csv(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("CSV", &["csv", "txt"])
-            .pick_file()
-        else {
-            return;
-        };
-        // Not `import_copy`: a desktop picker hands back the user's own file, not a copy.
-        let read = self.read_csv(&path);
-        self.report(read);
     }
 
     /// Read the copy a phone's picker made and drop it whatever happened: the
@@ -549,32 +467,6 @@ impl App {
                     }
                     // No CSV carries a credential, so a passkey row is never read.
                     Kind::Passkey => land(false),
-                    Kind::Card => {
-                        let it = cols.card(row);
-                        if s.vault
-                            .cards
-                            .iter()
-                            .any(|e| e.name == it.name && e.number == it.number)
-                        {
-                            land(false);
-                            continue;
-                        }
-                        land(true);
-                        s.vault.cards.push(it);
-                    }
-                    Kind::Identity => {
-                        let it = cols.identity(row);
-                        if s.vault
-                            .identities
-                            .iter()
-                            .any(|e| e.name == it.name && e.notes == it.notes)
-                        {
-                            land(false);
-                            continue;
-                        }
-                        land(true);
-                        s.vault.identities.push(it);
-                    }
                     Kind::Login => {
                         let it = cols.login(row);
                         if s.vault.logins.iter().any(|e| {
@@ -758,53 +650,6 @@ mod tests {
         );
     }
 
-    /// A card is not a login with a number in its notes: its own three columns and
-    /// its own collection, and an identity keeps to its own.
-    #[test]
-    fn a_card_and_an_identity_survive_a_round_trip() {
-        let mut vault = Vault::new("Box");
-        let mut card = Card::new(1);
-        card.name = "Visa".to_owned();
-        card.number = Zeroizing::new("4111 1111 1111 1111".to_owned());
-        card.expiry = "04/29".to_owned();
-        card.holder = "Ana Pérez".to_owned();
-        card.fields = vec![
-            Field::new("PIN", "1234", true),
-            Field::new("Bank", "Santander", false),
-        ];
-        vault.cards.push(card);
-
-        let mut identity = Identity::new(1);
-        identity.name = "Passport".to_owned();
-        identity.notes = Zeroizing::new("renew in 2031".to_owned());
-        identity.fields = vec![Field::new("number", "X1234567", true)];
-        vault.identities.push(identity);
-
-        let text = write(&vault);
-        let mut app = app();
-        assert_eq!(app.absorb(text.as_str()).unwrap(), (2, 0), "both land");
-
-        let v = &app.boxes.session.as_ref().unwrap().vault;
-        assert_eq!(v.cards.len(), 1, "the card is a card");
-        assert!(v.logins.is_empty() && v.identities.len() == 1);
-        let card = &v.cards[0];
-        assert_eq!(card.name, "Visa");
-        assert_eq!(card.number.as_str(), "4111 1111 1111 1111");
-        assert_eq!(card.expiry, "04/29");
-        assert_eq!(card.holder, "Ana Pérez");
-        assert_eq!(card.fields.len(), 2, "the custom fields came along");
-        assert_eq!(card.fields[0].label, "PIN");
-        assert!(card.fields[0].secret, "and the secret mark with them");
-        assert!(!card.fields[1].secret);
-
-        let identity = &v.identities[0];
-        assert_eq!(identity.notes.as_str(), "renew in 2031");
-        assert_eq!(identity.fields[0].label, "number");
-
-        let again = write(v);
-        assert_eq!(again.as_str(), text.as_str(), "and the export is stable");
-    }
-
     /// Another manager writes its custom fields as `label: value` lines, which is
     /// what the column holds before this app ever wrote one.
     #[test]
@@ -822,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn the_card_and_identity_labels_pick_their_collections() {
+    fn a_card_or_identity_row_lands_as_a_note() {
         let mut app = app();
         assert_eq!(
             app.absorb("name,kind,card_number,expiry,holder\nVisa,credit card,4111,04/29,Ana\nAna,identity,,,")
@@ -830,10 +675,12 @@ mod tests {
             (2, 0)
         );
         let v = &app.boxes.session.as_ref().unwrap().vault;
-        assert_eq!(v.cards.len(), 1);
-        assert_eq!(v.identities.len(), 1);
+        assert_eq!(
+            v.drive.len(),
+            2,
+            "neither shape has a collection of its own"
+        );
         assert!(v.logins.is_empty(), "neither is a login");
-        assert_eq!(v.cards[0].expiry, "04/29");
     }
 
     /// A chunked note has no body in memory: dedup compares its digest, not the empty body.
@@ -1034,13 +881,13 @@ mod tests {
         assert_eq!(lines[0], HEADER);
         assert_eq!(lines[1], "\"line1, \"\"line2\"\"\",,,,\"first");
         assert!(
-            out.contains("\"first\nsecond\",Personal/Work,note,,,,,\n"),
+            out.contains("\"first\nsecond\",Personal/Work,note,,\n"),
             "{out}"
         );
         assert_eq!(lines.len(), 3, "the note's line break stays inside a cell");
         assert_eq!(
             parse(out)[1].len(),
-            12,
+            9,
             "a column a row carries nothing in is still there"
         );
     }

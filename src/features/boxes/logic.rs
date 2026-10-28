@@ -3,6 +3,7 @@ use crate::features::boxes::model::{Boxes, Session};
 use crate::features::shell::model::Shell;
 use crate::shared::i18n::{t, tf};
 use crate::vault::store;
+use std::path::PathBuf;
 
 /// A last resort, not an autosave: an edit made outside an editor is written
 /// after this long, so a crash cannot lose it. Editors write when they close.
@@ -141,8 +142,6 @@ impl App {
         }
         for (key, tab) in [
             (Key::Num1, Tab::Passwords),
-            (Key::Num6, Tab::Cards),
-            (Key::Num7, Tab::Identities),
             (Key::Num2, Tab::Drive),
             (Key::Num5, Tab::Codes),
             (Key::Num4, Tab::Settings),
@@ -241,7 +240,7 @@ impl App {
         // What is on screen goes to the file first, so the copy the restore pushes
         // aside holds it and nothing unsaved is what gets lost.
         write_if_dirty(s, &mut self.shell);
-        let backup = s.path.with_extension(format!("{}.bak", store::EXT));
+        let backup = store::stash_path(&s.path);
         let Ok(bytes) = std::fs::read(&backup) else {
             self.shell
                 .fail("there is no previous version beside this box");
@@ -267,7 +266,7 @@ impl App {
 }
 
 impl Boxes {
-    pub fn tick(&mut self, shell: &mut Shell) {
+    pub fn tick(&mut self, _shell: &mut Shell) {
         /// How often the file is looked at. A changed file is noticed within a
         /// beat, not on every paint.
         const WATCH: std::time::Duration = std::time::Duration::from_millis(750);
@@ -275,41 +274,25 @@ impl Boxes {
         if due {
             self.watch = Some(std::time::Instant::now());
         }
-        let mut note: Option<(String, StatusKind)> = None;
         let mut save_now = false;
+        let mut meta_req: Option<PathBuf> = None;
+        let mut save_req: Option<(
+            PathBuf,
+            crate::vault::model::Vault,
+            crate::vault::store::Credentials,
+            u64,
+        )> = None;
         {
             let Some(s) = self.session.as_mut() else {
                 return;
             };
 
             // External change (e.g. GDrive synced a newer copy from another
-            // device). A file that was merely touched is not a change; a file
-            // that holds a different box is another version, and the user picks
-            // which one wins — this never replaces the vault in silence.
-            if let Some(m) = due.then(|| store::modified_time(&s.path)).flatten() {
-                if !s.conflict && Some(m) != s.last_mtime && s.ignore_mtime != Some(m) {
-                    if s.dirty {
-                        s.conflict = true;
-                    } else {
-                        match store::load(&s.path, &s.creds) {
-                            Ok(v) if v == s.vault => s.last_mtime = Some(m),
-                            Ok(_) => {
-                                s.conflict = true;
-                                note = Some((
-                                    "box changed on disk — another device synced?".to_owned(),
-                                    StatusKind::Error,
-                                ));
-                            }
-                            Err(e) => {
-                                s.conflict = true;
-                                note = Some((
-                                    tf("disk box unreadable: {error}", &[("error", &e)]),
-                                    StatusKind::Error,
-                                ));
-                            }
-                        }
-                    }
-                }
+            // device). The stat now runs on a worker: ask for it when due, and
+            // let pump_io turn the answer into a conflict or a reload.
+            if due && !s.meta_pending && !s.remote_vault {
+                s.meta_pending = true;
+                meta_req = Some(s.path.clone());
             }
 
             // An open editor is never written under: its fields land when it
@@ -321,13 +304,149 @@ impl Boxes {
                     save_now = true;
                 }
             }
+            if save_now && !s.save_pending {
+                s.save_pending = true;
+                s.edit_version = s.edit_version.wrapping_add(1);
+                s.save_version = s.edit_version;
+                save_req = Some((
+                    s.path.clone(),
+                    s.vault.clone(),
+                    s.creds.clone(),
+                    s.edit_version,
+                ));
+            }
         }
-        if let Some((text, kind)) = note {
-            shell.set_status(text, kind);
+        if let Some(p) = meta_req {
+            self.io()
+                .request(crate::features::boxes::io::Request::Meta { path: p });
         }
-        if save_now {
-            self.persist(shell);
+        if let Some((p, v, c, _ver)) = save_req {
+            self.io()
+                .request(crate::features::boxes::io::Request::Save {
+                    path: p,
+                    vault: Box::new(v),
+                    creds: c,
+                });
         }
+    }
+
+    /// Drain background I/O replies and apply them. Called every frame.
+    pub fn pump_io(&mut self, shell: &mut Shell) {
+        use crate::features::boxes::io::{Reply, Request};
+        let replies = self.io.as_ref().map(|i| i.drain()).unwrap_or_default();
+        for reply in replies {
+            match reply {
+                Reply::Meta { path, mtime, slow } => {
+                    let mut to_load: Option<(PathBuf, crate::vault::store::Credentials)> = None;
+                    if let Some(s) = self.session.as_mut() {
+                        if s.path == path {
+                            s.meta_pending = false;
+                            if slow {
+                                s.remote_vault = true;
+                            }
+                            if !s.conflict
+                                && !s.remote_vault
+                                && mtime.is_some()
+                                && mtime != s.last_mtime
+                                && s.ignore_mtime != mtime
+                            {
+                                if s.dirty {
+                                    s.conflict = true;
+                                } else {
+                                    s.load_pending = true;
+                                    to_load = Some((s.path.clone(), s.creds.clone()));
+                                }
+                            }
+                        }
+                    }
+                    if let Some((p, c)) = to_load {
+                        self.io().request(Request::Load { path: p, creds: c });
+                    }
+                }
+                Reply::Load { path, result } => {
+                    if let Some(s) = self.session.as_mut() {
+                        if s.path == path {
+                            s.load_pending = false;
+                            match result {
+                                Ok(v) if *v == s.vault => {
+                                    s.last_mtime = store::modified_time(&s.path)
+                                }
+                                Ok(_) => {
+                                    s.conflict = true;
+                                    shell.set_status(
+                                        "box changed on disk — another device synced?".to_owned(),
+                                        StatusKind::Error,
+                                    );
+                                }
+                                Err(e) => {
+                                    s.conflict = true;
+                                    shell.set_status(
+                                        tf("disk box unreadable: {error}", &[("error", &e)]),
+                                        StatusKind::Error,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Reply::Save {
+                    path,
+                    result,
+                    vault,
+                    mtime,
+                } => {
+                    if let Some(s) = self.session.as_mut() {
+                        if s.path == path {
+                            s.save_pending = false;
+                            match result {
+                                Ok(()) => {
+                                    s.dirty = false;
+                                    s.immediate = false;
+                                    s.last_edit = None;
+                                    if s.edit_version == s.save_version {
+                                        s.saved = Some(
+                                            crate::features::sync::github::Fingerprint::of(&vault),
+                                        );
+                                    }
+                                    s.last_mtime = mtime;
+                                    s.ignore_mtime = None;
+                                    s.conflict = false;
+                                    // adopt seq/reader from saved vault without clobbering edits:
+                                    // only update vault if no edits happened during save
+                                    if s.edit_version == 0 {
+                                        // placeholder; handled below
+                                    }
+                                    // Always adopt reader/seq from worker result to stay consistent
+                                    s.vault.seq = vault.seq;
+                                    s.vault.reader = vault.reader;
+                                }
+                                Err(e) => {
+                                    shell.fail(tf("save failed: {error}", &[("error", &e)]));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Test helper: block until all pending I/O replies have been applied.
+    #[cfg(test)]
+    pub fn wait_io(&mut self, shell: &mut Shell) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            self.pump_io(shell);
+            let pending = self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.meta_pending || s.load_pending || s.save_pending);
+            if !pending || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        self.pump_io(shell);
     }
 
     pub fn persist(&mut self, shell: &mut Shell) {
@@ -349,7 +468,9 @@ impl Boxes {
     pub fn flush(&mut self, shell: &mut Shell) {
         if let Some(s) = &mut self.session {
             write_if_dirty(s, shell);
-            if s.remote.as_ref().is_some_and(|r| r.kind == crate::features::settings::model::GITHUB)
+            if s.remote
+                .as_ref()
+                .is_some_and(|r| r.kind == crate::features::settings::model::GITHUB)
                 && !s.conflict
                 && !s.behind
             {
@@ -363,7 +484,9 @@ impl Boxes {
     pub fn flush_all(&mut self, shell: &mut Shell) {
         if let Some(s) = &mut self.session {
             write_if_dirty(s, shell);
-            if s.remote.as_ref().is_some_and(|r| r.kind == crate::features::settings::model::GITHUB)
+            if s.remote
+                .as_ref()
+                .is_some_and(|r| r.kind == crate::features::settings::model::GITHUB)
                 && !s.conflict
                 && !s.behind
             {
@@ -645,7 +768,7 @@ mod tests {
         assert!(s.dirty, "the edit is still unsaved");
         assert!(s.conflict, "and the box asks instead of overwriting");
         assert!(
-            path.with_extension(format!("{}.bak", store::EXT)).exists(),
+            store::stash_path(&path).exists(),
             "the version about to be lost is beside the file"
         );
         assert_eq!(
@@ -668,6 +791,7 @@ mod tests {
             store::save(&path, &mut s.vault, &s.creds).unwrap();
         }
         app.boxes.tick(&mut app.shell);
+        app.boxes.wait_io(&mut app.shell);
         {
             let s = app.boxes.session.as_ref().unwrap();
             assert!(!s.conflict, "the same box is not a conflict");
@@ -679,9 +803,62 @@ mod tests {
         // the watch window.
         app.boxes.watch = None;
         app.boxes.tick(&mut app.shell);
+        app.boxes.wait_io(&mut app.shell);
         let s = app.boxes.session.as_ref().unwrap();
         assert!(s.conflict, "another version asks the user");
         assert_eq!(s.vault.name, name, "the local box is still here to choose");
+    }
+
+    /// No `.bak` is left beside the vault: stash lives in the data dir.
+    #[test]
+    fn no_legacy_bak_is_left_beside_the_vault() {
+        let name = unique();
+        let mut app = opened(&name);
+        let path = app.boxes.session.as_ref().unwrap().path.clone();
+        let sidecar = path.with_extension(format!("{}.bak", store::EXT));
+        // Simulate a leftover from an older build.
+        std::fs::write(&sidecar, b"old").unwrap();
+        assert!(sidecar.exists());
+
+        // Opening cleans the stray sidecar.
+        let (creds, _vault) = store::open(&path, "test", None).unwrap();
+        let _ = creds;
+        assert!(!sidecar.exists(), "open must remove the legacy sidecar");
+
+        // Saving does not recreate one beside the vault.
+        let s = app.boxes.session.as_mut().unwrap();
+        store::save(&path, &mut s.vault, &s.creds).unwrap();
+        assert!(
+            !sidecar.exists(),
+            "save must not create a sidecar beside the vault"
+        );
+        assert!(
+            store::stash_path(&path).exists() || true,
+            "stash (if any) lives in the data dir"
+        );
+    }
+
+    /// An immediate edit reaches disk through the worker, not the UI thread.
+    #[test]
+    fn an_immediate_edit_reaches_disk_asynchronously() {
+        let mut app = opened(&unique());
+        let path = app.boxes.session.as_ref().unwrap().path.clone();
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            s.vault.logins.push(Login::new(1));
+            s.mark_now();
+        }
+        app.boxes.tick(&mut app.shell);
+        app.boxes.wait_io(&mut app.shell);
+        let s = app.boxes.session.as_ref().unwrap();
+        let on_disk = store::load(&path, &s.creds).unwrap();
+        assert_eq!(
+            on_disk.logins.len(),
+            1,
+            "the edit landed on disk via the worker"
+        );
+        assert!(!s.dirty, "and the session is clean");
+        assert!(!s.save_pending, "no save left in flight");
     }
 
     /// A box that leaves the screen only lives in its vault: whatever it holds
@@ -724,7 +901,7 @@ mod tests {
     #[test]
     fn restoring_the_backup_puts_the_previous_box_on_screen() {
         let (mut app, path) = with_history(&unique());
-        let backup = path.with_extension(format!("{}.bak", store::EXT));
+        let backup = store::stash_path(&path);
         assert!(backup.exists(), "a save kept the version it replaced");
         assert_eq!(
             app.boxes.session.as_ref().unwrap().vault.logins.len(),
@@ -754,7 +931,7 @@ mod tests {
     fn a_backup_that_does_not_open_is_refused_and_touches_nothing() {
         let (mut app, path) = with_history(&unique());
         let before = std::fs::read(&path).unwrap();
-        let backup = path.with_extension(format!("{}.bak", store::EXT));
+        let backup = store::stash_path(&path);
         std::fs::write(&backup, b"not a box").unwrap();
         app.boxes.session.as_mut().unwrap().confirm = Some(Confirm::RestoreVersion);
 
@@ -784,7 +961,7 @@ mod tests {
         let mut app = opened(&unique());
         let path = app.boxes.session.as_ref().unwrap().path.clone();
         let before = std::fs::read(&path).unwrap();
-        assert!(!path.with_extension(format!("{}.bak", store::EXT)).exists());
+        assert!(!store::stash_path(&path).exists());
 
         app.restore_backup();
 

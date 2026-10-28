@@ -5,7 +5,7 @@
 
 use super::{field, first, text, Bundle, DEPTH};
 use crate::shared::i18n::t;
-use crate::vault::model::{now_secs, Card, Field, Identity, Login, Note, Otp};
+use crate::vault::model::{now_secs, Field, Login, Note, Otp};
 use serde_json::Value;
 use std::io::Read;
 
@@ -132,22 +132,6 @@ fn land(bundle: &mut Bundle, item: &Value) {
                 bundle.otps.push(otp);
             }
         }
-        // Credit Card.
-        "002" => {
-            let mut it = Card::new(now);
-            it.name = name.clone();
-            it.notes = zeroize::Zeroizing::new(notes);
-            it.number = zeroize::Zeroizing::new(text(first(&details, &["cardNumber", "number"])));
-            it.holder = text(first(&details, &["cardholderName", "cardholder"]));
-            it.expiry = text(first(&details, &["expiryDate", "expiry"]));
-            let mut all = sections;
-            let code = text(first(&details, &["verificationNumber", "code", "cvv"]));
-            if !code.is_empty() {
-                all.push(field("CVV", &code, true));
-            }
-            it.fields = all;
-            bundle.cards.push(it);
-        }
         // Secure Note.
         "003" => {
             let mut it = Note::new(now);
@@ -155,16 +139,8 @@ fn land(bundle: &mut Bundle, item: &Value) {
             it.body = zeroize::Zeroizing::new(notes);
             bundle.notes.push((path, it));
         }
-        // Identity and the documents that are one: a passport, a licence.
-        "004" | "010" | "013" => {
-            let mut it = Identity::new(now);
-            it.name = name.clone();
-            it.notes = zeroize::Zeroizing::new(notes);
-            it.fields = sections;
-            bundle.identities.push(it);
-        }
-        // Everything else 1Password has (a bank account, a reward, a server) is kept
-        // as a note with its own text, so nothing is silently dropped.
+        // Everything else 1Password has (a bank account, a reward, a server, an
+        // identity) is kept as a note with its own text, so nothing is silently dropped.
         _ => {
             let mut it = Note::new(now);
             it.name = name;
@@ -300,13 +276,8 @@ mod tests {
         assert_eq!(b.logins[0].fields[0].label, "PIN");
         assert!(b.logins[0].fields[0].secret, "a PIN is hidden");
 
-        assert_eq!(b.cards[0].number.as_str(), "4111");
-        assert_eq!(b.cards[0].expiry, "04/29");
-        assert!(b.cards[0].fields.iter().any(|f| f.label == "CVV"));
-
-        assert_eq!(b.notes[0].0, "Personal", "the folder named it");
-        assert_eq!(b.notes[0].1.name, "Ideas");
-        assert_eq!(b.identities[0].fields[0].label, "number");
+        let ideas = b.notes.iter().find(|(_, it)| it.name == "Ideas").unwrap();
+        assert_eq!(ideas.0, "Personal", "the folder named it");
     }
 
     #[test]

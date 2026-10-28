@@ -8,23 +8,31 @@ use crate::shared::theme;
 use crate::shared::utils::import;
 use crate::vault::share::{self, SealTo};
 
-/// Pick a `.pandora-share` and ask how to open it.
-pub fn pick(app: &mut App) {
+/// Pick a `.pandora-share` and ask how to open it. The desktop dialog runs off the
+/// frame thread, so the window keeps painting while it is up.
+pub fn pick(app: &mut App, ctx: &egui::Context) {
     #[cfg(target_os = "android")]
-    let path = match crate::shared::android::text_with("pick", "*/*") {
-        Ok(path) => path.map(std::path::PathBuf::from),
-        Err(e) => {
-            app.shell.fail(e);
-            None
-        }
+    match crate::shared::android::text_with("pick", "*/*") {
+        Ok(Some(path)) => app.share.open(std::path::PathBuf::from(path)),
+        Ok(None) => {}
+        Err(e) => app.shell.fail(e),
     };
     #[cfg(not(target_os = "android"))]
-    let path = rfd::FileDialog::new()
-        .add_filter("Pandora share", &[share::EXT])
-        .pick_file();
-    if let Some(path) = path {
-        app.share.open(path);
-    }
+    app.ask(
+        ctx,
+        || {
+            rfd::FileDialog::new()
+                .add_filter("Pandora share", &[share::EXT])
+                .pick_file()
+                .into_iter()
+                .collect()
+        },
+        |app, mut paths| {
+            if let Some(path) = paths.pop() {
+                app.share.open(path);
+            }
+        },
+    );
 }
 
 pub fn modal(ctx: &egui::Context, app: &mut App) {

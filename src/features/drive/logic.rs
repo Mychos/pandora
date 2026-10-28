@@ -182,7 +182,7 @@ impl Boxes {
                         (n.id(), n.folder())
                     })
                 }
-                Some(Kind::Card | Kind::Identity | Kind::Passkey) => false,
+                Some(Kind::Passkey) => false,
                 None => false,
             },
             Drag::Folder(id) => shift(&mut s.vault.folders, &id, anchor, after, |f| {
@@ -227,7 +227,7 @@ fn shift<T>(
 }
 
 impl App {
-    /// Attach files dropped on the window; the accessible path is [`Boxes::pick_files`].
+    /// Attach files dropped on the window; the accessible path is [`App::pick_files`].
     pub fn handle_dropped(&mut self, ctx: &egui::Context) {
         // Only while a vault is on screen: a drop during Unlock or Settings would land on a hidden vault.
         if self.screen != Screen::Main || self.boxes.session.is_none() {
@@ -301,42 +301,50 @@ impl App {
     }
 }
 
-impl Boxes {
+impl App {
     /// A phone's picker belongs to the activity, not to a window: it hands back a
     /// copy it made in the app's own storage, which is read here and removed — a
     /// document left in the clear would outlive the box that holds it. Blocks the
     /// frame while the picker is up, exactly as the QR one does.
     #[cfg(target_os = "android")]
-    pub fn pick_files(&mut self, shell: &mut Shell) {
+    pub fn pick_files(&mut self, _ctx: &egui::Context) {
         match crate::shared::android::text_with("pick", "*/*") {
-            Ok(Some(path)) => self.land_copy(&PathBuf::from(path), shell),
+            Ok(Some(path)) => self.boxes.land_copy(&PathBuf::from(path), &mut self.shell),
             Ok(None) => {}
-            Err(e) => shell.fail(e),
+            Err(e) => self.shell.fail(e),
         }
     }
 
+    /// The desktop dialog runs off the frame thread: the window keeps painting while
+    /// it is up, and the chosen files land on a later frame.
     #[cfg(not(target_os = "android"))]
-    pub fn pick_files(&mut self, shell: &mut Shell) {
-        let Some(paths) = rfd::FileDialog::new().pick_files() else {
-            return;
-        };
-        let now = now_secs();
-        let mut loaded: Vec<File> = Vec::new();
-        for p in paths {
-            let name = file_name(&p);
-            match fs::metadata(&p) {
-                Ok(meta) => loaded.push(File::new_pending(name, p, meta.len(), false, now)),
-                Err(e) => shell.fail(tf(
-                    "could not read {name}: {error}",
-                    &[("name", &name), ("error", &e)],
-                )),
-            }
-        }
-        if !loaded.is_empty() {
-            self.add_files(loaded, self.target_folder().flatten(), shell);
-        }
+    pub fn pick_files(&mut self, ctx: &egui::Context) {
+        self.ask(
+            ctx,
+            || rfd::FileDialog::new().pick_files().unwrap_or_default(),
+            |app, paths| {
+                let now = now_secs();
+                let mut loaded: Vec<File> = Vec::new();
+                for p in paths {
+                    let name = file_name(&p);
+                    match fs::metadata(&p) {
+                        Ok(meta) => loaded.push(File::new_pending(name, p, meta.len(), false, now)),
+                        Err(e) => app.shell.fail(tf(
+                            "could not read {name}: {error}",
+                            &[("name", &name), ("error", &e)],
+                        )),
+                    }
+                }
+                if !loaded.is_empty() {
+                    let folder = app.boxes.target_folder().flatten();
+                    app.boxes.add_files(loaded, folder, &mut app.shell);
+                }
+            },
+        );
     }
+}
 
+impl Boxes {
     /// Read the copy a phone's picker left behind, put it in the drive and drop
     /// the copy. Not `cfg`'d, so the round trip is testable off the phone.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]

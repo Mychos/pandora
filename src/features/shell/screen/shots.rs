@@ -1256,13 +1256,16 @@ fn the_new_button_asks_the_drive_for_a_note_or_a_file() {
     );
     assert_eq!(s.vault.drive.len(), 3);
 
+    // A code is not one of those: its pane asks for a name and a seed first, so the
+    // record is only written once that form is filled.
     let mut app = demo(&ctx, Tab::Codes, None);
     app.boxes.session.as_mut().unwrap().show_new = true;
     for _ in 0..3 {
         frame(&ctx, &mut app, vec![]);
     }
     let s = app.boxes.session.as_ref().unwrap();
-    assert_eq!(s.vault.otps.len(), 2, "and a code in the codes pane");
+    assert_eq!(s.vault.otps.len(), 1, "no code is written by the + alone");
+    assert!(s.show_new, "the codes pane keeps the form open");
     assert_eq!(s.vault.logins.len(), 3);
 }
 

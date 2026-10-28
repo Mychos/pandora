@@ -16,15 +16,23 @@ use crate::shared::i18n::{t, tf};
 use crate::vault::model::{now_secs, Login, Vault};
 use crate::vault::totp;
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// What a login types when it has no template of its own.
 pub const DEFAULT: &str = "{USERNAME}{TAB}{PASSWORD}{ENTER}";
 
+/// The templates the editor offers, shown as written: each one is what it types.
+pub const PRESETS: [&str; 3] = [
+    DEFAULT,
+    "{PASSWORD}{ENTER}",
+    "{USERNAME}{TAB}{PASSWORD}{ENTER}{WAIT 500}{OTP}{ENTER}",
+];
+
 /// How long between the click that asks for it and the first key: long enough to
 /// focus the target field, short enough not to feel broken.
-pub const LEAD: Duration = Duration::from_millis(2_500);
+pub const LEAD: Duration = Duration::from_secs(3);
 
 /// One thing to do, after expansion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +104,7 @@ pub fn expand(template: &str, values: &Values) -> Result<Vec<Step>, String> {
                 let ms: u32 = token[4..]
                     .trim()
                     .parse()
-                    .map_err(|_| format!("{{WAIT}} takes milliseconds, not {token:?}"))?;
+                    .map_err(|_| t("{WAIT} takes milliseconds"))?;
                 push(&mut steps, &mut text);
                 steps.push(Step::Wait(ms.min(60_000)));
             }
@@ -173,12 +181,8 @@ impl Backend {
                 self.run(&["key", "--clearmodifiers", "Tab"])
             }
             (Backend::Ydotool, Step::Text(text)) => self.run(&["type", "--", text]),
-            (Backend::Ydotool, Step::Key(Key::Enter)) => {
-                self.run(&["key", "28:1", "28:0"])
-            }
-            (Backend::Ydotool, Step::Key(Key::Tab)) => {
-                self.run(&["key", "15:1", "15:0"])
-            }
+            (Backend::Ydotool, Step::Key(Key::Enter)) => self.run(&["key", "28:1", "28:0"]),
+            (Backend::Ydotool, Step::Key(Key::Tab)) => self.run(&["key", "15:1", "15:0"]),
         }
     }
 
@@ -195,28 +199,65 @@ impl Backend {
     }
 }
 
+/// Whether the focused window's title matches the login's optional check.
+pub fn window_matches(wanted: &str, title: &str) -> bool {
+    let wanted = wanted.trim().to_lowercase();
+    if wanted.is_empty() {
+        return true;
+    }
+    title.to_lowercase().contains(&wanted)
+}
+
+/// The focused window's title, when the platform can read it.
+pub fn active_window_title() -> Option<String> {
+    if have("xdotool") {
+        let output = std::process::Command::new("xdotool")
+            .args(["getactivewindow", "getwindowname"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let title = String::from_utf8_lossy(&output.stdout);
+            let title = title.trim();
+            if !title.is_empty() {
+                return Some(title.to_owned());
+            }
+        }
+    }
+    None
+}
+
 /// Whether a program is on `PATH`.
 pub fn have(program: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
 }
 
-/// The binary that can type, from the session this process runs in.
+/// Whether this desktop can tell which window has the focus. The same check
+/// `active_window_title` makes, without launching the tool.
+pub fn can_read_title() -> bool {
+    have("xdotool")
+}
+
+/// The binary that can type, from the session this process runs in. Picked once: the
+/// answer cannot change under a running session, and the editor asks every frame.
 pub fn pick() -> Option<Backend> {
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
-    let x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
-    if wayland {
-        if have("wtype") {
-            return Some(Backend::Wtype);
+    static PICKED: OnceLock<Option<Backend>> = OnceLock::new();
+    *PICKED.get_or_init(|| {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+        let x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+        if wayland {
+            if have("wtype") {
+                return Some(Backend::Wtype);
+            }
+            if have("ydotool") {
+                return Some(Backend::Ydotool);
+            }
         }
-        if have("ydotool") {
-            return Some(Backend::Ydotool);
+        if x11 && have("xdotool") {
+            return Some(Backend::Xdotool);
         }
-    }
-    if x11 && have("xdotool") {
-        return Some(Backend::Xdotool);
-    }
-    None
+        None
+    })
 }
 
 /// The values one login carries: the two fields, and the seed that shares its name.
@@ -260,6 +301,16 @@ impl App {
             Ok(steps) => steps,
             Err(e) => return self.shell.fail(e),
         };
+        if !login.window.trim().is_empty() {
+            if let Some(title) = active_window_title() {
+                if !window_matches(&login.window, &title) {
+                    return self.shell.fail(tf(
+                        "typing into {title} — it does not match {wanted}",
+                        &[("title", &title), ("wanted", &login.window)],
+                    ));
+                }
+            }
+        }
         let Some(backend) = pick() else {
             return self.shell.fail(t(
                 "no way to type on this session — install xdotool (X11) or wtype (Wayland)",
@@ -329,7 +380,6 @@ mod tests {
                 Step::Text("y".to_owned()),
             ]
         );
-        assert!(expand("{WAIT soon}", &values()).is_err());
         assert!(expand("unclosed {USERNAME", &values()).is_ok());
         assert!(expand("", &values()).unwrap().is_empty());
     }
@@ -349,6 +399,48 @@ mod tests {
         assert_eq!(DEFAULT, "{USERNAME}{TAB}{PASSWORD}{ENTER}");
         let steps = expand(DEFAULT, &values()).unwrap();
         assert_eq!(steps.len(), 4);
+    }
+
+    /// Every template the editor offers expands, and the longest one types what it
+    /// reads: no preset may be a typo the user only finds out about on the login page.
+    #[test]
+    fn every_preset_expands() {
+        assert_eq!(PRESETS[0], DEFAULT);
+        for preset in PRESETS {
+            assert!(expand(preset, &values()).is_ok(), "{preset}");
+        }
+        assert_eq!(
+            expand(PRESETS[2], &values()).unwrap(),
+            vec![
+                Step::Text("ana".to_owned()),
+                Step::Key(Key::Tab),
+                Step::Text("hunter2".to_owned()),
+                Step::Key(Key::Enter),
+                Step::Wait(500),
+                Step::Text("123456".to_owned()),
+                Step::Key(Key::Enter),
+            ]
+        );
+    }
+
+    /// A `{WAIT}` that is not milliseconds is the editor's mistake to show, and the
+    /// editor asks this same `expand`.
+    #[test]
+    fn an_invalid_wait_is_a_mistake() {
+        let broken = |template: &str| expand(template, &Values::default()).is_err();
+        assert!(broken("{WAIT x}"));
+        assert!(broken("{WAIT}"));
+        assert!(!broken("a{WAIT 250}b"));
+    }
+
+    /// An empty window check never blocks; a non-empty one is a case-insensitive
+    /// substring match against the focused window's title.
+    #[test]
+    fn a_window_check_matches_a_substring() {
+        assert!(window_matches("", "anything"));
+        assert!(window_matches("Terminal", "user@host: ~/terminal"));
+        assert!(window_matches("terminal", "TERMINAL"));
+        assert!(!window_matches("Firefox", "Terminal"));
     }
 
     /// No tool on `PATH` means no backend: the caller says so instead of typing into

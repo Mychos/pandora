@@ -44,7 +44,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             }
             app.preview.sync(None);
         }
-        body(ui, app, sel);
+        body(ui, app, sel, true);
     });
 }
 
@@ -88,7 +88,7 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
             egui::ScrollArea::vertical()
                 .max_height(rest)
                 .auto_shrink([false, true]),
-            |ui| body(ui, app, &sel),
+            |ui| body(ui, app, &sel, false),
         );
         closed
     });
@@ -183,7 +183,7 @@ fn face(ui: &mut Ui, app: &mut App, sel: &str, close: bool) -> (bool, bool) {
     (closed, changed)
 }
 
-fn body(ui: &mut Ui, app: &mut App, sel: &str) {
+fn body(ui: &mut Ui, app: &mut App, sel: &str, fill: bool) {
     let is_file = app
         .boxes
         .session
@@ -191,7 +191,7 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
         .and_then(|s| s.vault.drive.iter().find(|entry| entry.id() == sel))
         .is_some_and(|entry| matches!(entry, Entry::File(_)));
     if is_file {
-        body_file(ui, app, sel);
+        body_file(ui, app, sel, fill);
         return;
     }
     let icons = &app.icons;
@@ -293,7 +293,12 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
         Entry::File(_) => {}
     }
 
-    if record::delete(ui, icons, FOOT) {
+    let deleted = if fill {
+        record::corner(ui, icons, FOOT)
+    } else {
+        record::delete(ui, icons, FOOT)
+    };
+    if deleted {
         s.confirm = Some(Confirm::Entry(sel.to_owned()));
     }
 
@@ -313,7 +318,7 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
     }
 }
 
-fn body_file(ui: &mut Ui, app: &mut App, sel: &str) {
+fn body_file(ui: &mut Ui, app: &mut App, sel: &str, fill: bool) {
     let icons = &app.icons;
     let preview = &mut app.preview;
     let Some(s) = app.boxes.session.as_mut() else {
@@ -346,7 +351,12 @@ fn body_file(ui: &mut Ui, app: &mut App, sel: &str) {
     ui.add_space(4.0);
     preview::show(ui, preview, file, &s.vault, room(ui).max(LEAST), icons);
 
-    if record::delete(ui, icons, FOOT) {
+    let deleted = if fill {
+        record::corner(ui, icons, FOOT)
+    } else {
+        record::delete(ui, icons, FOOT)
+    };
+    if deleted {
         s.confirm = Some(Confirm::Entry(sel.to_owned()));
     }
     if export_this {
@@ -390,11 +400,11 @@ mod tests {
         let size = egui::vec2(1000.0, 700.0);
         shot::frame(&ctx, size, Vec::new(), |ui| {
             face(ui, &mut app, &id, false);
-            body(ui, &mut app, &id);
+            body(ui, &mut app, &id, true);
         });
         shot::frame(&ctx, size, Vec::new(), |ui| {
             face(ui, &mut app, &id, false);
-            body(ui, &mut app, &id);
+            body(ui, &mut app, &id, true);
         })
     }
 

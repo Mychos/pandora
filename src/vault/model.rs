@@ -15,8 +15,6 @@ pub const VAULT_VERSION: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Login,
-    Card,
-    Identity,
     Passkey,
     Note,
     File,
@@ -27,8 +25,6 @@ impl Kind {
     pub fn label(self) -> &'static str {
         match self {
             Kind::Login => "password",
-            Kind::Card => "card",
-            Kind::Identity => "identity",
             Kind::Passkey => "passkey",
             Kind::Note => "note",
             Kind::File => "file",
@@ -90,6 +86,9 @@ pub struct Login {
     /// `{OTP}`, `{ENTER}`, `{TAB}` and `{WAIT 250}`. Empty means the default.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sequence: String,
+    /// Optional window title auto-type checks before typing; empty means no check.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub window: String,
     /// Brand icon slug; `None` keeps the kind icon, then the URL's suggestion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
@@ -111,6 +110,7 @@ impl Login {
             fields: Vec::new(),
             history: Vec::new(),
             sequence: String::new(),
+            window: String::new(),
             url: String::new(),
             url_match: Rule::Domain,
             extra_urls: Vec::new(),
@@ -159,90 +159,6 @@ impl Login {
                 .iter()
                 .map(|uri| (uri.url.as_str(), uri.rule)),
         )
-    }
-}
-
-/// A card's own type, so a number and an expiry never ride a login's fields.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub struct Card {
-    pub id: String,
-    pub name: String,
-    #[serde(default, with = "zstr")]
-    pub notes: Zeroizing<String>,
-    /// The long number, spaces and all: kept as typed, grouped by the UI.
-    #[serde(default, with = "zstr")]
-    pub number: Zeroizing<String>,
-    /// `MM/YY`, as printed on the card.
-    #[serde(default)]
-    pub expiry: String,
-    #[serde(default)]
-    pub holder: String,
-    /// Brand icon slug, the way a login carries one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fields: Vec<Field>,
-    pub created: u64,
-    pub modified: u64,
-}
-
-impl Card {
-    pub fn new(now: u64) -> Self {
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: "New card".to_owned(),
-            notes: Zeroizing::new(String::new()),
-            number: Zeroizing::new(String::new()),
-            expiry: String::new(),
-            holder: String::new(),
-            icon: None,
-            fields: Vec::new(),
-            created: now,
-            modified: now,
-        }
-    }
-
-    pub fn touched(&mut self, now: u64) {
-        self.modified = now;
-    }
-
-    pub fn kind(&self) -> Kind {
-        Kind::Card
-    }
-}
-
-/// Who one is on paper: names, addresses, a passport number. Its own type, so none
-/// of it lands in a login or a note.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub struct Identity {
-    pub id: String,
-    pub name: String,
-    #[serde(default, with = "zstr")]
-    pub notes: Zeroizing<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fields: Vec<Field>,
-    pub created: u64,
-    pub modified: u64,
-}
-
-impl Identity {
-    pub fn new(now: u64) -> Self {
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: "New identity".to_owned(),
-            notes: Zeroizing::new(String::new()),
-            fields: Vec::new(),
-            created: now,
-            modified: now,
-        }
-    }
-
-    pub fn touched(&mut self, now: u64) {
-        self.modified = now;
-    }
-
-    pub fn kind(&self) -> Kind {
-        Kind::Identity
     }
 }
 
@@ -653,8 +569,6 @@ pub struct Trashed {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Deleted {
     Login(Login),
-    Card(Card),
-    Identity(Identity),
     Passkey(Passkey),
     Drive(Entry),
     Otp(Otp),
@@ -664,8 +578,6 @@ impl Deleted {
     pub fn id(&self) -> &str {
         match self {
             Deleted::Login(it) => &it.id,
-            Deleted::Card(it) => &it.id,
-            Deleted::Identity(it) => &it.id,
             Deleted::Passkey(it) => &it.id,
             Deleted::Drive(it) => it.id(),
             Deleted::Otp(it) => &it.id,
@@ -675,8 +587,6 @@ impl Deleted {
     pub fn name(&self) -> &str {
         match self {
             Deleted::Login(it) => &it.name,
-            Deleted::Card(it) => &it.name,
-            Deleted::Identity(it) => &it.name,
             Deleted::Passkey(it) => &it.name,
             Deleted::Drive(it) => it.name(),
             Deleted::Otp(it) => &it.name,
@@ -686,8 +596,6 @@ impl Deleted {
     pub fn kind(&self) -> Kind {
         match self {
             Deleted::Login(_) => Kind::Login,
-            Deleted::Card(_) => Kind::Card,
-            Deleted::Identity(_) => Kind::Identity,
             Deleted::Passkey(_) => Kind::Passkey,
             Deleted::Drive(it) => it.kind(),
             Deleted::Otp(_) => Kind::Otp,
@@ -706,8 +614,6 @@ fn put<T>(list: &mut Vec<T>, it: T, at: Option<usize>) {
 /// Any kind, borrowed; the kind-blind operations go through here.
 pub enum Any<'a> {
     Login(&'a Login),
-    Card(&'a Card),
-    Identity(&'a Identity),
     Passkey(&'a Passkey),
     Drive(&'a Entry),
     Otp(&'a Otp),
@@ -715,8 +621,6 @@ pub enum Any<'a> {
 
 pub enum AnyMut<'a> {
     Login(&'a mut Login),
-    Card(&'a mut Card),
-    Identity(&'a mut Identity),
     Passkey(&'a mut Passkey),
     Drive(&'a mut Entry),
     Otp(&'a mut Otp),
@@ -726,8 +630,6 @@ impl<'a> Any<'a> {
     pub fn id(&self) -> &str {
         match self {
             Any::Login(it) => &it.id,
-            Any::Card(it) => &it.id,
-            Any::Identity(it) => &it.id,
             Any::Passkey(it) => &it.id,
             Any::Drive(it) => it.id(),
             Any::Otp(it) => &it.id,
@@ -737,8 +639,6 @@ impl<'a> Any<'a> {
     pub fn name(&self) -> &str {
         match self {
             Any::Login(it) => &it.name,
-            Any::Card(it) => &it.name,
-            Any::Identity(it) => &it.name,
             Any::Passkey(it) => &it.name,
             Any::Drive(it) => it.name(),
             Any::Otp(it) => &it.name,
@@ -748,8 +648,6 @@ impl<'a> Any<'a> {
     pub fn kind(&self) -> Kind {
         match self {
             Any::Login(_) => Kind::Login,
-            Any::Card(_) => Kind::Card,
-            Any::Identity(_) => Kind::Identity,
             Any::Passkey(_) => Kind::Passkey,
             Any::Drive(it) => it.kind(),
             Any::Otp(_) => Kind::Otp,
@@ -759,8 +657,6 @@ impl<'a> Any<'a> {
     pub fn modified(&self) -> u64 {
         match self {
             Any::Login(it) => it.modified,
-            Any::Card(it) => it.modified,
-            Any::Identity(it) => it.modified,
             Any::Passkey(it) => it.modified,
             Any::Drive(it) => it.modified(),
             Any::Otp(it) => it.modified,
@@ -780,8 +676,6 @@ impl<'a> AnyMut<'a> {
     pub fn id(&self) -> &str {
         match self {
             AnyMut::Login(it) => &it.id,
-            AnyMut::Card(it) => &it.id,
-            AnyMut::Identity(it) => &it.id,
             AnyMut::Passkey(it) => &it.id,
             AnyMut::Drive(it) => it.id(),
             AnyMut::Otp(it) => &it.id,
@@ -791,8 +685,6 @@ impl<'a> AnyMut<'a> {
     pub fn kind(&self) -> Kind {
         match self {
             AnyMut::Login(_) => Kind::Login,
-            AnyMut::Card(_) => Kind::Card,
-            AnyMut::Identity(_) => Kind::Identity,
             AnyMut::Passkey(_) => Kind::Passkey,
             AnyMut::Drive(it) => it.kind(),
             AnyMut::Otp(_) => Kind::Otp,
@@ -802,8 +694,6 @@ impl<'a> AnyMut<'a> {
     pub fn name_mut(&mut self) -> &mut String {
         match self {
             AnyMut::Login(it) => &mut it.name,
-            AnyMut::Card(it) => &mut it.name,
-            AnyMut::Identity(it) => &mut it.name,
             AnyMut::Passkey(it) => &mut it.name,
             AnyMut::Drive(it) => it.name_mut(),
             AnyMut::Otp(it) => &mut it.name,
@@ -814,7 +704,6 @@ impl<'a> AnyMut<'a> {
     pub fn icon_mut(&mut self) -> Option<&mut Option<String>> {
         match self {
             AnyMut::Login(it) => Some(&mut it.icon),
-            AnyMut::Card(it) => Some(&mut it.icon),
             _ => None,
         }
     }
@@ -838,8 +727,6 @@ impl<'a> AnyMut<'a> {
     pub fn touched(&mut self, now: u64) {
         match self {
             AnyMut::Login(it) => it.touched(now),
-            AnyMut::Card(it) => it.touched(now),
-            AnyMut::Identity(it) => it.touched(now),
             AnyMut::Passkey(it) => it.touched(now),
             AnyMut::Drive(it) => it.touched(now),
             AnyMut::Otp(it) => it.touched(now),
@@ -873,36 +760,6 @@ impl fmt::Debug for Login {
             .field("url_match", &self.url_match)
             .field("extra_urls", &self.extra_urls)
             .field("icon", &self.icon)
-            .field("created", &self.created)
-            .field("modified", &self.modified)
-            .finish()
-    }
-}
-
-impl fmt::Debug for Card {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Card")
-            .field("id", &self.id)
-            .field("name", &self.name)
-            .field("notes", &Redacted)
-            .field("number", &Redacted)
-            .field("expiry", &self.expiry)
-            .field("holder", &self.holder)
-            .field("icon", &self.icon)
-            .field("fields", &format_args!("{} field(s)", self.fields.len()))
-            .field("created", &self.created)
-            .field("modified", &self.modified)
-            .finish()
-    }
-}
-
-impl fmt::Debug for Identity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Identity")
-            .field("id", &self.id)
-            .field("name", &self.name)
-            .field("notes", &Redacted)
-            .field("fields", &format_args!("{} field(s)", self.fields.len()))
             .field("created", &self.created)
             .field("modified", &self.modified)
             .finish()
@@ -1007,10 +864,6 @@ pub struct Vault {
     pub folders: Vec<Folder>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logins: Vec<Login>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cards: Vec<Card>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub identities: Vec<Identity>,
     /// WebAuthn credentials; a private key lives here and nowhere else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub passkeys: Vec<Passkey>,
@@ -1040,8 +893,6 @@ impl PartialEq for Vault {
             && self.name == other.name
             && self.folders == other.folders
             && self.logins == other.logins
-            && self.cards == other.cards
-            && self.identities == other.identities
             && self.passkeys == other.passkeys
             && self.ssh_keys == other.ssh_keys
             && self.share == other.share
@@ -1072,8 +923,6 @@ impl Vault {
             name: name.to_owned(),
             folders: Vec::new(),
             logins: Vec::new(),
-            cards: Vec::new(),
-            identities: Vec::new(),
             passkeys: Vec::new(),
             ssh_keys: Vec::new(),
             share: None,
@@ -1206,8 +1055,6 @@ impl Vault {
         self.logins
             .iter()
             .map(Any::Login)
-            .chain(self.cards.iter().map(Any::Card))
-            .chain(self.identities.iter().map(Any::Identity))
             .chain(self.passkeys.iter().map(Any::Passkey))
             .chain(self.drive.iter().map(Any::Drive))
             .chain(self.otps.iter().map(Any::Otp))
@@ -1226,20 +1073,6 @@ impl Vault {
                 .iter_mut()
                 .find(|it| it.id == id)
                 .map(AnyMut::Login);
-        }
-        if self.cards.iter().any(|it| it.id == id) {
-            return self
-                .cards
-                .iter_mut()
-                .find(|it| it.id == id)
-                .map(AnyMut::Card);
-        }
-        if self.identities.iter().any(|it| it.id == id) {
-            return self
-                .identities
-                .iter_mut()
-                .find(|it| it.id == id)
-                .map(AnyMut::Identity);
         }
         if self.passkeys.iter().any(|it| it.id == id) {
             return self
@@ -1264,18 +1097,9 @@ impl Vault {
 
     /// Permanent erase; the trash goes through [`Vault::take`].
     pub fn remove(&mut self, id: &str) -> bool {
-        let count = |v: &Self| {
-            v.logins.len()
-                + v.cards.len()
-                + v.identities.len()
-                + v.passkeys.len()
-                + v.drive.len()
-                + v.otps.len()
-        };
+        let count = |v: &Self| v.logins.len() + v.passkeys.len() + v.drive.len() + v.otps.len();
         let before = count(self);
         self.logins.retain(|it| it.id != id);
-        self.cards.retain(|it| it.id != id);
-        self.identities.retain(|it| it.id != id);
         self.passkeys.retain(|it| it.id != id);
         self.drive.retain(|it| it.id() != id);
         self.otps.retain(|it| it.id != id);
@@ -1287,10 +1111,6 @@ impl Vault {
     pub fn take(&mut self, id: &str, now: u64) -> Option<Trashed> {
         let (record, at) = if let Some(i) = self.logins.iter().position(|it| it.id == id) {
             (Deleted::Login(self.logins.remove(i)), i)
-        } else if let Some(i) = self.cards.iter().position(|it| it.id == id) {
-            (Deleted::Card(self.cards.remove(i)), i)
-        } else if let Some(i) = self.identities.iter().position(|it| it.id == id) {
-            (Deleted::Identity(self.identities.remove(i)), i)
         } else if let Some(i) = self.passkeys.iter().position(|it| it.id == id) {
             (Deleted::Passkey(self.passkeys.remove(i)), i)
         } else if let Some(i) = self.drive.iter().position(|it| it.id() == id) {
@@ -1316,8 +1136,6 @@ impl Vault {
         let kind = record.kind();
         match record {
             Deleted::Login(it) => put(&mut self.logins, it, at),
-            Deleted::Card(it) => put(&mut self.cards, it, at),
-            Deleted::Identity(it) => put(&mut self.identities, it, at),
             Deleted::Passkey(it) => put(&mut self.passkeys, it, at),
             Deleted::Otp(it) => put(&mut self.otps, it, at),
             Deleted::Drive(mut it) => {
@@ -1398,20 +1216,11 @@ mod tests {
         note.body = Zeroizing::new("body-secret".to_owned());
         let mut otp = Otp::new(1);
         otp.secret = Zeroizing::new("seed-secret".to_owned());
-        let mut card = Card::new(1);
-        card.notes = Zeroizing::new("card-note-secret".to_owned());
-        let mut identity = Identity::new(1);
-        identity.notes = Zeroizing::new("identity-note-secret".to_owned());
-        login.fields.push(Field::new("PIN", "pin-secret", true));
-        login.remember(Zeroizing::new("old-password-secret".to_owned()));
-
-        let said = format!("{login:?} {note:?} {otp:?} {card:?} {identity:?}");
+        let said = format!("{login:?} {note:?} {otp:?}");
         for secret in [
             "password-secret",
             "body-secret",
             "seed-secret",
-            "card-note-secret",
-            "identity-note-secret",
             "pin-secret",
             "old-password-secret",
         ] {
@@ -1494,38 +1303,6 @@ mod tests {
         assert_eq!(vault.passkeys.len(), 1);
         assert!(vault.remove("pk"));
         assert!(vault.passkeys.is_empty());
-    }
-
-    #[test]
-    fn a_card_and_an_identity_are_records_of_their_own() {
-        let mut vault = Vault::new("Box");
-        let mut card = Card::new(1);
-        card.id = "card".to_owned();
-        let mut identity = Identity::new(1);
-        identity.id = "identity".to_owned();
-        vault.cards.push(card);
-        vault.identities.push(identity);
-
-        assert_eq!(vault.records().count(), 2);
-        assert_eq!(vault.any("card").unwrap().kind(), Kind::Card);
-        assert_eq!(vault.any("identity").unwrap().kind(), Kind::Identity);
-        assert_eq!(
-            vault.any("card").unwrap().folder(),
-            None,
-            "a folder organises the drive and nothing else"
-        );
-        assert_eq!(vault.any_mut("identity").unwrap().kind(), Kind::Identity);
-
-        let trashed = vault.take("card", 5).expect("a card goes to the trash");
-        assert_eq!(trashed.record.kind(), Kind::Card);
-        assert!(vault.cards.is_empty(), "and leaves its collection");
-        assert_eq!(vault.trash.len(), 1);
-        assert_eq!(vault.restore("card"), Some(Kind::Card));
-        assert_eq!(vault.cards.len(), 1, "and comes back to its own");
-
-        assert!(vault.remove("identity"), "the erase finds it");
-        assert!(vault.identities.is_empty());
-        assert_eq!(vault.records().count(), 1);
     }
 
     #[test]

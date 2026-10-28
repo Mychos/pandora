@@ -10,6 +10,7 @@ use crate::vault::model::{now_secs, Kind};
 use crate::vault::totp;
 use egui::{Layout, RichText, Sense, TextEdit, Ui};
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 /// How often the pane asks for a frame while it is on screen: the code turns over
 /// with the clock, and nothing else in the app is redrawing.
@@ -37,7 +38,6 @@ pub fn main(ui: &mut Ui, app: &mut App, compact: bool) {
             // while the codes scroll under it.
             head(ui, app);
             ui.add_space(10.0);
-            let mut new = false;
             let mut qr = false;
             {
                 let icons = &app.icons;
@@ -58,7 +58,7 @@ pub fn main(ui: &mut Ui, app: &mut App, compact: bool) {
                         )
                         .clicked()
                     {
-                        new = true;
+                        app.boxes.new_code();
                         ui.close();
                     }
                     if icons
@@ -76,9 +76,6 @@ pub fn main(ui: &mut Ui, app: &mut App, compact: bool) {
                     }
                 });
             }
-            if new {
-                app.boxes.add_otp();
-            }
             if qr {
                 if let Some(s) = app.boxes.session.as_mut() {
                     s.show_qr = true;
@@ -94,6 +91,7 @@ pub fn main(ui: &mut Ui, app: &mut App, compact: bool) {
             );
         });
 
+    create(ui.ctx(), app);
     modal(ui.ctx(), app);
     ways(ui.ctx(), app);
 
@@ -112,7 +110,7 @@ fn head(ui: &mut Ui, app: &mut App) {
                 .button(ui, theme::Icon::Plus, 15.0, theme::ACCENT, "New code")
                 .clicked()
             {
-                app.boxes.add_otp();
+                app.boxes.new_code();
             }
             if app
                 .icons
@@ -437,11 +435,127 @@ pub fn scan(ui: &mut Ui, app: &mut App) {
     }
 }
 
+/// The form's own ids: the dialog, and the two fields Enter walks between.
+const FORM: &str = "new-code";
+const NAME: &str = "new-code-name";
+const SEED: &str = "new-code-seed";
+
+/// What a code is asked for before it exists. A `+` that wrote the record first left the
+/// pane full of "New code" rows with no seed in them, one per press.
+#[derive(Clone, Default)]
+struct Draft {
+    name: String,
+    secret: Zeroizing<String>,
+    shown: bool,
+}
+
+/// The form a code is born in: the name it is filed under and the seed it derives from.
+/// Nothing lands in the box until both are there.
+fn create(ctx: &egui::Context, app: &mut App) {
+    if !app.boxes.session.as_ref().is_some_and(|s| s.show_new) {
+        return;
+    }
+    let id = egui::Id::new(FORM);
+    let name_id = egui::Id::new(NAME);
+    let seed_id = egui::Id::new(SEED);
+    let mut draft = ctx.data(|d| d.get_temp::<Draft>(id)).unwrap_or_default();
+    let mut made = false;
+
+    let open = theme::dialog(ctx, id, |ui| {
+        theme::width(ui, 360.0);
+        let closed = theme::head(ui, &app.icons, "New code");
+        ui.add_space(6.0);
+        // A form opens on its first field, not on its way out: Enter walks down the
+        // fields, and the empty form says nothing it means.
+        let fresh = ctx.memory(|m| m.focused()).is_none();
+        let name = ui.add(
+            TextEdit::singleline(&mut draft.name)
+                .id(name_id)
+                .hint_text(crate::shared::i18n::t("name"))
+                .desired_width(f32::INFINITY)
+                .margin(egui::Margin::symmetric(10, 7)),
+        );
+        if fresh {
+            name.request_focus();
+        }
+        let ready = !draft.name.trim().is_empty() && !draft.secret.trim().is_empty();
+        let mut advance = false;
+        if name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            // Filled up, Enter is the form's own: otherwise it is the way to the next
+            // field.
+            if ready {
+                made = true;
+            } else {
+                advance = true;
+            }
+        }
+        ui.add_space(8.0);
+        let seed = record::secret(
+            ui,
+            &app.icons,
+            &mut draft.shown,
+            2,
+            90.0,
+            egui::Align::Center,
+            |ui, w, shown| {
+                ui.add(
+                    TextEdit::singleline(&mut *draft.secret)
+                        .id(seed_id)
+                        .password(!shown)
+                        .hint_text(crate::shared::i18n::t("Base32 secret or otpauth:// URI"))
+                        .desired_width(w)
+                        .margin(egui::Margin::symmetric(10, 7)),
+                )
+            },
+        );
+        let seed = seed.0;
+        if advance {
+            seed.request_focus();
+        }
+        if seed.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && ready {
+            made = true;
+        }
+        ui.add_space(12.0);
+        // A form with a hole in it makes no code: the name and the seed are what it is.
+        let (accepted, refused) = theme::actions(
+            ui,
+            ctx,
+            |ui| {
+                let color = if ready {
+                    theme::ACCENT
+                } else {
+                    theme::palette().muted
+                };
+                app.icons
+                    .labeled(ui, theme::Icon::Plus, 15.0, color, "Create")
+            },
+            |ui| ui.button(crate::shared::i18n::t("Cancel")),
+        );
+        made |= accepted && ready;
+        closed || refused
+    });
+
+    if made {
+        app.boxes.add_code(&draft.name, &draft.secret);
+    }
+    if made || !open {
+        if let Some(s) = app.boxes.session.as_mut() {
+            s.show_new = false;
+        }
+        ctx.data_mut(|d| d.remove_temp::<Draft>(id));
+    } else {
+        ctx.data_mut(|d| d.insert_temp(id, draft));
+    }
+}
+
 /// The selected code as a modal: its name, its seed, and the code it is showing.
 pub fn modal(ctx: &egui::Context, app: &mut App) {
     let Some(sel) = app.boxes.selected() else {
         return;
     };
+    if app.boxes.session.as_ref().is_some_and(|s| s.show_new) {
+        return;
+    }
     if !app
         .boxes
         .session
@@ -892,8 +1006,126 @@ mod tests {
         assert_eq!(names, ["Dos", "Uno"], "the dragged code lands below Dos");
     }
 
+    /// The form is the only way in, and it writes nothing until it is filled: an empty
+    /// name or an empty seed is not a code.
+    #[test]
+    fn the_form_writes_the_code_only_once_it_is_filled() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = App::blank(&ctx);
+        app.screen = crate::app::Screen::Main;
+        app.boxes.session = Some(session(Vault::new("Test"), None));
+        app.boxes.session.as_mut().unwrap().show_new = true;
+
+        let size = egui::vec2(900.0, 600.0);
+        let draft = |name: &str, secret: &str| Draft {
+            name: name.to_owned(),
+            secret: Zeroizing::new(secret.to_owned()),
+            shown: false,
+        };
+        fn create_click(ctx: &egui::Context, app: &mut App, size: egui::Vec2, draft: Draft) {
+            ctx.data_mut(|d| d.insert_temp(egui::Id::new(FORM), draft));
+            let mut at = None;
+            for _ in 0..2 {
+                let shapes = shot::frame(ctx, size, Vec::new(), |ui| create(ui.ctx(), app));
+                at = shapes.iter().find_map(|shape| match &shape.shape {
+                    Shape::Text(text) if text.galley.text() == "Create" => {
+                        Some(shape.shape.visual_bounding_rect().center())
+                    }
+                    _ => None,
+                });
+            }
+            let at = at.expect("the form offers its own action");
+            let click = |pressed| {
+                vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ]
+            };
+            shot::frame(ctx, size, click(true), |ui| create(ui.ctx(), app));
+            shot::frame(ctx, size, click(false), |ui| create(ui.ctx(), app));
+            shot::frame(ctx, size, Vec::new(), |ui| create(ui.ctx(), app));
+        }
+
+        create_click(&ctx, &mut app, size, draft("Vercel", ""));
+        {
+            let s = app.boxes.session.as_ref().unwrap();
+            assert!(
+                s.vault.otps.is_empty(),
+                "a seed is what the name does not stand in for"
+            );
+            assert!(s.show_new, "and the form stays open for it");
+        }
+
+        create_click(&ctx, &mut app, size, draft("Vercel", "JBSWY3DPEHPK3PXP"));
+        let s = app.boxes.session.as_ref().unwrap();
+        assert_eq!(s.vault.otps.len(), 1, "the filled form makes the code");
+        assert_eq!(s.vault.otps[0].name, "Vercel");
+        assert_eq!(s.vault.otps[0].secret.as_str(), "JBSWY3DPEHPK3PXP");
+        assert!(!s.show_new, "and the form is done with");
+    }
+
+    /// Enter walks the form instead of leaving it: it opens on the name, goes on to the
+    /// seed, and only saves once both are there.
+    #[test]
+    fn enter_walks_the_form_and_saves_it_filled() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = App::blank(&ctx);
+        app.screen = crate::app::Screen::Main;
+        app.boxes.session = Some(session(Vault::new("Test"), None));
+        app.boxes.session.as_mut().unwrap().show_new = true;
+
+        let size = egui::vec2(900.0, 600.0);
+        fn frame(ctx: &egui::Context, app: &mut App, size: egui::Vec2, events: Vec<egui::Event>) {
+            shot::frame(ctx, size, events, |ui| create(ui.ctx(), app));
+        }
+        let enter = || {
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }]
+        };
+        let typed = |text: &str| vec![egui::Event::Text(text.to_owned())];
+
+        frame(&ctx, &mut app, size, Vec::new());
+        assert_eq!(
+            ctx.memory(|m| m.focused()),
+            Some(egui::Id::new(NAME)),
+            "the form opens on its first field"
+        );
+
+        frame(&ctx, &mut app, size, typed("Vercel"));
+        frame(&ctx, &mut app, size, enter());
+        assert!(
+            app.boxes.session.as_ref().unwrap().show_new,
+            "Enter is the way on, not the way out of the form"
+        );
+        assert_eq!(
+            ctx.memory(|m| m.focused()),
+            Some(egui::Id::new(SEED)),
+            "Enter lands in the next field, not on the way out"
+        );
+
+        frame(&ctx, &mut app, size, typed("JBSWY3DPEHPK3PXP"));
+        frame(&ctx, &mut app, size, enter());
+        let s = app.boxes.session.as_ref().unwrap();
+        assert_eq!(s.vault.otps.len(), 1, "a filled form saves on Enter");
+        assert_eq!(s.vault.otps[0].name, "Vercel");
+        assert!(!s.show_new, "and closes itself");
+    }
+
     /// An empty box says where to start, and the pane's own `+` is what it points
-    /// at: nothing here is created from another pane's button.
+    /// at: it opens the form a code is born in, and writes nothing until that form is
+    /// filled, so pressing it twice leaves one empty pane and no "New code" rows.
     #[test]
     fn an_empty_box_offers_its_own_way_in() {
         let ctx = egui::Context::default();
@@ -957,9 +1189,14 @@ mod tests {
         };
         frame(click(true));
         frame(click(false));
+        frame(click(true));
+        frame(click(false));
 
         let s = app.boxes.session.as_ref().unwrap();
-        assert_eq!(s.vault.otps.len(), 1, "the + makes a code to fill in");
-        assert_eq!(s.selected.as_deref(), Some(s.vault.otps[0].id.as_str()));
+        assert!(
+            s.vault.otps.is_empty(),
+            "the + asks for a name and a seed instead of writing a record"
+        );
+        assert!(s.show_new, "and the pane opens its form");
     }
 }

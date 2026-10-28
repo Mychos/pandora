@@ -30,17 +30,6 @@ use std::time::{Duration, Instant};
 /// on screen, the phone came back, or the quiet window asked for a write.
 const PROBE_WAIT: Duration = Duration::from_millis(750);
 
-/// A folder the user picked: the SAF tree on a phone, a directory on a desktop.
-fn pick() -> Result<Option<String>, String> {
-    #[cfg(target_os = "android")]
-    return crate::shared::android::text("treeOpen");
-
-    #[cfg(not(target_os = "android"))]
-    return Ok(rfd::FileDialog::new()
-        .pick_folder()
-        .map(|path| path.display().to_string()));
-}
-
 /// The transport a remote names. A tree uri is only ever a phone's; a desktop
 /// path is only ever a disk's, so the platform decides which one it is.
 fn open(remote: &Remote) -> Result<Box<dyn Folder + Send>, String> {
@@ -195,8 +184,9 @@ impl App {
     }
 
     /// Pick the folder this box is mirrored to. A repo mirror is left alone: its
-    /// sha names a file that a folder switch would strand.
-    pub fn folder_pick(&mut self) {
+    /// sha names a file that a folder switch would strand. The desktop dialog runs
+    /// off the frame thread, so the window keeps painting while it is up.
+    pub fn folder_pick(&mut self, ctx: &egui::Context) {
         if self.sync.folder_job.is_some() {
             return;
         }
@@ -211,12 +201,34 @@ impl App {
                 .fail("this box is mirrored to a repo — take it out of the repo first");
             return;
         }
-        let folder = match pick() {
-            Ok(Some(folder)) => folder,
-            Ok(None) => return,
-            Err(e) => return self.shell.fail(e),
+        // The phone's picker belongs to the activity: it blocks the frame, as the
+        // QR one does, and hands back the SAF tree it made.
+        #[cfg(target_os = "android")]
+        {
+            let _ = ctx;
+            match crate::shared::android::text("treeOpen") {
+                Ok(Some(folder)) => self.folder_set(folder),
+                Ok(None) => {}
+                Err(e) => self.shell.fail(e),
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        self.ask(
+            ctx,
+            || rfd::FileDialog::new().pick_folder().into_iter().collect(),
+            |app, mut paths| {
+                if let Some(path) = paths.pop() {
+                    app.folder_set(path.display().to_string());
+                }
+            },
+        );
+    }
+
+    /// Mirror this box to the folder the user picked.
+    fn folder_set(&mut self, folder: String) {
+        let Some(path) = self.boxes.session.as_ref().map(|s| s.path.clone()) else {
+            return;
         };
-        let path = s.path.clone();
         let Some(s) = self.boxes.find(&path) else {
             return;
         };

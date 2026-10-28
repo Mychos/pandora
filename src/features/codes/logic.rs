@@ -11,13 +11,24 @@ use crate::vault::totp;
 use zeroize::Zeroizing;
 
 impl Boxes {
-    /// A code, created in the box on screen and selected. The secret starts
-    /// empty, so the row says what it still needs instead of showing nothing.
-    pub fn add_otp(&mut self) {
+    /// The pane's `+`: it opens the form a code is born in, and nothing lands in the box
+    /// until that form says so. A `+` that made the record instead left the pane full of
+    /// nameless "New code" rows nobody asked for.
+    pub(crate) fn new_code(&mut self) {
+        if let Some(s) = self.session.as_mut() {
+            s.show_new = true;
+        }
+    }
+
+    /// A code, created filled and selected. A name and a seed are what make it one, so
+    /// both are asked for before it exists.
+    pub(crate) fn add_code(&mut self, name: &str, secret: &str) {
         let Some(s) = self.session.as_mut() else {
             return;
         };
-        let it = Otp::new(now_secs());
+        let mut it = Otp::new(now_secs());
+        it.name = name.trim().to_owned();
+        it.secret = Zeroizing::new(secret.trim().to_owned());
         let id = it.id.clone();
         s.vault.otps.push(it);
         s.selected = Some(id);
@@ -404,15 +415,33 @@ mod tests {
     use crate::app::App;
     use crate::features::codes::model::Scan;
 
+    /// A new code is a form first, and nothing in the box until it is filled.
     #[test]
-    fn a_new_code_lands_in_the_box_and_is_selected() {
+    fn a_new_code_waits_for_its_name_and_seed() {
         let ctx = egui::Context::default();
         let mut app = App::blank(&ctx);
         app.open("t");
 
-        app.boxes.add_otp();
+        app.boxes.new_code();
+        let s = app.boxes.session.as_ref().unwrap();
+        assert!(
+            s.vault.otps.is_empty(),
+            "the form opened without leaving a record behind"
+        );
+        assert!(s.show_new, "the pane is asked for the form");
+    }
+
+    #[test]
+    fn a_filled_form_lands_its_code_in_the_box() {
+        let ctx = egui::Context::default();
+        let mut app = App::blank(&ctx);
+        app.open("t");
+
+        app.boxes.add_code(" Vercel ", " JBSWY3DPEHPK3PXP ");
         let s = app.boxes.session.as_ref().unwrap();
         assert_eq!(s.vault.otps.len(), 1);
+        assert_eq!(s.vault.otps[0].name, "Vercel");
+        assert_eq!(s.vault.otps[0].secret.as_str(), "JBSWY3DPEHPK3PXP");
         assert_eq!(s.selected.as_deref(), Some(s.vault.otps[0].id.as_str()));
         assert!(s.dirty, "a new code is a change to save");
     }

@@ -1,9 +1,9 @@
 //! What a review of the box would change: weak and reused passwords, records left
-//! alone, cards past their date and seeds this app would not have written. Reads the
-//! vault and measures nothing — no request leaves for a report.
+//! alone and seeds this app would not have written. Reads the vault and measures
+//! nothing — no request leaves for a report.
 
 use crate::vault::crypto::{self, strength, Strength};
-use crate::vault::model::{now_secs, Card, Kind, Login, Otp, Vault};
+use crate::vault::model::{now_secs, Kind, Login, Otp, Vault};
 use crate::vault::totp;
 use std::collections::HashMap;
 
@@ -33,8 +33,6 @@ pub enum Concern {
     Reused(usize),
     /// Not touched in this many days.
     Stale(u64),
-    /// A card whose date is behind today, as the card spells it.
-    Expired(String),
     /// A seed whose period or digit count is not the one this app writes.
     OddCode { digits: u32, period: u64 },
     /// A seed no code comes out of.
@@ -51,7 +49,6 @@ impl Concern {
             Concern::Breached(_) => 0,
             Concern::Weak => 1,
             Concern::Reused(_) => 2,
-            Concern::Expired(_) => 3,
             Concern::BrokenCode => 4,
             Concern::OddCode { .. } => 5,
             Concern::Stale(_) => 6,
@@ -113,18 +110,6 @@ pub fn report(vault: &Vault) -> Report {
         }));
     }
 
-    let (year, month) = today(now);
-    for card in &vault.cards {
-        if let Some(concern) = card_concern(card, (year, month)) {
-            findings.push(Finding {
-                id: card.id.clone(),
-                name: card.name.clone(),
-                kind: Kind::Card,
-                concern,
-            });
-        }
-    }
-
     for otp in &vault.otps {
         if let Some(concern) = code_concern(otp) {
             findings.push(Finding {
@@ -167,11 +152,6 @@ fn login_concerns(login: &Login, seen: &HashMap<String, usize>, now: u64) -> Vec
     concerns
 }
 
-fn card_concern(card: &Card, today: (i64, u32)) -> Option<Concern> {
-    let expiry = expiry(&card.expiry)?;
-    (expiry < today).then(|| Concern::Expired(card.expiry.trim().to_owned()))
-}
-
 fn code_concern(otp: &Otp) -> Option<Concern> {
     let Some(shape) = totp::shape(&otp.secret) else {
         return Some(Concern::BrokenCode);
@@ -182,36 +162,10 @@ fn code_concern(otp: &Otp) -> Option<Concern> {
     })
 }
 
-/// `MM/YY`, `MM/YYYY` or `MM-YY`, as printed; anything else is not a date to judge.
-fn expiry(text: &str) -> Option<(i64, u32)> {
-    let text = text.trim();
-    let (month, year) = text.split_once(['/', '-'])?;
-    let month: u32 = month.trim().parse().ok()?;
-    let year = year.trim();
-    let year: i64 = match year.len() {
-        2 => 2000 + year.parse::<i64>().ok()?,
-        4 => year.parse().ok()?,
-        _ => return None,
-    };
-    (1..=12).contains(&month).then_some((year, month))
-}
-
-/// The UTC year and month a unix second falls in: calendar arithmetic, no time crate.
-fn today(secs: u64) -> (i64, u32) {
-    let z = (secs / 86_400) as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (yoe + era * 400 + i64::from(month <= 2), month)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::model::{Entry, File, Identity};
+    use crate::vault::model::{Entry, File};
     use zeroize::Zeroizing;
 
     fn login(name: &str, password: &str, modified: u64) -> Login {
@@ -219,13 +173,6 @@ mod tests {
         it.name = name.to_owned();
         it.password = Zeroizing::new(password.to_owned());
         it.modified = modified;
-        it
-    }
-
-    fn card(name: &str, expiry: &str) -> Card {
-        let mut it = Card::new(1);
-        it.name = name.to_owned();
-        it.expiry = expiry.to_owned();
         it
     }
 
@@ -273,38 +220,6 @@ mod tests {
             .collect();
         assert_eq!(stale, ["Old"]);
         assert_eq!(r.count(&Concern::Reused(2)), 2, "and they are one password");
-    }
-
-    #[test]
-    fn a_card_is_expired_only_when_its_month_has_passed() {
-        let now = now_secs();
-        let (year, month) = today(now);
-        assert!(today(0) == (1970, 1), "the epoch is a Thursday in January");
-        assert!(today(1_719_792_000) == (2024, 7), "2024-07-01T00:00:00Z");
-
-        let mut v = Vault::new("Box");
-        v.cards = vec![
-            card("Past", "01/20"),
-            card("Past year", "01/2020"),
-            card("Later", &format!("12/{}", (year + 1) % 100)),
-            card("Unknown", "soon"),
-            card("Blank", ""),
-        ];
-        let r = report(&v);
-        let expired: Vec<&str> = r
-            .findings
-            .iter()
-            .filter(|it| matches!(it.concern, Concern::Expired(_)))
-            .map(|it| it.name.as_str())
-            .collect();
-        assert_eq!(expired, ["Past", "Past year"]);
-
-        v.cards
-            .push(card("This month", &format!("{month:02}/{:02}", year % 100)));
-        assert!(
-            !report(&v).findings.iter().any(|it| it.name == "This month"),
-            "a card good through this month is good today"
-        );
     }
 
     #[test]
@@ -357,14 +272,7 @@ mod tests {
             b"bytes".to_vec(),
             1,
         )));
-        let mut identity = Identity::new(1);
-        identity.name = "Passport".to_owned();
-        identity.notes = Zeroizing::new("hunter2".to_owned());
-        v.identities.push(identity);
 
-        assert!(
-            report(&v).is_empty(),
-            "only logins, cards and seeds are reviewed"
-        );
+        assert!(report(&v).is_empty(), "only logins and seeds are reviewed");
     }
 }

@@ -392,7 +392,9 @@ fn entry_menu(
             act = Some(EntryAct::Open);
             ui.close();
         }
-        let mut atoms = egui::Atoms::new(RichText::new("Move to…").color(theme::palette().text));
+        let mut atoms = egui::Atoms::new(
+            RichText::new(crate::shared::i18n::t("Move to…")).color(theme::palette().text),
+        );
         if let Some(img) = icons.image(
             theme::Icon::Folder,
             responsive::grow(ui.ctx(), 15.0),
@@ -460,7 +462,7 @@ impl Intent {
 
 /// Run what a surface asked for. The folder the action names is selected first,
 /// so a create or a delete lands inside it.
-fn apply(app: &mut App, intent: Intent) {
+fn apply(app: &mut App, ctx: &egui::Context, intent: Intent) {
     if let Some(s) = app.boxes.session.as_mut() {
         for id in intent.toggles {
             if !s.collapsed.remove(&id) {
@@ -494,7 +496,7 @@ fn apply(app: &mut App, intent: Intent) {
         if let Some(s) = app.boxes.session.as_mut() {
             s.selected = Some(id);
         }
-        app.boxes.pick_files(&mut app.shell);
+        app.pick_files(ctx);
         return;
     }
     if let Some(id) = intent.edit {
@@ -649,7 +651,7 @@ fn tree(ui: &mut Ui, app: &mut App) {
         },
     );
 
-    apply(app, intent);
+    apply(app, ui.ctx(), intent);
     if let Some(target) = drop_at {
         app.drop_at = Some(target);
     }
@@ -969,7 +971,7 @@ fn grid(ui: &mut Ui, app: &mut App) {
         return;
     }
     if empty_file {
-        app.boxes.pick_files(&mut app.shell);
+        app.pick_files(ui.ctx());
         return;
     }
 
@@ -1094,7 +1096,7 @@ fn grid(ui: &mut Ui, app: &mut App) {
     if let Some(highlight) = drop_highlight {
         app.drop_highlight = Some(highlight);
     }
-    apply(app, intent);
+    apply(app, ui.ctx(), intent);
 }
 
 /// One card, filling exactly `CARD`. Returns its response; drop handling is up
@@ -1188,7 +1190,7 @@ fn edit_button(ui: &mut Ui, icons: &theme::Icons, id: &str, at: egui::Pos2) -> b
         Rect::from_center_size(btn.center(), egui::vec2(13.0, 13.0)),
     );
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("edit folder")
+        .on_hover_text(crate::shared::i18n::t("edit folder"))
         .clicked()
 }
 

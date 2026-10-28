@@ -2,6 +2,7 @@
 
 use crate::app::{App, OpKind, Screen, Side};
 use crate::features::settings::model as prefs;
+use crate::features::shell::pick;
 use crate::shared::i18n::{t, tf};
 use crate::shared::theme;
 use crate::shared::ui::balance;
@@ -9,7 +10,7 @@ use crate::shared::ui::responsive;
 #[cfg(not(target_os = "android"))]
 use crate::vault::store;
 use egui::{Context, Key, RichText, TextEdit, Ui};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The room a field keeps over and under its own text: a phone's line has to
 /// stand as tall as the button it shares the row with.
@@ -45,20 +46,27 @@ pub(crate) fn column(ui: &mut egui::Ui) {
 }
 
 /// Path field with a file-picker button; `save_as` writes a new name instead of reading one.
+/// The picker runs off the frame thread and leaves its answer in the context's temp
+/// data under `id`, which this field takes on the next frame.
 pub fn file_field(
     ui: &mut egui::Ui,
+    ask: &mut Option<pick::Ask>,
+    id: egui::Id,
     icons: &theme::Icons,
     path: &mut String,
     hint: &str,
     save_as: bool,
 ) {
     let margin = egui::Margin::symmetric(12, room(ui));
+    if let Some(picked) = ui.ctx().data_mut(|d| d.remove_temp::<String>(id)) {
+        *path = picked;
+    }
     // Android has no dialog behind this field: a box file arrives through the
     // activity's own picker (see `auth::pick`), and a keyfile is typed. The path
     // is the app's own, so there is nothing to browse.
     #[cfg(target_os = "android")]
     {
-        let _ = (icons, save_as);
+        let _ = (ask, icons, save_as);
         ui.add(
             TextEdit::singleline(path)
                 .hint_text(t(hint))
@@ -88,19 +96,30 @@ pub fn file_field(
             )
             .clicked()
         {
-            let picked = if save_as {
-                let current = Path::new(path);
-                let mut dialog = rfd::FileDialog::new();
-                if let Some(dir) = current.parent().filter(|d| d.is_dir()) {
-                    dialog = dialog.set_directory(dir);
-                }
-                dialog.set_file_name(default_name(current)).save_file()
-            } else {
-                rfd::FileDialog::new().pick_file()
-            };
-            if let Some(p) = picked {
-                *path = p.display().to_string();
-            }
+            let current = save_as.then(|| PathBuf::from(path.as_str()));
+            let answer = ui.ctx().clone();
+            pick::launch(
+                ask,
+                ui.ctx(),
+                move || {
+                    let picked = match current {
+                        Some(current) => {
+                            let mut dialog = rfd::FileDialog::new();
+                            if let Some(dir) = current.parent().filter(|d| d.is_dir()) {
+                                dialog = dialog.set_directory(dir);
+                            }
+                            dialog.set_file_name(default_name(&current)).save_file()
+                        }
+                        None => rfd::FileDialog::new().pick_file(),
+                    };
+                    picked.into_iter().collect()
+                },
+                move |_app, mut paths| {
+                    if let Some(path) = paths.pop() {
+                        answer.data_mut(|d| d.insert_temp(id, path.display().to_string()));
+                    }
+                },
+            );
         }
     });
 }
@@ -226,6 +245,8 @@ pub fn welcome(ui: &mut egui::Ui, app: &mut App) {
                                 ui.add_space(12.0);
                                 file_field(
                                     ui,
+                                    &mut app.ask,
+                                    egui::Id::new("welcome-path"),
                                     &app.icons,
                                     &mut app.auth.welcome.path,
                                     "box file",
@@ -233,7 +254,14 @@ pub fn welcome(ui: &mut egui::Ui, app: &mut App) {
                                 );
                                 #[cfg(target_os = "android")]
                                 {
-                                    if theme::secondary_button(ui, &app.icons, Some(theme::Icon::Folder), "Choose destination…").clicked() {
+                                    if theme::secondary_button(
+                                        ui,
+                                        &app.icons,
+                                        Some(theme::Icon::Folder),
+                                        "Choose destination…",
+                                    )
+                                    .clicked()
+                                    {
                                         app.create_box_destination();
                                     }
                                     ui.add_space(6.0);
@@ -260,6 +288,8 @@ pub fn welcome(ui: &mut egui::Ui, app: &mut App) {
                                 ui.add_space(12.0);
                                 file_field(
                                     ui,
+                                    &mut app.ask,
+                                    egui::Id::new("welcome-keyfile"),
                                     &app.icons,
                                     &mut app.auth.welcome.keyfile,
                                     "keyfile (optional)",
@@ -333,6 +363,8 @@ pub fn unlock(ui: &mut egui::Ui, app: &mut App) {
                             ui.add_enabled_ui(!busy, |ui| {
                                 file_field(
                                     ui,
+                                    &mut app.ask,
+                                    egui::Id::new("unlock-path"),
                                     &app.icons,
                                     &mut app.auth.unlock_path,
                                     "box file",
@@ -340,7 +372,14 @@ pub fn unlock(ui: &mut egui::Ui, app: &mut App) {
                                 );
                                 #[cfg(target_os = "android")]
                                 {
-                                    if theme::secondary_button(ui, &app.icons, Some(theme::Icon::Folder), "Choose a box file…").clicked() {
+                                    if theme::secondary_button(
+                                        ui,
+                                        &app.icons,
+                                        Some(theme::Icon::Folder),
+                                        "Choose a box file…",
+                                    )
+                                    .clicked()
+                                    {
                                         app.import_box();
                                     }
                                     ui.add_space(6.0);
@@ -356,6 +395,8 @@ pub fn unlock(ui: &mut egui::Ui, app: &mut App) {
                                 ui.add_space(12.0);
                                 file_field(
                                     ui,
+                                    &mut app.ask,
+                                    egui::Id::new("unlock-keyfile"),
                                     &app.icons,
                                     &mut app.auth.unlock_keyfile,
                                     "keyfile (if this box uses one)",

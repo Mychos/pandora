@@ -6,7 +6,7 @@ use crate::shared::theme;
 use crate::shared::ui::entry as record;
 use crate::shared::ui::responsive;
 
-use crate::features::autotype::DEFAULT;
+use crate::features::autotype::{self, DEFAULT};
 use crate::vault::matching::{self, Rule, Uri};
 use crate::vault::model::{now_secs, Field as Custom, Kind};
 use egui::{Layout, RichText, TextEdit, TextStyle, Ui};
@@ -21,7 +21,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                 s.selected = None;
             }
         }
-        body(ui, app, sel);
+        body(ui, app, sel, true);
     });
 }
 
@@ -64,7 +64,7 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
             egui::ScrollArea::vertical()
                 .max_height(rest)
                 .auto_shrink([false, true]),
-            |ui| body(ui, app, &sel),
+            |ui| body(ui, app, &sel, false),
         );
         closed
     });
@@ -187,15 +187,9 @@ fn face(ui: &mut Ui, app: &mut App, sel: &str, close: bool) -> (bool, bool) {
         return (false, false);
     };
     let kind = it.kind();
-    let branded = matches!(
-        it,
-        crate::vault::model::AnyMut::Login(_) | crate::vault::model::AnyMut::Card(_)
-    );
+    let branded = matches!(it, crate::vault::model::AnyMut::Login(_));
     let brand = match &it {
         crate::vault::model::AnyMut::Login(login) => theme::brand_of(login),
-        crate::vault::model::AnyMut::Card(card) => {
-            card.icon.as_deref().and_then(theme::Brand::from_slug)
-        }
         _ => None,
     };
     let mut picked = None;
@@ -217,7 +211,7 @@ fn face(ui: &mut Ui, app: &mut App, sel: &str, close: bool) -> (bool, bool) {
                             .min_size(egui::vec2(side, side))
                             .small(),
                     )
-                    .on_hover_text("choose icon");
+                    .on_hover_text(crate::shared::i18n::t("choose icon"));
                 if branded {
                     picked = picker(ui, icons, resp, brand);
                 }
@@ -258,8 +252,9 @@ fn face(ui: &mut Ui, app: &mut App, sel: &str, close: bool) -> (bool, bool) {
 }
 
 /// The fields a shape draws between the head and the notes, and the end every shape
-/// shares. One dispatch, three bodies: a shape is a form, not a pane.
-fn body(ui: &mut Ui, app: &mut App, sel: &str) {
+/// shares. One dispatch, three bodies: a shape is a form, not a pane. `fill` is the
+/// surface's: the pane's card is as tall as the window, a dialog's is as tall as it.
+fn body(ui: &mut Ui, app: &mut App, sel: &str, fill: bool) {
     let kind = app
         .boxes
         .session
@@ -267,18 +262,138 @@ fn body(ui: &mut Ui, app: &mut App, sel: &str) {
         .and_then(|s| s.vault.any(sel))
         .map(|it| it.kind());
     match kind {
-        Some(Kind::Login) => body_login(ui, app, sel),
-        Some(Kind::Card) => body_card(ui, app, sel),
-        Some(Kind::Identity) => body_identity(ui, app, sel),
-        Some(Kind::Passkey) => body_passkey(ui, app, sel),
+        Some(Kind::Login) => body_login(ui, app, sel, fill),
+        Some(Kind::Passkey) => body_passkey(ui, app, sel, fill),
         _ => {}
     }
 }
 
-fn body_login(ui: &mut Ui, app: &mut App, sel: &str) {
+/// Which of a login's three panes is open. The head and the end stay; only the
+/// middle switches.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    Current,
+    Extras,
+    Typing,
+}
+
+impl Panel {
+    /// The stable name: the slot's id and the stored pane are keyed by it, so a
+    /// translated label would close the open pane whenever the language changed.
+    fn key(self) -> &'static str {
+        match self {
+            Panel::Current => "Current",
+            Panel::Extras => "Fields",
+            Panel::Typing => "Auto-type",
+        }
+    }
+}
+
+/// The strip's height and the room a slot keeps around its word, taken from the
+/// window's own bar so an inner strip reads as the same tab.
+const TABS: f32 = 44.0;
+const TAB_PAD: f32 = 14.0;
+
+/// One pane of a login, drawn as a tab: the hover wash and the accent rule under the
+/// one on show, exactly as the window's own strip draws them.
+fn tab(ui: &mut Ui, panel: Panel, on: bool, tint: egui::Color32) -> bool {
+    let font = TextStyle::Button.resolve(ui.style());
+    let key = panel.key();
+    let label = crate::shared::i18n::t(key);
+    let width = 2.0 * TAB_PAD
+        + ui.painter()
+            .layout_no_wrap(label.to_owned(), font, theme::palette().muted)
+            .size()
+            .x;
+    let resp = theme::slot(
+        ui,
+        width,
+        ui.id().with(("panel", key)),
+        on,
+        TABS,
+        theme::Edge::Floor,
+        |ui| {
+            ui.add_space(TAB_PAD);
+            ui.add(egui::Label::new(RichText::new(label).color(tint)));
+        },
+    );
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, label)
+    });
+    resp.clicked()
+}
+
+/// A login is three panes over one form: its own shape, the rows it carries beyond
+/// it, and what types it. The tab is kept by the record's id, so picking another
+/// login opens at the top.
+fn body_login(ui: &mut Ui, app: &mut App, sel: &str, fill: bool) {
+    let broken = app
+        .boxes
+        .session
+        .as_ref()
+        .and_then(|s| s.vault.logins.iter().find(|it| it.id == sel))
+        .is_some_and(|it| {
+            autotype::expand(it.sequence.as_str(), &autotype::Values::default()).is_err()
+        });
+    let id = egui::Id::new(("entry-panel", sel));
+    let mut panel = ui
+        .data(|d| d.get_temp::<Panel>(id))
+        .unwrap_or(Panel::Current);
+    let mut add_field = false;
+    let strip = ui.horizontal(|ui| {
+        let mut picked = panel;
+        for choice in [Panel::Current, Panel::Extras, Panel::Typing] {
+            let on = panel == choice;
+            let tint = if choice == Panel::Typing && broken {
+                theme::palette().error
+            } else if on {
+                theme::palette().text
+            } else {
+                theme::palette().muted
+            };
+            if tab(ui, choice, on, tint) {
+                picked = choice;
+            }
+        }
+        // The extra rows' own action rides their tab's strip: the tab already names
+        // the pane it works on, so a heading over a lone plus was a row for nothing.
+        if panel == Panel::Extras {
+            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                add_field = app
+                    .icons
+                    .button(ui, theme::Icon::Plus, 14.0, theme::ACCENT, "add field")
+                    .clicked();
+            });
+        }
+        picked
+    });
+    panel = strip.inner;
+    // The rule the slots mark sits on, run to the card's own edge: the strip is the
+    // window's bar, one level in.
+    let row = strip.response.rect;
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(ui.max_rect().min.x, row.max.y - 1.0),
+            egui::pos2(ui.max_rect().max.x, row.max.y),
+        ),
+        egui::CornerRadius::ZERO,
+        theme::palette().hair,
+    );
+    ui.data_mut(|d| d.insert_temp(id, panel));
+    ui.add_space(10.0);
+    let changed = match panel {
+        Panel::Current => current(ui, app, sel, fill),
+        Panel::Extras => extras(ui, app, sel, add_field),
+        Panel::Typing => typing(ui, app, sel),
+    };
+    tail(ui, app, sel, changed, &[], fill);
+}
+
+/// The login's own shape: who it is, where it goes, the password and the note.
+fn current(ui: &mut Ui, app: &mut App, sel: &str, fill: bool) -> bool {
     let icons = &app.icons;
     let Some(s) = app.boxes.session.as_mut() else {
-        return;
+        return false;
     };
     let mut changed = false;
     let mut copied = false;
@@ -288,7 +403,7 @@ fn body_login(ui: &mut Ui, app: &mut App, sel: &str) {
     let notes_was = show_notes;
 
     let it = s.vault.logins.iter_mut().find(|i| i.id == sel);
-    let Some(it) = it else { return };
+    let Some(it) = it else { return false };
     // The field is bound in place, so what it displaces is only readable before the
     // edit: copied here, kept when the edit reports itself.
     let mut previous = it.password.clone();
@@ -389,7 +504,9 @@ fn body_login(ui: &mut Ui, app: &mut App, sel: &str) {
                         })
                         .inner;
                     let resp = if unmatched {
-                        resp.on_hover_text("no site will match this address")
+                        resp.on_hover_text(crate::shared::i18n::t(
+                            "no site will match this address",
+                        ))
                     } else {
                         resp
                     };
@@ -449,32 +566,10 @@ fn body_login(ui: &mut Ui, app: &mut App, sel: &str) {
         sel,
         &mut it.notes,
         &mut show_notes,
+        fill,
     );
     changed |= notes_changed;
     copied |= notes_copied;
-
-    changed |= fields(ui, icons, &mut it.fields);
-
-    ui.add_space(12.0);
-    ui.label(
-        RichText::new(crate::shared::i18n::t("AUTO-TYPE"))
-            .small()
-            .color(theme::palette().muted),
-    );
-    ui.add_space(4.0);
-    changed |= ui
-        .add(
-            TextEdit::singleline(&mut it.sequence)
-                .hint_text(DEFAULT)
-                .desired_width(f32::INFINITY)
-                .margin(m),
-        )
-        .changed();
-    ui.add_space(2.0);
-    theme::hint(
-        ui,
-        crate::shared::i18n::t("{USERNAME}, {PASSWORD}, {OTP}, {ENTER}, {TAB}, {WAIT 250} — Ctrl+T types it into the focused window"),
-    );
 
     // The passkeys this login's sites answer for, read before the list is borrowed.
     let mine: Vec<String> = s
@@ -488,156 +583,205 @@ fn body_login(ui: &mut Ui, app: &mut App, sel: &str) {
         changed |= passkeys(ui, icons, &mut s.vault.passkeys, &mine, &mut s.confirm);
     }
 
-    tail(
-        ui,
-        app,
-        sel,
-        changed,
-        &[
-            (Field::Password, show_secret, secret_was),
-            (Field::Notes, show_notes, notes_was),
-        ],
-    );
-
+    // The eye's memory is kept here, because the two toggles are this pane's.
+    for (field, show, was) in [
+        (Field::Password, show_secret, secret_was),
+        (Field::Notes, show_notes, notes_was),
+    ] {
+        if show != was {
+            s.show(sel, field, show);
+        }
+    }
     if copied {
         app.shell
             .set_status("copied to clipboard", StatusKind::Saved);
     }
+    changed
 }
 
-fn body_card(ui: &mut Ui, app: &mut App, sel: &str) {
+/// The rows a login carries beyond its own shape: a PIN, a recovery code, a number.
+fn extras(ui: &mut Ui, app: &mut App, sel: &str, add: bool) -> bool {
     let icons = &app.icons;
     let Some(s) = app.boxes.session.as_mut() else {
-        return;
+        return false;
+    };
+    let Some(it) = s.vault.logins.iter_mut().find(|i| i.id == sel) else {
+        return false;
+    };
+    fields(ui, icons, &mut it.fields, add)
+}
+
+/// What types this login, and when it is allowed to.
+fn typing(ui: &mut Ui, app: &mut App, sel: &str) -> bool {
+    let Some(s) = app.boxes.session.as_mut() else {
+        return false;
+    };
+    let Some(it) = s.vault.logins.iter_mut().find(|i| i.id == sel) else {
+        return false;
     };
     let mut changed = false;
-    let mut copied = false;
-    let mut show_number = s.shown(sel, Field::Password);
-    let number_was = show_number;
-    let mut show_notes = s.shown(sel, Field::Notes);
-    let notes_was = show_notes;
-
-    let Some(it) = s.vault.cards.iter_mut().find(|i| i.id == sel) else {
-        return;
-    };
     let m = egui::Margin::symmetric(10, 7);
+    let can_title = autotype::can_read_title();
+    let can_type = autotype::pick().is_some();
 
+    let error = autotype::expand(it.sequence.as_str(), &autotype::Values::default()).err();
+    ui.add_space(12.0);
+    theme::field_label(ui, "Types into another window");
+    ui.add_space(4.0);
+    let label = autotype::PRESETS
+        .iter()
+        .copied()
+        .find(|preset| *preset == it.sequence)
+        .unwrap_or_else(|| crate::shared::i18n::t("Custom"));
+    // The select is as wide as the template it shows — but never more than half the
+    // row, or the field it sits beside would be squeezed to nothing.
+    let picker = (ui
+        .painter()
+        .layout_no_wrap(
+            label.to_owned(),
+            TextStyle::Button.resolve(ui.style()),
+            theme::palette().muted,
+        )
+        .size()
+        .x
+        + ui.spacing().icon_spacing
+        + ui.spacing().icon_width
+        + 2.0 * ui.spacing().button_padding.x)
+        .min(0.5 * ui.available_width());
     ui.horizontal(|ui| {
-        let w = record::width(ui, 3, 90.0);
-        let field = ui.add(
-            TextEdit::singleline(&mut *it.number)
-                .password(!show_number)
-                .font(TextStyle::Monospace)
-                .hint_text(crate::shared::i18n::t("card number"))
-                .desired_width(w)
+        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+            theme::combo(
+                ui,
+                egui::ComboBox::from_id_salt("sequence-preset")
+                    .width(picker)
+                    .truncate()
+                    .selected_text(label),
+                |ui| {
+                    theme::menu(ui);
+                    for preset in autotype::PRESETS {
+                        if ui.selectable_label(preset == it.sequence, preset).clicked() {
+                            it.sequence = preset.to_owned();
+                            changed = true;
+                        }
+                    }
+                },
+            )
+            .response
+            .on_hover_text(label);
+            ui.with_layout(Layout::left_to_right(egui::Align::Center), |ui| {
+                let w = ui.available_width();
+                let resp = ui
+                    .scope(|ui| {
+                        if error.is_some() {
+                            let widgets = &mut ui.style_mut().visuals.widgets;
+                            widgets.inactive.bg_stroke = theme::stroke(theme::palette().error, 1.0);
+                            widgets.hovered.bg_stroke = theme::stroke(theme::palette().error, 1.0);
+                        }
+                        ui.add(
+                            TextEdit::singleline(&mut it.sequence)
+                                .font(TextStyle::Monospace)
+                                .hint_text(DEFAULT)
+                                .desired_width(w)
+                                .margin(m),
+                        )
+                    })
+                    .inner;
+                changed |= resp.changed();
+            });
+        });
+    });
+    if let Some(message) = &error {
+        ui.add_space(2.0);
+        ui.label(RichText::new(message).small().color(theme::palette().error));
+    }
+    ui.add_space(12.0);
+    theme::field_label(ui, "Only when the focused window is");
+    ui.add_space(4.0);
+    changed |= ui
+        .add(
+            TextEdit::singleline(&mut it.window)
+                .hint_text(crate::shared::i18n::t("window title, optional"))
+                .desired_width(f32::INFINITY)
                 .margin(m),
+        )
+        .changed();
+    if !can_title {
+        ui.add_space(4.0);
+        theme::hint(
+            ui,
+            crate::shared::i18n::t(
+                "not checked in this session — this desktop cannot report the window title",
+            ),
         );
-        changed |= field.changed();
-        let (toggle, copy) = record::secret_actions(ui, icons, show_number);
-        if toggle {
-            show_number = !show_number;
-        }
-        if copy {
-            app.shell.copy_text(ui.ctx(), it.number.as_str());
-            copied = true;
+    }
+    ui.add_space(10.0);
+    ui.horizontal_wrapped(|ui| {
+        for (token, help) in [
+            ("{USERNAME}", "the login's username"),
+            ("{PASSWORD}", "the login's password"),
+            ("{OTP}", "the one-time code"),
+            ("{ENTER}", "Enter"),
+            ("{TAB}", "Tab"),
+            ("{WAIT 250}", "waits 250 ms"),
+        ] {
+            egui::Frame::NONE
+                .fill(theme::palette().wash)
+                .corner_radius(theme::radius(6))
+                .inner_margin(egui::Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(token)
+                            .monospace()
+                            .small()
+                            .color(theme::palette().muted),
+                    )
+                    .on_hover_text(crate::shared::i18n::t(help));
+                });
         }
     });
-
-    ui.add_space(14.0);
-    ui.horizontal(|ui| {
-        let w = record::width(ui, 1, 90.0);
-        changed |= ui
-            .add(
-                TextEdit::singleline(&mut it.holder)
-                    .hint_text(crate::shared::i18n::t("cardholder"))
-                    .desired_width(w)
-                    .margin(m),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                TextEdit::singleline(&mut it.expiry)
-                    .hint_text(crate::shared::i18n::t("MM/YY"))
-                    .desired_width(84.0)
-                    .margin(m),
-            )
-            .changed();
-    });
-
-    ui.add_space(14.0);
-    let (notes_changed, notes_copied) = notes(
-        ui,
-        &mut app.shell,
-        icons,
-        sel,
-        &mut it.notes,
-        &mut show_notes,
+    ui.add_space(12.0);
+    let line = ui.cursor().top();
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(ui.max_rect().min.x, line),
+            egui::pos2(ui.max_rect().max.x, line + 1.0),
+        ),
+        egui::CornerRadius::ZERO,
+        theme::palette().hair,
     );
-    changed |= notes_changed;
-    copied |= notes_copied;
-    changed |= fields(ui, icons, &mut it.fields);
-
-    tail(
-        ui,
-        app,
-        sel,
-        changed,
-        &[
-            (Field::Password, show_number, number_was),
-            (Field::Notes, show_notes, notes_was),
-        ],
-    );
-
-    if copied {
-        app.shell
-            .set_status("copied to clipboard", StatusKind::Saved);
-    }
-}
-
-fn body_identity(ui: &mut Ui, app: &mut App, sel: &str) {
-    let icons = &app.icons;
-    let Some(s) = app.boxes.session.as_mut() else {
-        return;
+    ui.add_space(10.0);
+    let key = if cfg!(target_os = "macos") {
+        "⌘T"
+    } else {
+        "Ctrl+T"
     };
-    let mut changed = false;
-    let mut copied = false;
-    let mut show_notes = s.shown(sel, Field::Notes);
-    let notes_was = show_notes;
-
-    let Some(it) = s.vault.identities.iter_mut().find(|i| i.id == sel) else {
-        return;
-    };
-
-    let (notes_changed, notes_copied) = notes(
+    theme::hint(
         ui,
-        &mut app.shell,
-        icons,
-        sel,
-        &mut it.notes,
-        &mut show_notes,
+        &crate::shared::i18n::tf("{key} types it into the focused window", &[("key", &key)]),
     );
-    changed |= notes_changed;
-    copied |= notes_copied;
-    changed |= fields(ui, icons, &mut it.fields);
-
-    tail(
+    theme::hint(
         ui,
-        app,
-        sel,
-        changed,
-        &[(Field::Notes, show_notes, notes_was)],
+        &crate::shared::i18n::tf(
+            "you have {seconds} seconds to click the field",
+            &[("seconds", &autotype::LEAD.as_secs())],
+        ),
     );
-
-    if copied {
-        app.shell
-            .set_status("copied to clipboard", StatusKind::Saved);
+    if !can_type {
+        theme::hint(
+            ui,
+            crate::shared::i18n::t(
+                "this session cannot type for you — install xdotool (X11) or wtype (Wayland)",
+            ),
+        );
     }
+
+    changed
 }
 
 /// A passkey as the app shows it: what it answers for, what it signs with, and the
 /// two things the user may do here — rename it in the head, delete it through the
 /// trash. The key itself is never drawn, printed or copied.
-fn body_passkey(ui: &mut Ui, app: &mut App, sel: &str) {
+fn body_passkey(ui: &mut Ui, app: &mut App, sel: &str, fill: bool) {
     let Some(s) = app.boxes.session.as_mut() else {
         return;
     };
@@ -663,7 +807,7 @@ fn body_passkey(ui: &mut Ui, app: &mut App, sel: &str) {
         .small()
         .color(theme::palette().muted),
     );
-    tail(ui, app, sel, false, &[]);
+    tail(ui, app, sel, false, &[], fill);
 }
 
 /// The name a COSE algorithm goes by on screen.
@@ -742,7 +886,17 @@ fn notes(
     _sel: &str,
     text: &mut zeroize::Zeroizing<String>,
     shown: &mut bool,
+    fill: bool,
 ) -> (bool, bool) {
+    // The note takes what the card has left under the fields above it, less the trash's
+    // own row: a short note still fills the card, a long one scrolls inside the box.
+    // A dialog is as tall as its own fields, so there the note keeps its rows.
+    let under = 28.0 + responsive::target(ui.ctx());
+    let room = if fill {
+        (ui.available_height() - under).max(0.0)
+    } else {
+        0.0
+    };
     let (field, copy) = record::secret(
         ui,
         icons,
@@ -755,6 +909,7 @@ fn notes(
                 TextEdit::multiline(&mut **text)
                     .password(!shown)
                     .desired_rows(7)
+                    .min_size(egui::vec2(w, room))
                     .hint_text(crate::shared::i18n::t("notes…"))
                     .desired_width(w)
                     .margin(egui::Margin::symmetric(10, 8)),
@@ -767,102 +922,139 @@ fn notes(
     (field.changed(), copy)
 }
 
+/// The marks a field row ends on, in their visual order: the eye, the lock, the
+/// trash. `secret` is the state the row was measured with, so pressing the lock
+/// lands on the next frame instead of widening the row mid-layout. Returns whether
+/// the lock was pressed and whether the trash was.
+fn marks(ui: &mut Ui, icons: &theme::Icons, secret: bool, shown: &mut bool) -> (bool, bool) {
+    if secret
+        && icons
+            .button(
+                ui,
+                if *shown {
+                    theme::Icon::EyeOff
+                } else {
+                    theme::Icon::Eye
+                },
+                13.0,
+                theme::palette().muted,
+                if *shown { "hide" } else { "show" },
+            )
+            .clicked()
+    {
+        *shown = !*shown;
+    }
+    let locked = icons
+        .button(
+            ui,
+            if secret {
+                theme::Icon::LockKeyhole
+            } else {
+                theme::Icon::LockKeyholeOpen
+            },
+            13.0,
+            if secret {
+                theme::ACCENT
+            } else {
+                theme::palette().muted
+            },
+            "secret",
+        )
+        .clicked();
+    let deleted = icons
+        .button(
+            ui,
+            theme::Icon::Trash,
+            13.0,
+            theme::palette().error,
+            "Delete",
+        )
+        .clicked();
+    (locked, deleted)
+}
+
 /// The rows a record carries beyond its own shape: a label, a value, and whether the
 /// value is a secret. Returns whether anything about them changed.
-fn fields(ui: &mut Ui, icons: &theme::Icons, list: &mut Vec<Custom>) -> bool {
+fn fields(ui: &mut Ui, icons: &theme::Icons, list: &mut Vec<Custom>, add: bool) -> bool {
     let mut changed = false;
     let mut drop: Option<usize> = None;
     ui.add_space(12.0);
-    ui.label(
-        RichText::new(crate::shared::i18n::t("FIELDS"))
-            .small()
-            .color(theme::palette().muted),
-    );
-    ui.add_space(4.0);
-    egui::Grid::new(ui.id().with("fields"))
-        .num_columns(4)
-        .spacing(egui::vec2(6.0, 6.0))
-        .show(ui, |ui| {
-            for (index, field) in list.iter_mut().enumerate() {
-                changed |= ui
-                    .add(
-                        TextEdit::singleline(&mut field.label)
-                            .hint_text(crate::shared::i18n::t("label"))
-                            .desired_width(104.0),
-                    )
-                    .changed();
-                let id = ui.id().with(("field-shown", index));
-                let shown = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+    if list.is_empty() {
+        theme::hint(
+            ui,
+            "no fields yet — add one for a PIN, a security answer or a recovery code",
+        );
+    }
+    // One column for the whole pane, measured before a row is drawn: the marks take
+    // their squares and the gap before each, and what is left is the room the two
+    // inputs share. Nothing here reads the width back mid-layout, so every row lands
+    // on the card's edge whether or not its value is a secret. A plain row draws no
+    // eye, so its value takes the eye's square and the lock and trash stay put.
+    let side = responsive::target(ui.ctx());
+    let gap = ui.spacing().item_spacing.x;
+    let room = (ui.available_width() - 3.0 * side - 3.0 * gap).max(0.0);
+    let label = (room * 0.34).clamp(96.0, 150.0).min(room);
+    let value = (room - label - gap).max(24.0);
+    let stacked = value < 140.0;
+    let m = egui::Margin::symmetric(10, 7);
+    for (index, field) in list.iter_mut().enumerate() {
+        let id = ui.id().with(("field-shown", index));
+        let mut shown = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+        let was = shown;
+        let secret = field.secret;
+        let width = if secret { value } else { value + side + gap };
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(
+                    TextEdit::singleline(&mut field.label)
+                        .hint_text(crate::shared::i18n::t("label"))
+                        .desired_width(if stacked { room } else { label })
+                        .margin(m),
+                )
+                .changed();
+            if !stacked {
                 changed |= ui
                     .add(
                         TextEdit::singleline(&mut *field.value)
                             .password(field.secret && !shown)
-                            .hint_text(crate::shared::i18n::t("value")),
+                            .hint_text(crate::shared::i18n::t("value"))
+                            .desired_width(width)
+                            .margin(m),
                     )
                     .changed();
-                ui.horizontal(|ui| {
-                    if field.secret
-                        && icons
-                            .button(
-                                ui,
-                                if shown {
-                                    theme::Icon::EyeOff
-                                } else {
-                                    theme::Icon::Eye
-                                },
-                                13.0,
-                                theme::palette().muted,
-                                if shown { "hide" } else { "show" },
-                            )
-                            .clicked()
-                    {
-                        ui.data_mut(|d| d.insert_temp(id, !shown));
-                    }
-                    if icons
-                        .button(
-                            ui,
-                            if field.secret {
-                                theme::Icon::LockKeyhole
-                            } else {
-                                theme::Icon::LockKeyholeOpen
-                            },
-                            13.0,
-                            if field.secret {
-                                theme::ACCENT
-                            } else {
-                                theme::palette().muted
-                            },
-                            "secret",
-                        )
-                        .clicked()
-                    {
-                        field.secret = !field.secret;
-                        changed = true;
-                    }
-                    if icons
-                        .button(
-                            ui,
-                            theme::Icon::Trash,
-                            13.0,
-                            theme::palette().error,
-                            "Delete",
-                        )
-                        .clicked()
-                    {
-                        drop = Some(index);
-                    }
-                });
-                ui.end_row();
+            }
+            let (locked, deleted) = marks(ui, icons, secret, &mut shown);
+            if locked {
+                field.secret = !secret;
+                changed = true;
+            }
+            if deleted {
+                drop = Some(index);
             }
         });
+        if stacked {
+            changed |= ui
+                .add(
+                    TextEdit::singleline(&mut *field.value)
+                        .password(field.secret && !shown)
+                        .hint_text(crate::shared::i18n::t("value"))
+                        .desired_width(f32::INFINITY)
+                        .margin(m),
+                )
+                .changed();
+            // A stacked field is two lines: the air after it keeps the next field's
+            // label from reading as this one's value.
+            ui.add_space(6.0);
+        }
+        if shown != was {
+            ui.data_mut(|d| d.insert_temp(id, shown));
+        }
+    }
     if let Some(index) = drop {
         list.remove(index);
         changed = true;
     }
-    if icons
-        .labeled(ui, theme::Icon::Plus, 13.0, theme::ACCENT, "add field")
-        .clicked()
-    {
+    if add {
         list.push(Custom::new("", "", false));
         changed = true;
     }
@@ -870,12 +1062,24 @@ fn fields(ui: &mut Ui, icons: &theme::Icons, list: &mut Vec<Custom>) -> bool {
 }
 
 /// The end every shape shares: the delete mark, the save, and the eye's memory.
-fn tail(ui: &mut Ui, app: &mut App, sel: &str, changed: bool, flags: &[(Field, bool, bool)]) {
+fn tail(
+    ui: &mut Ui,
+    app: &mut App,
+    sel: &str,
+    changed: bool,
+    flags: &[(Field, bool, bool)],
+    fill: bool,
+) {
     let icons = &app.icons;
     let Some(s) = app.boxes.session.as_mut() else {
         return;
     };
-    if record::delete(ui, icons, 28.0) {
+    let deleted = if fill {
+        record::corner(ui, icons, 28.0)
+    } else {
+        record::delete(ui, icons, 28.0)
+    };
+    if deleted {
         s.confirm = Some(Confirm::Entry(sel.to_owned()));
     }
     if changed {
@@ -943,6 +1147,12 @@ pub(crate) mod tests {
             new_folder: None,
             editing_entry: None,
             moving_entry: None,
+            remote_vault: false,
+            meta_pending: false,
+            load_pending: false,
+            save_pending: false,
+            edit_version: 0,
+            save_version: 0,
         }
     }
 
@@ -965,20 +1175,12 @@ pub(crate) mod tests {
         let size = egui::vec2(1000.0, 700.0);
         shot::frame(&ctx, size, Vec::new(), |ui| {
             face(ui, &mut app, &id, false);
-            body(ui, &mut app, &id);
+            body(ui, &mut app, &id, true);
         });
         shot::frame(&ctx, size, Vec::new(), |ui| {
             face(ui, &mut app, &id, false);
-            body(ui, &mut app, &id);
+            body(ui, &mut app, &id, true);
         })
-    }
-
-    /// One card painted through the editor twice, the second frame settled.
-    pub(crate) fn painted_card(item: crate::vault::model::Card) -> Vec<ClippedShape> {
-        let id = item.id.clone();
-        let mut vault = Vault::new("Test");
-        vault.cards = vec![item];
-        painted_with(vault, id)
     }
 
     /// One passkey painted the way the pane shows it.
@@ -1048,40 +1250,172 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_card_draws_its_own_fields_beside_the_shared_ones() {
-        let mut card = crate::vault::model::Card::new(1);
-        card.id = "card".to_owned();
-        card.fields
-            .push(crate::vault::model::Field::new("PIN", "", true));
-        let said = words(&painted_card(card));
-        for hint in ["card number", "cardholder", "MM/YY", "notes…", "value"] {
-            assert!(
-                said.iter().any(|word| word == hint),
-                "{hint:?} is missing: {said:?}"
-            );
-        }
-    }
-
     /// The field under the glyphs reading `text`: the smallest box around them,
     /// the lower one when the same string is painted twice.
     pub(crate) fn field(shapes: &[ClippedShape], text: &str) -> egui::epaint::RectShape {
-        let hint = shapes
+        hinted(shapes, text)
+            .pop()
+            .unwrap_or_else(|| panic!("{text:?} sits on screen"))
+    }
+
+    /// Every field under the glyphs reading `text`, top to bottom: one per row that
+    /// paints the hint.
+    fn hinted(shapes: &[ClippedShape], text: &str) -> Vec<egui::epaint::RectShape> {
+        let mut out: Vec<_> = shapes
             .iter()
             .filter_map(|s| match &s.shape {
                 Shape::Text(t) if t.galley.text() == text => Some(s.shape.visual_bounding_rect()),
                 _ => None,
             })
-            .max_by(|a, b| a.center().y.partial_cmp(&b.center().y).unwrap())
-            .unwrap_or_else(|| panic!("{text:?} sits on screen"));
+            .filter_map(|hint| {
+                shapes
+                    .iter()
+                    .filter_map(|s| match &s.shape {
+                        Shape::Rect(r) if r.rect.contains(hint.center()) => Some(r.clone()),
+                        _ => None,
+                    })
+                    .min_by(|a, b| a.rect.area().partial_cmp(&b.rect.area()).unwrap())
+            })
+            .collect();
+        out.sort_by(|a, b| a.rect.center().y.partial_cmp(&b.rect.center().y).unwrap());
+        out
+    }
+
+    /// The pane's content edge: the rule under the tab strip runs its whole width.
+    fn pane(shapes: &[ClippedShape]) -> egui::Rect {
         shapes
             .iter()
             .filter_map(|s| match &s.shape {
-                Shape::Rect(r) if r.rect.contains(hint.center()) => Some(r.clone()),
+                Shape::Rect(r) if r.rect.height() <= 1.5 => Some(r.rect),
                 _ => None,
             })
-            .min_by(|a, b| a.rect.area().partial_cmp(&b.rect.area()).unwrap())
-            .expect("the hint sits inside its field")
+            .max_by(|a, b| a.width().partial_cmp(&b.width()).unwrap())
+            .expect("the strip marks its floor")
+    }
+
+    /// One login painted with its Fields pane open, the second frame settled, and
+    /// the pixels dropped where the shots live.
+    fn painted_fields(item: Login, size: egui::Vec2, name: &str) -> Vec<ClippedShape> {
+        let id = item.id.clone();
+        let mut vault = Vault::new("Test");
+        vault.logins = vec![item];
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = App::blank(&ctx);
+        app.screen = Screen::Main;
+        app.boxes.session = Some(session(vault, Some(id.clone())));
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(("entry-panel", id.as_str())), Panel::Extras));
+        shot::frame(&ctx, size, Vec::new(), |ui| body(ui, &mut app, &id, true));
+        let shapes = shot::frame(&ctx, size, Vec::new(), |ui| body(ui, &mut app, &id, true));
+        shot::png(&ctx, name, size.x as u32, size.y as u32, None, |ui| {
+            body(ui, &mut app, &id, true)
+        });
+        shapes
+    }
+
+    /// Two rows, one of them secret, so the hint of both fields is painted.
+    fn two_fields() -> Login {
+        let mut item = Login::new(0);
+        item.fields.push(Custom::new("", "", false));
+        item.fields.push(Custom::new("", "", true));
+        item
+    }
+
+    /// A wide card holds its columns: both labels start where the first does, both
+    /// values too, and the marks end on one column, the eye's square kept even on
+    /// the row that draws no eye, so the trash never moves.
+    #[test]
+    fn the_extra_rows_share_their_columns() {
+        let shapes = painted_fields(two_fields(), egui::vec2(700.0, 420.0), "fields-wide");
+        let labels = hinted(&shapes, "label");
+        let values = hinted(&shapes, "value");
+        assert_eq!(labels.len(), 2, "both rows paint their label hint");
+        assert_eq!(values.len(), 2, "both rows paint their value hint");
+        assert!(
+            (labels[0].rect.min.x - labels[1].rect.min.x).abs() <= 1.0,
+            "the labels sit apart: {:?}",
+            labels.iter().map(|l| l.rect.min.x).collect::<Vec<_>>()
+        );
+        assert!(
+            (values[0].rect.min.x - values[1].rect.min.x).abs() <= 1.0,
+            "the values sit apart: {:?}",
+            values.iter().map(|v| v.rect.min.x).collect::<Vec<_>>()
+        );
+
+        // The squares trailing the field, left to right: the plain row keeps the
+        // eye's hole unpainted, so it paints one square less, on the same columns.
+        let squares = |y: f32| {
+            let mut out: Vec<egui::Rect> = shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    Shape::Rect(r)
+                        if (20.0..=40.0).contains(&r.rect.width())
+                            && (r.rect.center().y - y).abs() <= 3.0 =>
+                    {
+                        Some(r.rect)
+                    }
+                    _ => None,
+                })
+                .collect();
+            out.sort_by(|a, b| a.min.x.partial_cmp(&b.min.x).unwrap());
+            out
+        };
+        let plain = squares(labels[0].rect.center().y);
+        let secret = squares(labels[1].rect.center().y);
+        assert_eq!(
+            plain.len(),
+            2,
+            "the plain row ends on the lock and the trash"
+        );
+        assert_eq!(secret.len(), 3, "the secret row opens on the eye");
+        for (kept, drawn) in plain.iter().zip(secret.iter().skip(1)) {
+            assert!(
+                (kept.min.x - drawn.min.x).abs() <= 1.0 && (kept.max.x - drawn.max.x).abs() <= 1.0,
+                "a mark moves when the eye is drawn: {kept:?} against {drawn:?}"
+            );
+        }
+        let edge = pane(&shapes).max.x;
+        assert!(
+            (secret[2].max.x - edge).abs() <= 1.0,
+            "the trash is the row's edge: {} against {edge}",
+            secret[2].max.x
+        );
+        assert!(
+            (values[0].rect.max.x - secret[0].max.x).abs() <= 1.0,
+            "the plain value leaves the eye's square empty: {:?} against {:?}",
+            values[0].rect,
+            secret[0]
+        );
+    }
+
+    /// A narrow card stacks: the value takes the row's whole width, and nothing
+    /// spills off the canvas.
+    #[test]
+    fn a_narrow_card_stacks_the_value() {
+        let size = egui::vec2(300.0, 620.0);
+        let shapes = painted_fields(two_fields(), size, "fields-narrow");
+        let values = hinted(&shapes, "value");
+        assert_eq!(values.len(), 2, "both rows paint their value hint");
+        let edge = pane(&shapes);
+        for value in &values {
+            assert!(
+                (value.rect.min.x - edge.min.x).abs() <= 1.5
+                    && (value.rect.max.x - edge.max.x).abs() <= 1.5,
+                "the stacked value does not fill the row: {:?} against {edge:?}",
+                value.rect
+            );
+        }
+        let canvas = egui::Rect::from_min_size(egui::Pos2::ZERO, size).expand(1.0);
+        for shape in &shapes {
+            let rect = shape.shape.visual_bounding_rect();
+            if !rect.is_positive() {
+                continue;
+            }
+            assert!(
+                canvas.contains_rect(rect),
+                "a shape spills off the canvas: {rect:?}"
+            );
+        }
     }
 
     /// The right edge of the row's last mark: the control that trails the field,
@@ -1116,7 +1450,7 @@ pub(crate) mod tests {
 
         let size = egui::vec2(1000.0, 700.0);
         let mut frame = |events: Vec<egui::Event>| {
-            shot::frame(&ctx, size, events, |ui| body(ui, &mut app, &id))
+            shot::frame(&ctx, size, events, |ui| body(ui, &mut app, &id, true))
         };
         frame(Vec::new());
         let shapes = frame(Vec::new());
@@ -1163,6 +1497,66 @@ pub(crate) mod tests {
         );
     }
 
+    /// The strip switches only the middle of the form: the rows a login carries
+    /// beyond its own shape stay behind their tab until it is picked.
+    #[test]
+    fn a_login_opens_on_its_own_shape_and_switches_panes() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut item = Login::new(0);
+        item.fields.push(Custom::new("PIN", "1234", false));
+        let id = item.id.clone();
+        let mut vault = Vault::new("Test");
+        vault.logins = vec![item];
+        let mut app = App::blank(&ctx);
+        app.screen = Screen::Main;
+        app.boxes.session = Some(session(vault, Some(id.clone())));
+
+        let size = egui::vec2(1000.0, 700.0);
+        let mut frame = |events: Vec<egui::Event>| {
+            shot::frame(&ctx, size, events, |ui| body(ui, &mut app, &id, true))
+        };
+        let first = frame(Vec::new());
+        let said = words(&first);
+        assert!(
+            said.iter().any(|word| word == "password"),
+            "the first pane is the login's own shape: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|word| word == "PIN"),
+            "the extra rows start closed: {said:?}"
+        );
+
+        let at = first
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Text(t) if t.galley.text() == "Fields" => {
+                    Some(s.shape.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .next()
+            .expect("the fields tab is drawn");
+        let click = |pressed| {
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ]
+        };
+        frame(click(true));
+        let shapes = frame(click(false));
+        let said = words(&shapes);
+        assert!(
+            said.iter().any(|word| word == "PIN"),
+            "the tab opens the extra rows: {said:?}"
+        );
+    }
+
     /// Both secret rows give up exactly one square per trailing mark, so the
     /// card ends flush after the last one instead of leaving a gap.
     #[test]
@@ -1175,6 +1569,32 @@ pub(crate) mod tests {
         assert!(
             (password - notes).abs() <= 3.0,
             "the secret rows end apart: password {password}, notes {notes}"
+        );
+    }
+
+    /// The password row is as tall as its field, not as the card: the notes row
+    /// follows right under it instead of leaving the whole leftover height between.
+    #[test]
+    fn the_password_row_keeps_its_own_height() {
+        let shapes = painted(Login::new(0));
+
+        let gap = field(&shapes, "notes…").rect.top() - field(&shapes, "password").rect.bottom();
+        assert!(
+            gap < 30.0,
+            "the password row stretches the card: {gap} px before the notes"
+        );
+    }
+
+    /// The note is the field that gives: it takes the height the window has left, so
+    /// the card fills the pane instead of ending a few rows under the password.
+    #[test]
+    fn the_notes_take_the_height_the_window_has_left() {
+        let shapes = painted(Login::new(0));
+
+        let notes = field(&shapes, "notes…").rect;
+        assert!(
+            notes.bottom() > 600.0,
+            "the note stops short of the window: {notes:?}"
         );
     }
 
@@ -1250,7 +1670,7 @@ pub(crate) mod tests {
 
         let size = egui::vec2(1000.0, 700.0);
         let mut frame = |events: Vec<egui::Event>| {
-            shot::frame(&ctx, size, events, |ui| body(ui, &mut app, &id))
+            shot::frame(&ctx, size, events, |ui| body(ui, &mut app, &id, true))
         };
         frame(Vec::new());
         let shapes = frame(Vec::new());
@@ -1323,7 +1743,7 @@ pub(crate) mod tests {
         let mut frame = |events: Vec<egui::Event>| {
             shot::frame(&ctx, size, events, |ui| {
                 face(ui, &mut app, &id, false);
-                body(ui, &mut app, &id);
+                body(ui, &mut app, &id, true);
             })
         };
         let click = |at: egui::Pos2, pressed: bool| {
@@ -1377,6 +1797,39 @@ pub(crate) mod tests {
             "the default tile clears the entry's icon"
         );
         assert!(s.dirty, "the pick marks the vault dirty");
+    }
+
+    /// The Current pane's card fills the pane without growing a bar of its own: a bar
+    /// would take a strip off the card's width for content that already fits.
+    #[test]
+    fn the_current_pane_does_not_grow_a_bar() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let item = Login::new(0);
+        let id = item.id.clone();
+        let mut vault = Vault::new("Test");
+        vault.logins = vec![item];
+        let mut app = App::blank(&ctx);
+        app.screen = Screen::Main;
+        app.boxes.session = Some(session(vault, Some(id)));
+
+        let size = egui::vec2(1000.0, 700.0);
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            shapes = shot::frame(&ctx, size, Vec::new(), |ui| show(ui, &mut app));
+        }
+        let card = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Rect(r) if r.fill == theme::palette().panel => Some(r.rect),
+                _ => None,
+            })
+            .max_by(|a, b| a.height().total_cmp(&b.height()))
+            .expect("the card is painted");
+        assert!(
+            card.width() > size.x - 5.0,
+            "the pane grew a bar for the card: {card:?}"
+        );
     }
 
     /// The image on the editor's first row, where the icon sits. egui paints a
@@ -1448,6 +1901,53 @@ pub(crate) mod tests {
             said.iter()
                 .all(|line| !line.contains("ssh key in the drawer")),
             "and the words never reach the screen: {said:?}"
+        );
+    }
+    /// The card is centred, what it holds is not: a pane's labels and hints take the
+    /// card's left edge, so two of them start where the other does.
+    #[test]
+    fn a_pane_left_aligns_the_card_it_sits_in() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let item = Login::new(0);
+        let id = item.id.clone();
+        let mut vault = Vault::new("Test");
+        vault.logins = vec![item];
+        let mut app = App::blank(&ctx);
+        app.screen = Screen::Main;
+        app.boxes.session = Some(session(vault, Some(id.clone())));
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(("entry-panel", id.as_str())), Panel::Typing));
+
+        let size = egui::vec2(860.0, 640.0);
+        shot::frame(&ctx, size, Vec::new(), |ui| show(ui, &mut app));
+        let shapes = shot::frame(&ctx, size, Vec::new(), |ui| show(ui, &mut app));
+        let ink = |text: &str| {
+            shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    Shape::Text(t) if t.galley.text() == text => {
+                        Some(s.shape.visual_bounding_rect().min.x)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{text:?} is painted"))
+        };
+
+        let labels = [
+            ink("TYPES INTO ANOTHER WINDOW"),
+            ink("ONLY WHEN THE FOCUSED WINDOW IS"),
+        ];
+        assert!(
+            (labels[0] - labels[1]).abs() <= 1.0,
+            "the pane centres its labels instead of holding the card's edge: {labels:?}"
+        );
+        let hints = [
+            ink("Ctrl+T types it into the focused window"),
+            ink("you have 3 seconds to click the field"),
+        ];
+        assert!(
+            (hints[0] - hints[1]).abs() <= 2.0,
+            "the pane centres its hints instead of holding the card's edge: {hints:?}"
         );
     }
 }

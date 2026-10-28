@@ -10,7 +10,8 @@ mod write;
 mod tests;
 
 pub use atomic::{
-    clear_staging, forget_stash, modified_time, private_sink, stash, write_atomic, write_private,
+    clear_legacy_stash, clear_orphan_tmps, clear_staging, forget_stash, modified_time,
+    private_sink, stash, stash_path, write_atomic, write_private,
 };
 pub use header::KdfHeader;
 pub use write::save;
@@ -42,6 +43,7 @@ pub const EXT: &str = "pandora";
 const KEYFILE_MAX: u64 = 8 * 1024 * 1024;
 
 /// The derived master key plus the header needed to re-encrypt on save.
+#[derive(Clone)]
 pub struct Credentials {
     pub key: Key,
     header: KdfHeader,
@@ -215,6 +217,7 @@ pub fn open(
     password: &str,
     keyfile: Option<&[u8]>,
 ) -> Result<(Credentials, Vault), String> {
+    clear_legacy_stash(path);
     open_with(path, password, keyfile, None)
 }
 
@@ -241,6 +244,7 @@ pub fn open_with(
     keyfile: Option<&[u8]>,
     factor: Option<&dyn Factor>,
 ) -> Result<(Credentials, Vault), String> {
+    clear_legacy_stash(path);
     let header = require_header(path)?;
     let salt = codec::decode(&header.kdf.salt)?;
     let params = KdfParams {
@@ -370,6 +374,7 @@ pub fn has_recovery(path: &Path) -> bool {
 /// Open with a key derived earlier, for biometric unlock: no KDF runs, and the
 /// AEAD tag is the whole check, so a rotated key simply fails to decrypt.
 pub fn open_keyed(path: &Path, key: Key) -> Result<(Credentials, Vault), String> {
+    clear_legacy_stash(path);
     let header = require_header(path)?;
     let vault = decrypt_manifest(path, &header, &key)?;
     Ok((

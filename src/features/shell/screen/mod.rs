@@ -6,7 +6,6 @@ use crate::features::health::ui as review;
 use crate::features::settings::ui as settings;
 use crate::shared::theme;
 use crate::shared::ui::responsive;
-use crate::vault::model::Kind;
 use egui::{Color32, Context, Layout, RichText, Ui};
 
 pub fn main(ui: &mut Ui, app: &mut App) {
@@ -72,7 +71,6 @@ pub fn main(ui: &mut Ui, app: &mut App) {
         .unwrap_or(Tab::Passwords)
     {
         Tab::Passwords => passwords::main(ui, app, compact),
-        Tab::Cards | Tab::Identities => passwords::main(ui, app, compact),
         Tab::Drive => drive::main(ui, app, compact),
         Tab::Codes => codes::main(ui, app, compact),
         Tab::Health => review::main(ui, app, compact),
@@ -154,8 +152,6 @@ fn tabs(ui: &mut Ui, app: &mut App) {
                 ui.add_space(12.0);
                 for (pane, icon, label) in [
                     (Tab::Passwords, theme::Icon::Key, "Passwords"),
-                    (Tab::Cards, theme::Icon::CreditCard, "Cards"),
-                    (Tab::Identities, theme::Icon::User, "Identities"),
                     (Tab::Drive, theme::Icon::Folder, "Files"),
                     (Tab::Codes, theme::Icon::RefreshCw, "Codes"),
                     (Tab::Health, theme::Icon::History, "Review"),
@@ -268,7 +264,8 @@ fn bar_button(
     resp.on_hover_text(tooltip).clicked()
 }
 
-/// The pane's own `+`: the drive holds note and file, so it is the one that asks.
+/// The pane's own `+`: the drive holds note and file, so it is the one that asks; a code
+/// asks for its name and seed in its own pane's form.
 fn new_modal(ctx: &Context, app: &mut App) {
     if !app.boxes.session.as_ref().is_some_and(|s| s.show_new) {
         return;
@@ -276,13 +273,11 @@ fn new_modal(ctx: &Context, app: &mut App) {
     let Some(tab) = app.boxes.session.as_ref().map(|s| s.tab) else {
         return;
     };
+    if tab == Tab::Codes {
+        return;
+    }
     if tab != Tab::Drive {
-        match tab {
-            Tab::Codes => app.boxes.add_otp(),
-            Tab::Cards => app.boxes.add(Kind::Card),
-            Tab::Identities => app.boxes.add(Kind::Identity),
-            _ => app.boxes.add_login(),
-        }
+        app.boxes.add_login();
         if let Some(s) = app.boxes.session.as_mut() {
             s.show_new = false;
         }
@@ -305,7 +300,7 @@ fn new_modal(ctx: &Context, app: &mut App) {
         app.boxes.add_note();
     }
     if file {
-        app.boxes.pick_files(&mut app.shell);
+        app.pick_files(ctx);
     }
     if note || file || !open {
         if let Some(s) = app.boxes.session.as_mut() {

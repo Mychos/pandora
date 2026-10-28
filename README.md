@@ -327,7 +327,6 @@ ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/path/to/jdk-21 scripts/android-apk.sh 
 | `Ctrl+3` | Password generator |
 | `Ctrl+T` | Auto-type the selected login |
 | `Ctrl+H` | Review the box |
-| `Ctrl+6` / `Ctrl+7` | Cards / identities |
 | `Ctrl+K` | Search the whole box |
 | `Ctrl+F` | Focus the search field |
 | `Ctrl+N` | New record |
@@ -387,9 +386,8 @@ Releases — workflow, artifacts, the Android signing key, `act` — are in
 ## Limitations
 
 - iOS is not wired up: the icons exist, the entry point does not.
-- A phone keeps three panes on the floor: cards, identities, review and the SSH agent
-  are reached from a wide window (or, for cards and identities, from the search
-  palette).
+- A phone keeps two panes on the floor: review and the SSH agent are reached from a
+  wide window.
 - Auto-type types into whatever has the focus; it does not check the window's title the
   way KeePassXC does, so a mistimed click types into the wrong window.
 - The SSH agent makes its keys; importing an OpenSSH private key is not implemented.

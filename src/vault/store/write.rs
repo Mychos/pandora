@@ -505,6 +505,7 @@ fn note_mut<'a>(vault: &'a mut Vault, id: &str) -> Option<&'a mut Note> {
 
 /// Save bumps the generation and writes the file; staging rolls back on failure.
 pub fn save(path: &Path, vault: &mut Vault, creds: &Credentials) -> Result<(), String> {
+    crate::vault::store::clear_legacy_stash(path);
     vault.seq = vault.seq.saturating_add(1);
     let mut files = Vec::new();
     let mut notes = Vec::new();

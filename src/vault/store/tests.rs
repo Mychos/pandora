@@ -22,7 +22,7 @@ fn a_stash_keeps_what_a_write_replaces() {
     fs::write(&p, b"first").unwrap();
     stash(&p);
     fs::write(&p, b"second").unwrap();
-    let backup = p.with_extension(format!("{EXT}.bak"));
+    let backup = stash_path(&p);
 
     assert_eq!(fs::read(&p).unwrap(), b"second", "the write landed");
     assert_eq!(
@@ -34,7 +34,7 @@ fn a_stash_keeps_what_a_write_replaces() {
     let missing = tmp_path("stash-none");
     stash(&missing);
     assert!(
-        !missing.with_extension(format!("{EXT}.bak")).exists(),
+        !stash_path(&missing).exists(),
         "nothing to keep, nothing written"
     );
 
@@ -47,7 +47,7 @@ fn the_copy_beside_a_box_can_be_dropped() {
     let p = tmp_path("forget-stash");
     fs::write(&p, b"old").unwrap();
     stash(&p);
-    let backup = p.with_extension(format!("{EXT}.bak"));
+    let backup = stash_path(&p);
     assert!(backup.exists(), "the write before the change kept one");
 
     forget_stash(&p);
@@ -187,7 +187,7 @@ fn a_backup_of_a_loose_box_is_private() {
     fs::set_permissions(&p, fs::Permissions::from_mode(0o644)).unwrap();
 
     stash(&p);
-    let backup = p.with_extension(format!("{EXT}.bak"));
+    let backup = stash_path(&p);
     assert_eq!(
         mode(&backup),
         0o600,
@@ -567,8 +567,6 @@ fn an_empty_box_writes_no_empty_collection() {
     assert!(
         v.folders.is_empty()
             && v.logins.is_empty()
-            && v.cards.is_empty()
-            && v.identities.is_empty()
             && v.passkeys.is_empty()
             && v.drive.is_empty()
             && v.otps.is_empty()
@@ -724,7 +722,7 @@ fn a_recovery_code_opens_the_box_and_survives_a_save() {
     assert!(open_with_code(&p, &code).is_err());
 
     let _ = fs::remove_file(&p);
-    let _ = fs::remove_file(p.with_extension(format!("{EXT}.bak")));
+    let _ = fs::remove_file(stash_path(&p));
 }
 
 /// A box enrolled with a key is unreadable without it, and a box enrolled without one
@@ -815,7 +813,7 @@ fn a_box_written_by_this_version_still_opens() {
         "and a v4 box is written as the version this app writes"
     );
     let _ = fs::remove_file(&p);
-    let _ = fs::remove_file(p.with_extension(format!("{EXT}.bak")));
+    let _ = fs::remove_file(stash_path(&p));
 }
 
 /// The version this one writes opens with no complaint, and carries no recovery slot
@@ -834,7 +832,7 @@ fn a_box_written_by_this_version_opens() {
     assert_eq!(header(&p).version, CURRENT_VERSION);
 
     let _ = fs::remove_file(&p);
-    let _ = fs::remove_file(p.with_extension(format!("{EXT}.bak")));
+    let _ = fs::remove_file(stash_path(&p));
 }
 
 /// Run on purpose when the format is meant to move: it writes the fixture the test
@@ -1015,7 +1013,7 @@ fn a_copy_older_than_the_box_is_refused() {
     assert_eq!(restored.logins.len(), 1, "the older box, as it was");
 
     let _ = fs::remove_file(&p);
-    let _ = fs::remove_file(p.with_extension(format!("{EXT}.bak")));
+    let _ = fs::remove_file(stash_path(&p));
 }
 
 #[test]

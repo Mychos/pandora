@@ -7,7 +7,6 @@ use crate::features::boxes::logic::Secret;
 use crate::features::entries::model::{Axis, View};
 use crate::features::entries::tree;
 use crate::features::entries::ui::editor as entry;
-use crate::features::entries::ui::flat;
 use crate::features::settings::model as prefs;
 use crate::shared::theme;
 use crate::shared::ui::drop::{landing, mark, Landing};
@@ -16,20 +15,25 @@ use crate::shared::ui::responsive;
 use crate::vault::model::{Kind, Login, Vault};
 use egui::{Layout, RichText, Sense, Ui};
 
+/// Where the list's own width is kept between frames: the panel remembers its size, so
+/// reading it back tells what the editor will be given before the panel is drawn.
+const LIST: &str = "password-list";
+
+/// The width the list took on the last frame it was drawn.
+fn list_width(ctx: &egui::Context) -> f32 {
+    ctx.data(|d| d.get_temp::<f32>(egui::Id::new(LIST).with("width")))
+        .unwrap_or(320.0)
+}
+
+/// Whether the editor has room beside the list. The window alone does not say: the panel
+/// the user dragged is what the list takes off it, so a wide window with a wide list is
+/// a phone layout, not a squeezed form.
+fn narrow(window: f32, list: f32, compact: bool) -> bool {
+    compact || window - list < responsive::BREAKPOINT
+}
+
 pub fn main(ui: &mut Ui, app: &mut App, compact: bool) {
-    // A card or an identity is the same pane, with a shape of its own: this one keeps
-    // the generated folders and the drag order for logins.
-    let pane = app
-        .boxes
-        .session
-        .as_ref()
-        .and_then(|s| s.tab.kind())
-        .unwrap_or(Kind::Login);
-    if pane != Kind::Login {
-        flat::main(ui, app, compact, pane);
-        return;
-    }
-    if compact {
+    if narrow(ui.available_width(), list_width(ui.ctx()), compact) {
         egui::CentralPanel::default()
             .frame(theme::pane(true))
             .show(ui, |ui| {
@@ -51,10 +55,13 @@ pub fn main(ui: &mut Ui, app: &mut App, compact: bool) {
         return;
     }
 
-    egui::Panel::left("password-list")
+    // The list never takes so much that the editor loses its own breakpoint: a drag past
+    // that would hide the panel and the handle it is dragged by.
+    let cap = (ui.available_width() - responsive::BREAKPOINT).clamp(260.0, 480.0);
+    let list = egui::Panel::left(LIST)
         .resizable(true)
         .default_size(320.0)
-        .size_range(260.0..=480.0)
+        .size_range(260.0..=cap)
         .frame(
             egui::Frame::NONE
                 .fill(theme::palette().panel)
@@ -77,6 +84,12 @@ pub fn main(ui: &mut Ui, app: &mut App, compact: bool) {
                 theme::stroke(theme::palette().hair, 1.0),
             );
         });
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(
+            egui::Id::new(LIST).with("width"),
+            list.response.rect.width(),
+        )
+    });
 
     egui::CentralPanel::default()
         .frame(theme::pane(false))
@@ -363,6 +376,8 @@ struct Wanted {
     copy: Option<(String, Secret)>,
     /// The record whose share dialog the row's own menu asked for.
     share: Option<String>,
+    /// The record the row's own menu asked to type.
+    autotype: Option<String>,
     /// Where a dragged row would land: (anchor id, below it).
     land: Option<(String, bool)>,
 }
@@ -381,6 +396,12 @@ fn apply(ui: &Ui, app: &mut App, wanted: Wanted) {
         if let Some(s) = app.boxes.session.as_mut() {
             s.selected = Some(id);
         }
+    }
+    if let Some(id) = wanted.autotype {
+        if let Some(s) = app.boxes.session.as_mut() {
+            s.selected = Some(id);
+        }
+        app.autotype();
     }
     if let Some(id) = wanted.del {
         if let Some(s) = app.boxes.session.as_mut() {
@@ -476,6 +497,20 @@ fn rows(
                         .clicked()
                     {
                         wanted.select = Some(id.to_owned());
+                        ui.close();
+                    }
+                    if icons
+                        .labeled(
+                            ui,
+                            theme::Icon::Key,
+                            15.0,
+                            theme::palette().text,
+                            "Auto-type",
+                        )
+                        .clicked()
+                    {
+                        wanted.select = Some(id.to_owned());
+                        wanted.autotype = Some(id.to_owned());
                         ui.close();
                     }
                     ui.separator();
@@ -736,6 +771,58 @@ mod tests {
     use super::*;
     use crate::features::entries::ui::editor;
     use crate::shared::ui::shot;
+
+    /// Where the editor's card starts when the list takes `list` off a 1000-wide
+    /// window: beside a 320 list it starts past the panel, beside a 480 one the pane
+    /// is a phone's.
+    fn card_x(list: f32) -> f32 {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let item = Login::new(0);
+        let id = item.id.clone();
+        let mut vault = Vault::new("Test");
+        vault.logins = vec![item];
+        let mut app = App::blank(&ctx);
+        app.screen = crate::app::Screen::Main;
+        app.boxes.session = Some(editor::tests::session(vault, Some(id)));
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(LIST).with("width"), list));
+
+        let size = egui::vec2(1000.0, 700.0);
+        for _ in 0..2 {
+            shot::frame(&ctx, size, Vec::new(), |ui| main(ui, &mut app, false));
+        }
+        let shapes = shot::frame(&ctx, size, Vec::new(), |ui| main(ui, &mut app, false));
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Rect(r) if r.fill == theme::palette().panel => Some(r.rect),
+                _ => None,
+            })
+            .max_by(|a, b| a.width().total_cmp(&b.width()))
+            .expect("the editor's card is painted")
+            .min
+            .x
+    }
+
+    /// The list takes its own width off the window, so a panel the user dragged wide
+    /// hands the pane to the phone layout before the window is ever narrow.
+    #[test]
+    fn a_wide_list_hands_the_pane_to_the_phone_layout() {
+        assert!(
+            !narrow(1000.0, 320.0, false),
+            "a window with room beside the list keeps the two panes"
+        );
+        assert!(
+            narrow(1000.0, 480.0, false),
+            "the widest list leaves too little room for the editor"
+        );
+
+        assert!(card_x(320.0) > 300.0, "the editor sits beside the list");
+        assert!(
+            card_x(480.0) < 50.0,
+            "the editor takes the whole pane when the list is wide"
+        );
+    }
 
     /// The search row of a sidebar-width column inside a desktop window, settled
     /// over two frames: what it painted, the field's own rect, and the column's

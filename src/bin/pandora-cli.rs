@@ -186,7 +186,6 @@ fn list(vault: &Vault) -> Result<(), String> {
     for it in vault.records() {
         let user = match it {
             pandora::vault::model::Any::Login(login) => login.username.as_str(),
-            pandora::vault::model::Any::Card(card) => card.holder.as_str(),
             pandora::vault::model::Any::Passkey(passkey) => passkey.rp_id.as_str(),
             _ => "",
         };

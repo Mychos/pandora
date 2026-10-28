@@ -274,6 +274,9 @@ pub struct App {
     pub idle: Monitor,
     /// The local socket the host relays through, so a browser never asks for the password.
     pub bridge: crate::features::bridge::Bridge,
+    /// The one system file dialog that may be out: it runs off the frame thread,
+    /// so the window keeps painting while the picker waits for the user.
+    pub ask: Option<crate::features::shell::pick::Ask>,
     /// `LOW_LATENCY` at rest, raised while a resize is in flight; wgpu only, since with
     /// Glow the swap interval is the compositor's.
     #[cfg(not(target_os = "android"))]
@@ -294,6 +297,8 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // A picker copy that never reached a save is plaintext; drop it now.
         store::clear_staging();
+        // Drop orphaned atomic-write temps left by a crashed save.
+        store::clear_orphan_tmps(&store::data_dir());
         // Prefs first: language and scheme are applied to the context, or the first
         // frame paints a scheme the user did not choose.
         let prefs = crate::features::settings::model::load();
@@ -351,6 +356,7 @@ impl App {
             prefs_open: false,
             idle: Monitor::start(),
             bridge: crate::features::bridge::Bridge::start(cc.egui_ctx.clone()),
+            ask: None,
             #[cfg(not(target_os = "android"))]
             surface: eframe::SurfaceConfig::LOW_LATENCY,
             #[cfg(not(target_os = "android"))]
@@ -463,8 +469,13 @@ impl App {
             "inactivity"
         };
         self.lock(ctx);
-        self.shell
-            .set_status(format!("box locked: {reason}"), StatusKind::Info);
+        self.shell.set_status(
+            crate::shared::i18n::tf(
+                "box locked: {reason}",
+                &[("reason", &crate::shared::i18n::t(reason))],
+            ),
+            StatusKind::Info,
+        );
     }
 
     /// The place, coarsely; any change is one step back.
@@ -674,6 +685,7 @@ impl App {
         self.pump_bridge(&ctx);
         self.pump_sync(&ctx);
         self.pump_update(&ctx);
+        self.pump_pick(&ctx);
         self.health.pump(&ctx);
         // A preview belongs to its entry: closing the modal, changing pane or locking
         // puts the player and the PDF away.
@@ -721,6 +733,7 @@ impl App {
         self.shell.sweep_clip(&ctx, self.prefs.clip_clear);
         self.watch_lock(&ctx);
         if self.boxes.session.is_some() {
+            self.boxes.pump_io(&mut self.shell);
             self.boxes.tick(&mut self.shell);
         }
         // An editor marks the session on every frame it paints, so the flag a
@@ -902,6 +915,8 @@ impl App {
             idle: Monitor::default(),
             bridge: crate::features::bridge::Bridge::default(),
             #[cfg(not(target_os = "android"))]
+            ask: None,
+            #[cfg(not(target_os = "android"))]
             surface: eframe::SurfaceConfig::LOW_LATENCY,
             #[cfg(not(target_os = "android"))]
             resize_until: None,
@@ -931,7 +946,7 @@ impl App {
         }
         // A fresh run starts from a fresh file, not from the previous run's leftovers.
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension(format!("{}.bak", store::EXT)));
+        let _ = std::fs::remove_file(store::stash_path(&path));
         let creds = store::Credentials::rekey("test", None).unwrap();
         let mut vault = crate::vault::model::Vault::new(name);
         store::save(&path, &mut vault, &creds).unwrap();

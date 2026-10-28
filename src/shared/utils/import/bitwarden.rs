@@ -3,7 +3,7 @@
 
 use super::{field, first, text, Bundle, DEPTH};
 use crate::shared::i18n::t;
-use crate::vault::model::{now_secs, Card, Field, Identity, Login, Note, Otp};
+use crate::vault::model::{now_secs, Field, Login, Note, Otp};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -82,39 +82,6 @@ pub fn parse(bytes: &[u8]) -> Result<Bundle, String> {
                     .unwrap_or_default();
                 bundle.notes.push((path, it));
             }
-            3 => {
-                let card = item.get("card").cloned().unwrap_or(Value::Null);
-                let mut it = Card::new(now_secs());
-                it.name = name.clone();
-                it.notes = zeroize::Zeroizing::new(notes.clone());
-                it.holder = text(first(&card, &["cardholderName"]));
-                it.number = zeroize::Zeroizing::new(text(first(&card, &["number"])));
-                it.expiry = expiry(&card);
-                let mut all = fields;
-                let code = text(first(&card, &["code"]));
-                if !code.is_empty() {
-                    all.push(field("CVV", &code, true));
-                }
-                it.fields = all;
-                bundle.cards.push(it);
-            }
-            4 => {
-                let mut it = Identity::new(now_secs());
-                it.name = name.clone();
-                it.notes = zeroize::Zeroizing::new(notes.clone());
-                let mut all: Vec<Field> = vec![];
-                if let Some(map) = item.get("identity").and_then(Value::as_object) {
-                    for (label, value) in map {
-                        let value = text(Some(value));
-                        if !value.is_empty() {
-                            all.push(field(label, &value, false));
-                        }
-                    }
-                }
-                all.extend(fields);
-                it.fields = all;
-                bundle.identities.push(it);
-            }
             _ => {}
         }
     }
@@ -149,23 +116,6 @@ fn fields(value: Option<&Value>) -> Vec<Field> {
         .unwrap_or_default()
 }
 
-/// `expMonth` and `expYear` as the card prints them; a year already written as four
-/// digits stays four, and a two-digit one is padded.
-fn expiry(card: &Value) -> String {
-    let month = text(first(card, &["expMonth"]));
-    let year = text(first(card, &["expYear"]));
-    if month.is_empty() || year.is_empty() {
-        return String::new();
-    }
-    let month: u32 = month.parse().unwrap_or(0);
-    let year: u32 = year.parse().unwrap_or(0);
-    let year = match year {
-        0..=99 => 2000 + year,
-        _ => year,
-    };
-    format!("{month:02}/{:02}", year % 100)
-}
-
 /// A folder path from a name, cut to the depth an import places.
 fn cap(name: &str) -> String {
     name.split(['/', '\\'])
@@ -198,11 +148,7 @@ mod tests {
     #[test]
     fn every_shape_lands_in_its_own_collection() {
         let b = parse(EXPORT.as_bytes()).unwrap();
-        assert_eq!(
-            b.count(),
-            5,
-            "a login, its seed, a note, a card, an identity"
-        );
+        assert_eq!(b.count(), 3, "a login, its seed and a note");
         assert_eq!(b.logins.len(), 1);
         assert_eq!(b.logins[0].name, "GitHub");
         assert_eq!(b.logins[0].username, "octocat");
@@ -214,21 +160,6 @@ mod tests {
 
         assert_eq!(b.notes[0].0, "Personal", "the folder named it");
         assert_eq!(b.notes[0].1.body.as_str(), "one\ntwo");
-
-        assert_eq!(b.cards[0].number.as_str(), "4111");
-        assert_eq!(b.cards[0].holder, "Ana");
-        assert_eq!(b.cards[0].expiry, "04/29");
-        assert!(b.cards[0]
-            .fields
-            .iter()
-            .any(|it| it.label == "CVV" && it.secret));
-
-        assert_eq!(
-            b.identities[0].fields.len(),
-            1,
-            "an empty value is not a field"
-        );
-        assert_eq!(b.identities[0].fields[0].label, "passportNumber");
     }
 
     #[test]

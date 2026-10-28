@@ -51,8 +51,6 @@ pub fn bundle(vault: &Vault, id: &str) -> Result<Bundle, String> {
     let mut bundle = Bundle::default();
     match vault.any(id) {
         Some(Any::Login(it)) => bundle.logins.push(it.clone()),
-        Some(Any::Card(it)) => bundle.cards.push(it.clone()),
-        Some(Any::Identity(it)) => bundle.identities.push(it.clone()),
         Some(Any::Otp(it)) => bundle.otps.push(it.clone()),
         Some(Any::Drive(Entry::Note(it))) => {
             let mut note = it.clone();
@@ -81,7 +79,7 @@ pub fn bundle(vault: &Vault, id: &str) -> Result<Bundle, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::model::{Card, Login, Note, Passkey, Vault};
+    use crate::vault::model::{Login, Note, Passkey, Vault};
     use crate::vault::share::{self, SealTo};
     use zeroize::Zeroizing;
 
@@ -92,10 +90,6 @@ mod tests {
         login.name = "Bank".to_owned();
         login.password = Zeroizing::new("hunter2".to_owned());
         v.logins.push(login);
-        let mut card = Card::new(1);
-        card.id = "c".to_owned();
-        card.name = "Visa".to_owned();
-        v.cards.push(card);
         let mut note = Note::new(1);
         note.id = "n".to_owned();
         note.name = "Ideas".to_owned();
@@ -116,7 +110,6 @@ mod tests {
     fn one_record_leaves_and_the_two_that_cannot_say_so() {
         let v = vault();
         assert_eq!(bundle(&v, "a").unwrap().logins.len(), 1);
-        assert_eq!(bundle(&v, "c").unwrap().cards.len(), 1);
         assert_eq!(bundle(&v, "n").unwrap().notes[0].1.body.as_str(), "one two");
         assert!(bundle(&v, "f").is_err(), "a document has no share");
         assert!(bundle(&v, "p").is_err(), "a passkey has none either");

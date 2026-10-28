@@ -11,7 +11,6 @@ pub mod model;
 pub use model::{Bridge, Effect};
 
 /// The prompt a browser the app has not seen before gets.
-
 use crate::app::{App, StatusKind};
 use crate::shared::theme;
 use egui::RichText;

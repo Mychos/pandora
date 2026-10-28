@@ -249,10 +249,8 @@ impl App {
             }
             Ok(OpOutcome::Destination(uri)) => {
                 self.auth.welcome.path = uri;
-                self.shell.set_status(
-                    "destination chosen — create the box",
-                    StatusKind::Info,
-                );
+                self.shell
+                    .set_status("destination chosen — create the box", StatusKind::Info);
             }
             // Backing out of a prompt is a choice, not a failure: it leaves the
             // seal exactly as it was.
@@ -327,13 +325,17 @@ impl App {
         if self.auth.op.is_some() {
             return;
         }
-        self.auth.task(OpKind::Pick, || {
-            match crate::shared::android::document_create("application/octet-stream", "vault.pandora") {
+        self.auth.task(
+            OpKind::Pick,
+            || match crate::shared::android::document_create(
+                "application/octet-stream",
+                "vault.pandora",
+            ) {
                 Ok(Some(uri)) => Ok(OpOutcome::Destination(uri)),
                 Ok(None) => Err("no destination chosen".to_owned()),
                 Err(e) => Err(e),
-            }
-        });
+            },
+        );
     }
 
     /// Bring a box file in from the phone's own storage. Android's picker belongs
@@ -594,7 +596,7 @@ mod tests {
         app.open("rotate");
 
         let path = app.boxes.session.as_ref().unwrap().path.clone();
-        let backup = path.with_extension(format!("{}.bak", store::EXT));
+        let backup = store::stash_path(&path);
         let old_key = {
             let s = app.boxes.session.as_mut().unwrap();
             // Two writes: the second one leaves the first in the stash.

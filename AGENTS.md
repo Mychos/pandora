@@ -208,15 +208,12 @@ name, never the box's (`Recent::label`). The working copies live in
 left there is moved over once.
 
 **One pane per shape of record.** The strip holds `Passwords` (`features/entries`, a
-login), `Cards` and `Identities` (the same `features/entries` pane, the same list and
-editor, one form each), `Files` (`features/drive`, a note or a document), `Codes`
-(`features/codes`, a one-time seed), `Review` (`features/health`) and `Settings`. A shape is a form, not a pane: a
-login, a card and an identity share the row, the search, the head, the notes and the
-tail, and each draws only the fields it owns (`editor::body_login`, `body_card`,
-`body_identity`), chosen by `Kind`. Duplicating the panel per shape is what this rule
-is for: it was three copies of the same list before. The login keeps the folders
-view, the generated tree and the drag order to itself — `entries::ui::list` — and
-the other two share `entries::ui::flat`. The drive is the one pane that holds
+login), `Files` (`features/drive`, a note or a document), `Codes` (`features/codes`, a
+one-time seed), `Review` (`features/health`) and `Settings`. A shape is a form, not a
+pane: the login draws the row, the search, the head, the notes and the tail, and only
+the fields it owns (`editor::body_login`), chosen by `Kind`; the list is
+`entries::ui::list`, with the folders view, the generated tree and the drag order. The
+drive is the one pane that holds
 two types: `vault::model::Entry` is the tagged enum, so a note cannot carry a document
 and a file cannot carry text. `Kind` is only what the screen, the CSV and the pane map
 (`Tab::of` / `Tab::kind`) call a row.

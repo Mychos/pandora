@@ -182,8 +182,9 @@ fn box_card(ui: &mut egui::Ui, app: &mut App, facts: &Facts, keyfile: Option<boo
                 theme::secondary_button(ui, &app.icons, Some(theme::Icon::Download), "Export CSV")
                     .clicked();
             ui.add_space(HINT);
-            import = theme::secondary_button(ui, &app.icons, Some(theme::Icon::Upload), "Import…")
-                .clicked();
+            import =
+                theme::secondary_button(ui, &app.icons, Some(theme::Icon::Upload), "Import CSV")
+                    .clicked();
         } else {
             ui.columns(2, |cols| {
                 export = theme::secondary_button(
@@ -197,7 +198,7 @@ fn box_card(ui: &mut egui::Ui, app: &mut App, facts: &Facts, keyfile: Option<boo
                     &mut cols[1],
                     &app.icons,
                     Some(theme::Icon::Upload),
-                    "Import…",
+                    "Import CSV",
                 )
                 .clicked();
             });
@@ -208,13 +209,13 @@ fn box_card(ui: &mut egui::Ui, app: &mut App, facts: &Facts, keyfile: Option<boo
             }
         }
         if import {
-            crate::features::settings::import::pick(app);
+            crate::features::settings::import::pick(app, ui.ctx());
         }
         ui.add_space(HINT);
         if theme::secondary_button(ui, &app.icons, Some(theme::Icon::Upload), "Open a share…")
             .clicked()
         {
-            crate::features::share::ui::pick(app);
+            crate::features::share::ui::pick(app, ui.ctx());
         }
         ui.add_space(HINT);
         theme::hint(
@@ -224,11 +225,11 @@ fn box_card(ui: &mut egui::Ui, app: &mut App, facts: &Facts, keyfile: Option<boo
         ui.add_space(ACT);
         // The copy `store::save` keeps beside the box, restored on purpose. Off
         // when there is none: a button that would do nothing is worse than none.
-        let backup = app.boxes.session.as_ref().is_some_and(|s| {
-            s.path
-                .with_extension(format!("{}.bak", store::EXT))
-                .is_file()
-        });
+        let backup = app
+            .boxes
+            .session
+            .as_ref()
+            .is_some_and(|s| store::stash_path(&s.path).is_file());
         let mut restore = false;
         ui.add_enabled_ui(backup, |ui| {
             restore = theme::secondary_button(
@@ -670,6 +671,8 @@ fn key_card(ui: &mut egui::Ui, app: &mut App, keyfile: Option<bool>) {
                 ui.add_space(ROW);
                 auth::file_field(
                     ui,
+                    &mut app.ask,
+                    egui::Id::new("key-keyfile"),
                     &app.icons,
                     &mut app.auth.key.keyfile,
                     if keyfile == Some(true) {
@@ -761,6 +764,8 @@ fn master_card(ui: &mut egui::Ui, app: &mut App, keyfile: Option<bool>) {
                 ui.add_space(ROW);
                 auth::file_field(
                     ui,
+                    &mut app.ask,
+                    egui::Id::new("change-keyfile"),
                     &app.icons,
                     &mut app.auth.change.keyfile,
                     // A finger-unlocked session cannot say which box needs one,

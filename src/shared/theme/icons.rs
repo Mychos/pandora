@@ -17,7 +17,6 @@ pub enum Icon {
     Copy,
     User,
     Key,
-    CreditCard,
     Fingerprint,
     Note,
     Paperclip,
@@ -67,7 +66,6 @@ const ICON_FILES: &[(Icon, &str)] = &[
     (Icon::Copy, "copy"),
     (Icon::User, "user-round"),
     (Icon::Key, "key-round"),
-    (Icon::CreditCard, "credit-card"),
     (Icon::Fingerprint, "fingerprint"),
     (Icon::Note, "sticky-note"),
     (Icon::Paperclip, "paperclip"),
@@ -443,8 +441,6 @@ pub fn kind_icon(kind: crate::vault::model::Kind) -> Icon {
     use crate::vault::model::Kind;
     match kind {
         Kind::Login => Icon::Key,
-        Kind::Card => Icon::CreditCard,
-        Kind::Identity => Icon::User,
         Kind::Passkey => Icon::Fingerprint,
         Kind::Note => Icon::Note,
         Kind::File => Icon::Paperclip,

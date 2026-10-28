@@ -43,7 +43,7 @@ pub fn main(ui: &mut Ui, app: &mut App, compact: bool) {
                     ui,
                     false,
                     "nothing to review",
-                    "every login, card and code looks fine",
+                    "every login and code looks fine",
                 );
                 return;
             }
@@ -209,7 +209,6 @@ pub fn describe(concern: &Concern) -> String {
         Concern::Weak => t("weak password").to_owned(),
         Concern::Reused(count) => tf("the same password in {count} records", &[("count", count)]),
         Concern::Stale(days) => tf("not changed in {days} days", &[("days", days)]),
-        Concern::Expired(when) => tf("expired in {when}", &[("when", when)]),
         Concern::OddCode { digits, period } => tf(
             "code of {digits} digits every {period} s",
             &[("digits", digits), ("period", period)],
@@ -227,7 +226,7 @@ mod tests {
     use super::*;
     use crate::app::{Screen, Tab};
     use crate::shared::ui::shot;
-    use crate::vault::model::{Card, Login, Vault};
+    use crate::vault::model::{Login, Vault};
     use zeroize::Zeroizing;
 
     #[test]
@@ -238,10 +237,6 @@ mod tests {
             "the same password in 3 records"
         );
         assert_eq!(describe(&Concern::Stale(400)), "not changed in 400 days");
-        assert_eq!(
-            describe(&Concern::Expired("01/20".to_owned())),
-            "expired in 01/20"
-        );
         assert_eq!(
             describe(&Concern::OddCode {
                 digits: 6,
@@ -266,13 +261,9 @@ mod tests {
         let mut login = Login::new(1);
         login.name = "Bank".to_owned();
         login.password = Zeroizing::new("hunter2".to_owned());
-        let mut card = Card::new(1);
-        card.name = "Visa".to_owned();
-        card.expiry = "01/20".to_owned();
 
         if let Some(s) = app.boxes.session.as_mut() {
             s.vault.logins.push(login);
-            s.vault.cards.push(card);
             s.tab = Tab::Health;
         }
 
@@ -291,13 +282,7 @@ mod tests {
     #[test]
     fn the_pane_lists_what_the_review_found() {
         let said = painted();
-        for line in [
-            "Review",
-            "Bank",
-            "weak password",
-            "Visa",
-            "expired in 01/20",
-        ] {
+        for line in ["Review", "Bank", "weak password"] {
             assert!(
                 said.iter().any(|word| word == line),
                 "{line:?} is missing: {said:?}"

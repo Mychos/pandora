@@ -327,7 +327,6 @@ pub fn document_write(uri: &str, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-
 /// Ask the system to create (or pick) a document and return its content uri.
 pub fn document_create(mime: &str, name: &str) -> Result<Option<String>, String> {
     let namej = JNIString::new("documentCreate");

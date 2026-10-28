@@ -2,6 +2,7 @@
 //! the panes of the main screen.
 
 use crate::app::Field;
+use crate::features::boxes::io::Io;
 use crate::features::entries::model::{Axis, View};
 use crate::features::settings::model::Remote;
 use crate::features::shell::confirm::Confirm;
@@ -16,8 +17,6 @@ use std::time::{Instant, SystemTime};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Passwords,
-    Cards,
-    Identities,
     Drive,
     Codes,
     Health,
@@ -31,8 +30,6 @@ impl Tab {
         use crate::vault::model::Kind;
         match kind {
             Kind::Login => Tab::Passwords,
-            Kind::Card => Tab::Cards,
-            Kind::Identity => Tab::Identities,
             // A passkey is shown beside the login it belongs with.
             Kind::Passkey => Tab::Passwords,
             Kind::Note | Kind::File => Tab::Drive,
@@ -45,8 +42,6 @@ impl Tab {
         use crate::vault::model::Kind;
         match self {
             Tab::Passwords => Some(Kind::Login),
-            Tab::Cards => Some(Kind::Card),
-            Tab::Identities => Some(Kind::Identity),
             _ => None,
         }
     }
@@ -62,6 +57,8 @@ pub struct Boxes {
     /// When the on-disk box was last checked. The check is a filesystem stat and
     /// has no business running on every frame of a resize gesture.
     pub(crate) watch: Option<std::time::Instant>,
+    /// Background I/O worker. Lazily created so Default stays cheap.
+    pub(crate) io: Option<Io>,
 }
 
 /// A folder being named in the create modal: its parent is known, the name is
@@ -93,6 +90,17 @@ pub struct Session {
     pub last_mtime: Option<SystemTime>,
     pub conflict: bool,
     pub ignore_mtime: Option<SystemTime>,
+    /// True when the vault lives on a slow (e.g. network) filesystem: external
+    /// change polling is disabled to avoid useless work.
+    pub remote_vault: bool,
+    /// Background I/O state: pending requests so we never stack duplicates.
+    pub meta_pending: bool,
+    pub load_pending: bool,
+    pub save_pending: bool,
+    /// Bumped on every edit; guards against clobbering edits during an async save.
+    pub edit_version: u64,
+    /// edit_version captured when the in-flight save was sent.
+    pub save_version: u64,
     /// Where this box is mirrored; the local file is the source, the repo a copy.
     pub remote: Option<Remote>,
     /// That the repo already holds this box, so nothing is waiting to go out.
@@ -156,6 +164,14 @@ impl Boxes {
     pub fn selected(&self) -> Option<String> {
         self.session.as_ref().and_then(|s| s.selected.clone())
     }
+
+    /// Lazily create the background I/O worker.
+    pub fn io(&mut self) -> &mut crate::features::boxes::io::Io {
+        if self.io.is_none() {
+            self.io = Some(crate::features::boxes::io::Io::new());
+        }
+        self.io.as_mut().unwrap()
+    }
 }
 
 impl Session {
@@ -177,6 +193,12 @@ impl Session {
             last_mtime: None,
             conflict: false,
             ignore_mtime: None,
+            remote_vault: false,
+            meta_pending: false,
+            load_pending: false,
+            save_pending: false,
+            edit_version: 0,
+            save_version: 0,
             remote: None,
             baseline: None,
             saved,
@@ -206,6 +228,7 @@ impl Session {
 
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.edit_version = self.edit_version.wrapping_add(1);
         self.last_edit = Some(Instant::now());
         // The commit waits for the box to settle, because GitHub counts commits
         // against an hourly budget and typing is not a change.

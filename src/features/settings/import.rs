@@ -27,12 +27,23 @@ fn pick_file() -> Option<PathBuf> {
     }
 }
 
-/// The row's click: pick a file, sniff it, and let the confirm say what is about to
-/// land. A file the reader does not know is refused here, before anything is asked.
-pub fn pick(app: &mut App) {
-    let Some(path) = pick_file() else {
-        return;
-    };
+/// The row's click: hand the dialog to the shell so the window keeps painting, and
+/// sniff what came back on a later frame.
+pub fn pick(app: &mut App, ctx: &egui::Context) {
+    app.ask(
+        ctx,
+        || pick_file().into_iter().collect(),
+        |app, mut paths| {
+            if let Some(path) = paths.pop() {
+                picked(app, path);
+            }
+        },
+    );
+}
+
+/// Sniff the file and let the confirm say what is about to land. A file the reader
+/// does not know is refused here, before anything is asked.
+fn picked(app: &mut App, path: PathBuf) {
     let too_big = std::fs::metadata(&path)
         .map(|meta| meta.len() > import::MAX_BYTES as u64)
         .unwrap_or(false);
@@ -98,12 +109,10 @@ pub fn summary(placed: &Placed) -> String {
         return t("nothing new to import — everything in that file is already here").to_owned();
     }
     tf(
-        "imported {total}: {logins} passwords, {cards} cards, {identities} identities, {notes} notes, {codes} codes",
+        "imported {total}: {logins} passwords, {notes} notes, {codes} codes",
         &[
             ("total", &placed.total()),
             ("logins", &placed.logins),
-            ("cards", &placed.cards),
-            ("identities", &placed.identities),
             ("notes", &placed.notes),
             ("codes", &placed.otps),
         ],
@@ -128,14 +137,12 @@ mod tests {
     fn a_reader_the_summary_names_every_shape_it_landed() {
         let placed = Placed {
             logins: 2,
-            cards: 1,
-            identities: 3,
             notes: 4,
             otps: 5,
         };
         assert_eq!(
             summary(&placed),
-            "imported 15: 2 passwords, 1 cards, 3 identities, 4 notes, 5 codes"
+            "imported 11: 2 passwords, 4 notes, 5 codes"
         );
         assert_eq!(
             summary(&Placed::default()),
@@ -153,8 +160,6 @@ mod tests {
         let s = app.boxes.session.as_ref().unwrap();
         let v: &Vault = &s.vault;
         assert_eq!(v.logins.len(), 1, "the login is in the box on screen");
-        assert_eq!(v.cards.len(), 1);
-        assert_eq!(v.identities.len(), 1);
         assert_eq!(v.otps.len(), 1);
         assert_eq!(v.drive.len(), 1, "and the note with it");
         assert!(

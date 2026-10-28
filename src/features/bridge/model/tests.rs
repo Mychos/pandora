@@ -41,6 +41,7 @@ fn session(items: &[(&str, &str, &str)]) -> Session {
         last_mtime: None,
         conflict: false,
         ignore_mtime: None,
+        remote_vault: false,
         remote: None,
         baseline: None,
         saved: None,
@@ -65,6 +66,11 @@ fn session(items: &[(&str, &str, &str)]) -> Session {
         new_folder: None,
         editing_entry: None,
         moving_entry: None,
+        meta_pending: false,
+        load_pending: false,
+        save_pending: false,
+        edit_version: 0,
+        save_version: 0,
     }
 }
 
