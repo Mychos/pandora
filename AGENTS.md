@@ -377,11 +377,16 @@ the older `host`-only form.
 
 **The bridge, and why the extension stops asking for a password.** When the app is
 running it listens on a local channel — a Unix domain socket at
-`$XDG_RUNTIME_DIR/pandora-bridge.sock`, a named pipe at
+`$XDG_RUNTIME_DIR/pandora/bridge.sock`, a named pipe at
 `\\.\pipe\pandora-bridge-<digest>` on Windows; `PANDORA_BRIDGE_SOCKET` overrides the
 path both platforms derive their channel from — and the host relays to it instead of
 opening the file — the app already holds the key for the box on screen, which is the
-KeePassXC shape.
+KeePassXC shape. On unix the socket sits in a directory of its own, and a flatpak
+browser is granted that directory. Granting the socket file instead bind-mounts one
+inode: the app recreates the socket on every restart, the sandbox keeps the deleted
+inode (`//deleted` in `/proc/<pid>/mountinfo`), and the host inside the sandbox talks
+to a dead file and answers "no box open" while a box is open. Native browsers have no
+mount and never saw this.
 The browser names the caller: Chromium puts the extension origin in the host's `argv[1]`,
 Firefox the add-on id in `argv[2]`, and the host passes it along as `caller` because the
 app cannot see the browser's process table. A caller the user has not approved waits on a

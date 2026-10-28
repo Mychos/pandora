@@ -137,7 +137,7 @@ derived on the spot. A listing or a match cannot carry a secret — `Candidate` 
 `CodeInfo` have no field for one, by construction.
 
 When the app is running it listens on a local socket
-(`$XDG_RUNTIME_DIR/pandora-bridge.sock` on unix, a named pipe on Windows, either way
+(`$XDG_RUNTIME_DIR/pandora/bridge.sock` on unix, a named pipe on Windows, either way
 user-private) and the host relays to it
 instead of opening the file, so the extension never needs the master password at
 all. The browser names the caller, and a caller the user has not approved waits on

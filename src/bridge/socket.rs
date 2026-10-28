@@ -14,21 +14,31 @@ pub use windows::{connect_at, Listener, Stream};
 #[cfg(not(any(unix, windows)))]
 pub use other::{connect_at, Listener, Stream};
 
-/// `PANDORA_BRIDGE_SOCKET` wins; otherwise `XDG_RUNTIME_DIR` (per-user, off disk,
-/// cleared at logout), else the app's data dir.
+/// `PANDORA_BRIDGE_SOCKET` wins; otherwise a directory of our own under
+/// `XDG_RUNTIME_DIR` (per-user, off disk, cleared at logout), else the app's data dir.
+/// The directory matters: a flatpak sandbox can only be granted the directory, since
+/// a grant on the socket file holds the inode the app has already replaced.
 pub fn path() -> PathBuf {
     if let Some(path) = std::env::var_os("PANDORA_BRIDGE_SOCKET").filter(|p| !p.is_empty()) {
         return PathBuf::from(path);
     }
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(crate::vault::store::data_dir);
-    base.join("pandora-bridge.sock")
+    if let Some(base) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return PathBuf::from(base).join("pandora").join("bridge.sock");
+    }
+    crate::vault::store::data_dir().join("pandora-bridge.sock")
 }
 
 /// Fails when nothing is listening, which callers read as "no bridge, answer it yourself".
 pub fn connect() -> io::Result<Stream> {
-    connect_at(&path())
+    let refused = connect_at(&path());
+    // An app built before the socket moved still listens under the flat name.
+    #[cfg(unix)]
+    if refused.is_err() && std::env::var_os("PANDORA_BRIDGE_SOCKET").is_none() {
+        if let Some(base) = std::env::var_os("XDG_RUNTIME_DIR") {
+            return connect_at(&PathBuf::from(base).join("pandora-bridge.sock"));
+        }
+    }
+    refused
 }
 
 #[cfg(unix)]

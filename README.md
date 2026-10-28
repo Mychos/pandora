@@ -360,7 +360,7 @@ to `/build/...` by `scripts/appimage.sh`.
 | --- | --- |
 | `PANDORA_X11=1` | Force winit's X11 backend on Linux, which is what brings back drag-and-drop. |
 | `PANDORA_DATA_DIR` | Data directory for the native host. Used by the flatpak browser install; the app itself always uses the platform's own. |
-| `PANDORA_BRIDGE_SOCKET` | Override the bridge socket path (`$XDG_RUNTIME_DIR/pandora-bridge.sock` by default). |
+| `PANDORA_BRIDGE_SOCKET` | Override the bridge socket path (`$XDG_RUNTIME_DIR/pandora/bridge.sock` by default). |
 | `PANDORA_GITHUB_CLIENT_ID` | Build-time OAuth client id for the GitHub mirror. Without it, sign-in is refused. |
 
 ## Development
