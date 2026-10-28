@@ -1036,7 +1036,7 @@ pub fn general(ctx: &egui::Context, app: &mut App) {
         return;
     }
     let open = theme::dialog(ctx, egui::Id::new("general-settings"), |ui| {
-        theme::width(ui, 300.0);
+        theme::width(ui, 380.0);
         let closed = theme::head(ui, &app.icons, t("General settings"));
         appearance(ui, app);
         ui.add_space(ACT);
@@ -1185,13 +1185,6 @@ fn privacy(ui: &mut egui::Ui, app: &mut App) {
                 prefs::save(&app.prefs);
                 app.capture();
             }
-            ui.add_space(HINT);
-            balance::label(
-                ui,
-                RichText::new(t(capture_state(on)))
-                    .small()
-                    .color(theme::palette().muted),
-            );
             ui.add_space(ROW);
         }
         let mut hide = app.prefs.hide_unfocused;
@@ -1199,38 +1192,11 @@ fn privacy(ui: &mut egui::Ui, app: &mut App) {
             app.prefs.hide_unfocused = hide;
             prefs::save(&app.prefs);
         }
-        ui.add_space(HINT);
-        balance::label(
-            ui,
-            RichText::new(t(cover_state(hide)))
-                .small()
-                .color(theme::palette().muted),
-        );
         if !supported {
             ui.add_space(HINT);
             theme::hint(ui, t("this system cannot block captures"));
         }
     });
-}
-
-/// What a tick alone cannot say: whether the window is in the next capture.
-#[cfg(not(target_os = "android"))]
-fn capture_state(on: bool) -> &'static str {
-    if on {
-        t("on — screenshots, recordings and shares include this window")
-    } else {
-        t("off — this window is left out of screenshots, recordings and shares")
-    }
-}
-
-/// What the curtain does, in one line.
-#[cfg(not(target_os = "android"))]
-fn cover_state(on: bool) -> &'static str {
-    if on {
-        t("on — only the logo shows while another window has focus")
-    } else {
-        t("off — the window stays visible while another window has focus")
-    }
 }
 
 /// The languages, one row each.
