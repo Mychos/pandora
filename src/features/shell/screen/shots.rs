@@ -1135,6 +1135,15 @@ fn shoot() {
 
     let ctx = egui::Context::default();
     theme::apply(&ctx);
+    let mut app = App::blank(&ctx);
+    app.prefs_open = true;
+    shot::png(&ctx, "app-settings-desk", 900, 600, None, |ui| {
+        let ctx = ui.ctx().clone();
+        crate::features::settings::ui::general(&ctx, &mut app);
+    });
+
+    let ctx = egui::Context::default();
+    theme::apply(&ctx);
     let mut app = demo(&ctx, Tab::Drive, None);
     let shapes = frame(&ctx, &mut app, vec![]);
     let dragging = center_of(&shapes, "Factura luz", 0.0);
