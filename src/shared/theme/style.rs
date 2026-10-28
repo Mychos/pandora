@@ -369,7 +369,15 @@ pub fn check(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Response {
                 w.fg_stroke = stroke(Color32::WHITE, 1.5);
             }
         }
-        ui.checkbox(on, crate::shared::i18n::text(text).into_owned())
+        ui.checkbox(
+            on,
+            balance::wrap(
+                ui,
+                crate::shared::i18n::text(text).into_owned(),
+                (ui.available_width() - ui.spacing().icon_width - ui.spacing().item_spacing.x)
+                    .max(0.0),
+            ),
+        )
     })
     .inner
     .on_hover_cursor(egui::CursorIcon::PointingHand)

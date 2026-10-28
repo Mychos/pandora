@@ -5,20 +5,24 @@ use std::sync::Arc;
 
 /// Paints `text` as [`Ui::label`] would, with its lines balanced.
 pub fn label(ui: &mut Ui, text: impl Into<WidgetText>) {
-    let text = text.into();
     if ui.layout().main_dir() == Direction::LeftToRight && ui.layout().main_wrap() {
         ui.label(text);
         return;
     }
+    ui.add(Label::new(wrap(ui, text, ui.available_width())));
+}
 
-    let mut job = Arc::unwrap_or_clone(text.into_layout_job(
+/// The same text laid out balanced, for a widget that takes a [`WidgetText`]: an
+/// atom layout would wrap `Text` at the full width.
+pub fn wrap(ui: &Ui, text: impl Into<WidgetText>, width: f32) -> WidgetText {
+    let mut job = Arc::unwrap_or_clone(text.into().into_layout_job(
         ui.style(),
         FontSelection::Default,
         ui.text_valign(),
     ));
     job.halign = ui.layout().horizontal_placement();
     job.justify = ui.layout().horizontal_justify();
-    job.wrap.max_width = ui.available_width();
+    job.wrap.max_width = width;
 
     let lines = rows(ui, &job);
     if lines > 1 {
@@ -36,8 +40,7 @@ pub fn label(ui: &mut Ui, text: impl Into<WidgetText>) {
         job.wrap.max_width = hi;
     }
 
-    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
-    ui.add(Label::new(WidgetText::Galley(galley)));
+    WidgetText::Galley(ui.fonts_mut(|fonts| fonts.layout_job(job)))
 }
 
 fn rows(ui: &Ui, job: &egui::text::LayoutJob) -> usize {
