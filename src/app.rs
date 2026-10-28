@@ -311,18 +311,13 @@ impl App {
         let recents = crate::features::auth::model::load();
         let mut shell = Shell::default();
         let mut sync = Sync::default();
-        // A remembered session comes back before the first frame; its access token is
-        // minted then. A store answering "nothing" is worth a line on screen.
+        // A remembered session comes back before the first frame. A store
+        // answering "nothing" is worth a line on screen.
         if prefs.remember {
             // Never kept, key rotated or keystore not up yet would otherwise be the same silence.
             log::info!("pandora: the session is remembered; asking the store for it");
-            match crate::features::sync::remember::load() {
-                Ok(Some(kept)) => {
-                    log::info!("pandora: the store handed back a remembered session");
-                    sync.restore(kept);
-                }
-                Ok(None) => log::warn!("pandora: the store holds no remembered session"),
-                Err(e) => shell.fail(e),
+            if let Some(why) = sync.recall() {
+                shell.fail(why);
             }
         }
         let auth = Auth {

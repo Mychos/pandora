@@ -245,11 +245,8 @@ impl App {
     /// Forget the session; whatever the credential store held goes with it.
     pub fn github_logout(&mut self) {
         self.sync.token = Zeroizing::new(String::new());
-        self.sync.refresh = Zeroizing::new(String::new());
-        self.sync.expires_at = None;
-        // A renewal still out belongs to the session being dropped.
-        self.sync.renew_job = None;
-        self.sync.renew_after = None;
+        self.sync.recall_at = None;
+        self.sync.recalls = 0;
         match remember::forget() {
             Ok(()) => self
                 .shell
@@ -258,61 +255,30 @@ impl App {
         }
     }
 
-    /// Ask for the next session once: a refresh token is good for one trade, so two
-    /// in flight would race and one would come back refused.
-    fn renew(&mut self) {
-        if self.sync.renew_job.is_some() || self.sync.refresh.is_empty() {
-            return;
-        }
-        let refresh = Zeroizing::new(self.sync.refresh.to_string());
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = tx.send(sync::refresh(&refresh));
-        });
-        self.sync.renew_job = Some(rx);
-    }
-
-    /// A sign-in and a renewal are the same thing past this point.
+    /// The session that just landed is the token every request carries.
     fn adopt(&mut self, session: sync::Session) {
         self.sync.token = session.access;
-        if let Some(refresh) = session.refresh {
-            self.sync.refresh = refresh;
-        }
-        self.sync.expires_at = session.expires_at;
+        self.sync.recall_at = None;
+        self.sync.recalls = 0;
     }
 
-    /// The refresh token outlives the run; the access token does not.
-    fn remembered(&self) -> &str {
-        if self.sync.refresh.is_empty() {
-            &self.sync.token
-        } else {
-            &self.sync.refresh
-        }
+    /// GitHub refused the token itself, whatever the request was: it is wiped
+    /// before anything carries it again, and the user signs in again — nothing
+    /// this build holds could mint another one.
+    fn expire(&mut self, why: String) {
+        self.github_logout();
+        self.shell.fail(why);
     }
 
-    /// Hand the kept half to the system store when asked; say nothing otherwise.
-    fn keep_session(&mut self) {
-        if self.prefs.remember {
-            if let Err(e) = remember::save(self.remembered()) {
-                self.shell.fail(e);
-            }
-        }
-    }
-
-    /// The token a request goes out with; a spent or expiring session is renewed here,
-    /// once, and nothing returns until the next one lands.
+    /// The token a request goes out with.
     fn out(&mut self) -> Option<Zeroizing<String>> {
-        if self.sync.due(Instant::now()) {
-            self.renew();
-            return None;
-        }
         (!self.sync.token.is_empty()).then(|| Zeroizing::new(self.sync.token.to_string()))
     }
 
     /// Match the "keep me signed in" choice: hand the session to the store or take it out.
     pub fn keep(&mut self) {
         let result = if self.prefs.remember {
-            remember::save(self.remembered())
+            remember::save(&self.sync.token)
         } else {
             remember::forget()
         };
@@ -725,51 +691,20 @@ impl App {
     /// Land finished workers and keep frames coming while requests are out; egui idles
     /// otherwise and the reply would wait for the mouse.
     pub fn pump_sync(&mut self, ctx: &egui::Context) {
-        let mut renewed: Option<Result<sync::Session, String>> = None;
-        if let Some(rx) = self.sync.renew_job.as_ref() {
-            match rx.try_recv() {
-                Ok(session) => renewed = Some(session),
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    renewed = Some(Err("the renewal was interrupted".to_owned()));
+        let now = crate::vault::model::now_secs();
+        if self.prefs.remember
+            && !self.sync.signed()
+            && self.sync.recall_at.is_some_and(|at| at <= now)
+        {
+            if let Some(why) = self.sync.recall() {
+                log::warn!("pandora: the store still holds nothing: {why}");
+                if self.sync.recall_at.is_none() {
+                    self.shell.fail(why);
                 }
             }
         }
-        if let Some(session) = renewed {
-            self.sync.renew_job = None;
-            match session {
-                Ok(session) => {
-                    self.adopt(session);
-                    // The traded refresh token is spent, so the stored half must move with it.
-                    self.keep_session();
-                }
-                // A refresh token GitHub will not take is the session being gone.
-                Err(e) if sync::dead(&e) => {
-                    // Another instance may have traded the token since: re-read the store
-                    // before signing out, and adopt a different one as someone else's session.
-                    let taken = self
-                        .prefs
-                        .remember
-                        .then(|| crate::features::sync::remember::load().ok().flatten())
-                        .flatten()
-                        .and_then(|kept| sync::takeover(&self.sync.refresh, Some(kept)));
-                    match taken {
-                        Some(kept) => self.sync.restore(kept),
-                        None => {
-                            self.github_logout();
-                            self.shell.fail(e);
-                        }
-                    }
-                }
-                // A renewal that never reached GitHub keeps the session and waits a beat.
-                Err(e) => {
-                    self.sync.renew_after = Some(Instant::now() + sync::RENEW_RETRY);
-                    self.shell.fail(e);
-                }
-            }
-        }
-        if self.sync.due(Instant::now()) {
-            self.renew();
+        if let Some(at) = self.sync.recall_at.filter(|at| *at > now) {
+            ctx.request_repaint_after(Duration::from_secs(at - now));
         }
 
         let mut signed: Option<SignIn> = None;
@@ -796,7 +731,7 @@ impl App {
                 self.auth.login = None;
                 self.adopt(session);
                 if self.prefs.remember {
-                    match remember::save(self.remembered()) {
+                    match remember::save(&self.sync.token) {
                         Ok(()) => self.shell.set_status(
                             "signed in — kept in the system keyring",
                             StatusKind::Saved,
@@ -873,6 +808,12 @@ impl App {
                         &[("minutes", &secs.div_ceil(60))],
                     ));
                 }
+                // A 401 is the session and not the operation: nothing this build
+                // holds can mint another token, so the dead one is dropped and the
+                // user signs in again — the box then sends by itself, its `push_at`
+                // left due rather than backed off.
+                // shortcut: a pull is not replayed, the user asks again once signed in.
+                Err(e) if sync::expired(&e) => self.expire(e),
                 Err(e) => {
                     self.retry_later(&path, now);
                     self.shell.fail(e);
@@ -920,12 +861,11 @@ impl App {
                         // and the reason is kept.
                         self.sync.failed.insert(source_key(&source), e.clone());
                     }
-                    // A dead session is the one refusal no retry fixes, however automatic the read.
+                    // A dead session is the one refusal no retry fixes, so it is
+                    // dropped and said out loud; an automatic read says nothing else.
                     if sync::expired(&e) {
-                        self.github_logout();
-                        self.shell.fail(e);
+                        self.expire(e);
                     } else if announce {
-                        // An automatic re-read keeps a failure to itself.
                         self.shell.fail(e);
                     }
                 }
@@ -971,7 +911,6 @@ impl App {
             || self.sync.job.is_some()
             || self.sync.folder_job.is_some()
             || self.sync.repo_job.is_some()
-            || self.sync.renew_job.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
@@ -1305,7 +1244,7 @@ mod tests {
     fn github_login_does_not_run_when_signed_in() {
         let ctx = egui::Context::default();
         let mut app = crate::app::App::blank(&ctx);
-        app.sync.restore("ghr_kept".to_owned());
+        app.sync.restore("gho_kept".to_owned());
         assert!(app.sync.signed());
         app.github_login();
         assert!(app.auth.login.is_none(), "no device flow while signed in");
@@ -1821,63 +1760,6 @@ mod tests {
         assert_eq!(
             app.auth.login.as_ref().and_then(|l| l.code.clone()),
             Some(("ABCD-1234".to_owned(), page.to_owned()))
-        );
-    }
-
-    #[test]
-    fn a_renewal_lands_as_the_session() {
-        let ctx = egui::Context::default();
-        let mut app = App::blank(&ctx);
-        app.sync.token = Zeroizing::new("gho_old".to_owned());
-        app.sync.expires_at = Some(Instant::now() - Duration::from_secs(1));
-
-        let (tx, rx) = mpsc::channel();
-        app.sync.renew_job = Some(rx);
-        tx.send(Ok(sync::Session {
-            access: Zeroizing::new("gho_new".to_owned()),
-            refresh: Some(Zeroizing::new("ghr_new".to_owned())),
-            expires_at: Some(Instant::now() + Duration::from_secs(3600)),
-        }))
-        .unwrap();
-        app.pump_sync(&ctx);
-
-        assert!(app.sync.renew_job.is_none(), "the answer was landed");
-        assert_eq!(app.sync.token.as_str(), "gho_new");
-        assert_eq!(app.sync.refresh.as_str(), "ghr_new");
-        assert!(app.sync.signed());
-        assert!(
-            !app.sync.due(Instant::now()),
-            "a renewal that just landed is not asked for again"
-        );
-    }
-
-    #[test]
-    fn a_renewal_that_never_landed_keeps_the_session() {
-        let ctx = egui::Context::default();
-        let mut app = App::blank(&ctx);
-        app.sync.token = Zeroizing::new("gho_old".to_owned());
-        app.sync.refresh = Zeroizing::new("ghr_old".to_owned());
-        app.sync.expires_at = Some(Instant::now() - Duration::from_secs(1));
-
-        let (tx, rx) = mpsc::channel();
-        app.sync.renew_job = Some(rx);
-        tx.send(Err("github: error sending request".to_owned()))
-            .unwrap();
-        app.pump_sync(&ctx);
-
-        assert!(app.sync.signed(), "a lost connection signs nobody out");
-        assert_eq!(
-            app.sync.refresh.as_str(),
-            "ghr_old",
-            "the refresh token is still GitHub's to take"
-        );
-        assert!(
-            !app.sync.due(Instant::now()),
-            "the retry waits instead of a thread per frame"
-        );
-        assert!(
-            app.sync.due(Instant::now() + sync::RENEW_RETRY),
-            "but it does come"
         );
     }
 }

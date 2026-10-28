@@ -1,6 +1,7 @@
 //! GitHub as an encrypted-blob mirror: the device flow mints a token and the Contents
 //! API moves one file; no git, and every call blocks on a worker thread.
-//! `offline_access` renews the session before the access token runs out.
+//! No `offline_access`: what it mints expires in eight hours and only the app's
+//! client secret renews it, which a build that ships its id cannot have.
 
 use crate::shared::i18n::{t, tf};
 use crate::vault::codec;
@@ -18,21 +19,13 @@ const CLIENT_ID: &str = match option_env!("PANDORA_GITHUB_CLIENT_ID") {
 };
 
 /// `repo` to read and write the private repo, `read:org` or `/user/repos` answers only
-/// personal repos, `offline_access` for a refresh token — an app that omits it still works.
-const SCOPE: &str = "repo read:org offline_access";
+/// personal repos. Never `offline_access`: the token it mints is renewed with the
+/// client secret, and this build has none — the one without it does not expire.
+const SCOPE: &str = "repo read:org";
 
-/// GitHub's prefix for a refresh token, so the credential store needs no format of its own.
+/// What an older build kept in the store: a token it meant to trade, which is
+/// never the one a request carries.
 pub const REFRESH_PREFIX: &str = "ghr_";
-
-/// How long before it expires an access token is traded in.
-pub const RENEW_WINDOW: Duration = Duration::from_secs(300);
-
-/// Wait after a renewal that never reached GitHub: a transport error says nothing
-/// about the session, and without a wait a frame loop becomes a request storm.
-pub const RENEW_RETRY: Duration = Duration::from_secs(60);
-
-/// GitHub's documented life of an access token, used when a renewable one omits it.
-const ACCESS_TTL: u64 = 8 * 3600;
 
 const GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
@@ -91,50 +84,27 @@ pub fn expired(why: &str) -> bool {
     why == EXPIRED
 }
 
-/// A refusal is the session gone, a transport error says nothing about it, and only
-/// the first may drop what is in hand; English, like [`EXPIRED`].
-pub const DEAD: &str = "GitHub: the session could not be renewed — sign in again";
-
-pub fn dead(why: &str) -> bool {
-    why.starts_with(DEAD)
-}
-
-/// A token another instance left behind: GitHub rotates the refresh token on every
-/// trade, so a store holding a different one is not a dead session but someone else's.
-pub fn takeover(spent: &str, kept: Option<String>) -> Option<String> {
-    kept.filter(|token| token != spent)
-}
-
-/// A signed-in session. No refresh token means the access token is the session and
-/// does not run out.
+/// A signed-in session: the one token every request carries. GitHub hands out
+/// a token that does not run out — an expiring one is renewed with the app's
+/// client secret, which is exactly what a build that ships its client id does
+/// not have.
 pub struct Session {
     pub access: Zeroizing<String>,
-    pub refresh: Option<Zeroizing<String>>,
-    pub expires_at: Option<Instant>,
 }
 
-/// What both token endpoints answer: a session, or why there is none.
+/// What the token endpoint answers: a session, or why there is none.
 #[derive(serde::Deserialize)]
 struct Token {
     #[serde(default)]
     access_token: Option<String>,
-    #[serde(default)]
-    refresh_token: Option<String>,
-    #[serde(default)]
-    expires_in: Option<u64>,
     #[serde(default)]
     error: Option<String>,
 }
 
 impl Token {
     fn into_session(mut self) -> Session {
-        let expires_in = self
-            .expires_in
-            .or_else(|| self.refresh_token.as_ref().map(|_| ACCESS_TTL));
         Session {
             access: Zeroizing::new(self.access_token.take().unwrap_or_default()),
-            refresh: self.refresh_token.map(Zeroizing::new),
-            expires_at: expires_in.map(|secs| Instant::now() + Duration::from_secs(secs)),
         }
     }
 }
@@ -279,29 +249,6 @@ pub fn await_token(mut device: Device) -> Result<Session, String> {
 }
 
 /// GitHub spends the refresh token on success, so the reply replaces the session.
-pub fn refresh(token: &str) -> Result<Session, String> {
-    let body = Zeroizing::new(
-        agent()
-            .post(format!("{OAUTH}/login/oauth/access_token"))
-            .header("Accept", "application/json")
-            .send_form([
-                ("client_id", CLIENT_ID),
-                // The device-flow token was minted with no secret, so it renews with none.
-                ("grant_type", "refresh_token"),
-                ("refresh_token", token),
-            ])
-            .map_err(net)?
-            .body_mut()
-            .read_to_string()
-            .map_err(net)?,
-    );
-    let reply: Token = serde_json::from_str(&body).map_err(net)?;
-    if reply.access_token.is_some() {
-        return Ok(reply.into_session());
-    }
-    Err(DEAD.to_owned())
-}
-
 pub struct Blob {
     pub bytes: Vec<u8>,
     /// The next push names it to prove it is replacing the version it read, which
@@ -765,7 +712,8 @@ mod tests {
         );
     }
 
-    /// The decoder rejects the line wrapping the API adds.
+    /// Only an answer that names the token or the app is final: a connection that
+    /// never landed is asked for again, and so is one GitHub left unexplained.
     #[test]
     fn githubs_wrapped_base64_still_decodes() {
         let raw: Vec<u8> = (0..160u16).map(|b| b as u8).collect();
@@ -838,19 +786,6 @@ mod tests {
     }
 
     #[test]
-    fn a_takeover_needs_a_different_token() {
-        assert_eq!(
-            super::takeover("ghr_spent", Some("ghr_other".to_owned())),
-            Some("ghr_other".to_owned())
-        );
-        assert_eq!(
-            super::takeover("ghr_spent", Some("ghr_spent".to_owned())),
-            None
-        );
-        assert_eq!(super::takeover("ghr_spent", None), None);
-    }
-
-    #[test]
     fn only_a_dead_token_counts_as_expired() {
         let bare = ureq::http::HeaderMap::new();
         assert_eq!(denied(401, &bare).unwrap(), EXPIRED);
@@ -861,59 +796,19 @@ mod tests {
         assert!(!expired("ghi"));
     }
 
-    #[test]
-    fn a_refused_renewal_is_not_a_renewal_that_never_landed() {
-        assert!(dead(DEAD));
-
-        assert!(!dead(&net("error sending request")));
-        assert!(!dead("the renewal was interrupted"));
-        assert!(!dead(EXPIRED), "the two walls stay apart");
-        assert!(!expired(DEAD));
-    }
-
+    /// What GitHub answers is one token, and it is the session.
     #[test]
     fn a_token_answer_becomes_a_session() {
-        let expiring: Token = serde_json::from_str(
-            r#"{"access_token":"gho_a","refresh_token":"ghr_b","expires_in":28800}"#,
-        )
-        .unwrap();
-        let session = expiring.into_session();
-        assert_eq!(session.access.as_str(), "gho_a");
-        assert_eq!(
-            session.refresh.as_ref().map(|r| r.as_str()),
-            Some("ghr_b"),
-            "the refresh token is what renews it"
-        );
-        assert!(
-            session
-                .expires_at
-                .unwrap()
-                .saturating_duration_since(Instant::now())
-                > Duration::from_secs(28800 - 60),
-            "the deadline is the seconds GitHub sent"
-        );
+        let answer: Token =
+            serde_json::from_str(r#"{"access_token":"gho_a","scope":"repo"}"#).unwrap();
+        assert_eq!(answer.into_session().access.as_str(), "gho_a");
 
-        let lasting: Token =
-            serde_json::from_str(r#"{"access_token":"gho_c","token_type":"bearer"}"#).unwrap();
-        let session = lasting.into_session();
-        assert_eq!(session.access.as_str(), "gho_c");
+        let pending: Token =
+            serde_json::from_str(r#"{"error":"authorization_pending","error_description":"slow"}"#)
+                .unwrap();
         assert!(
-            session.refresh.is_none() && session.expires_at.is_none(),
-            "nothing renews it, so nothing about it runs out"
-        );
-
-        // A renewing session that forgot to say when still gets a deadline:
-        // otherwise it would be used until GitHub refused it.
-        let vague: Token =
-            serde_json::from_str(r#"{"access_token":"gho_d","refresh_token":"ghr_e"}"#).unwrap();
-        let left = vague
-            .into_session()
-            .expires_at
-            .unwrap()
-            .saturating_duration_since(Instant::now());
-        assert!(
-            left > Duration::from_secs(ACCESS_TTL - 60),
-            "left {left:?} of a documented {ACCESS_TTL} s"
+            pending.into_session().access.is_empty(),
+            "an error carries no session"
         );
     }
 

@@ -660,9 +660,7 @@ fn failure(ui: &mut egui::Ui, why: &str) {
 /// The "keep me signed in" choice; off takes the session back out of the store.
 fn keep_toggle(ui: &mut egui::Ui, app: &mut App) {
     let resp = theme::check(ui, &mut app.prefs.remember, "Keep me signed in").on_hover_text(
-        crate::shared::i18n::t(
-            "the refresh token goes to your system keyring, never to a plain file",
-        ),
+        crate::shared::i18n::t("the token goes to your system keyring, never to a plain file"),
     );
     if resp.changed() {
         crate::features::settings::model::save(&app.prefs);

@@ -149,19 +149,13 @@ pub struct Sync {
     /// nothing on its own — the box still needs its password — and staying put
     /// across a lock is what keeps automatic sending alive.
     pub token: Zeroizing<String>,
-    /// The refresh token GitHub sent with it, when it sent one: what mints the
-    /// next access token once this one runs out. Empty for a session that does
-    /// not run out, and then there is nothing to renew with.
-    pub refresh: Zeroizing<String>,
-    /// When the access token runs out, or `None` when it does not claim to.
-    pub expires_at: Option<Instant>,
-    /// A renewal on its way back, so a second one is never asked for: a refresh
-    /// token is good for one trade, and two in flight would race for it.
-    pub renew_job: Option<mpsc::Receiver<Result<github::Session, String>>>,
-    /// The next renewal waits until this, because the last one never reached
-    /// GitHub. A refused renewal is the session being gone; one that never landed
-    /// is not, so what is in hand stays and only the ask is held back.
-    pub renew_after: Option<Instant>,
+    /// When the credential store is asked again after failing to hand back the
+    /// remembered session at boot, in epoch seconds. A locked keyring is not a
+    /// signed-out run, so the session is looked for again instead of written off.
+    pub recall_at: Option<u64>,
+    /// How many times this run has asked the store; a store that never answers is
+    /// left alone instead of costing a request a minute for the whole run.
+    pub recalls: u8,
     /// This run's spend against GitHub's hourly write budget.
     pub quota: Quota,
     pub job: Option<Job>,
@@ -186,35 +180,16 @@ pub struct Sync {
 }
 
 impl Sync {
-    /// Whether a session is in hand at all: the access token requests carry, or
-    /// the refresh token that will mint one.
+    /// Whether a session is in hand: the token every request carries.
     pub fn signed(&self) -> bool {
-        !self.token.is_empty() || !self.refresh.is_empty()
+        !self.token.is_empty()
     }
 
-    /// Whether the access token must not go out again: past, or about to pass.
-    /// A session with no refresh token is never due — nothing could renew it,
-    /// and GitHub does not expire those. `renew_after` holds the ask itself back
-    /// while a renewal that never landed waits for its retry.
-    pub fn due(&self, now: Instant) -> bool {
-        if self.refresh.is_empty() || self.renew_after.is_some_and(|at| at > now) {
-            return false;
-        }
-        match self.expires_at {
-            // A refresh token and no access token yet: what the credential
-            // store gives back at boot, one renewal away from being a session.
-            None => self.token.is_empty(),
-            Some(at) => at <= now + github::RENEW_WINDOW,
-        }
-    }
-
-    /// Take back what a previous run kept. A refresh token is the whole session
-    /// — the access token that goes with it is minted on the next frame — and a
-    /// plain access token is one that does not expire, used as it is.
+    /// Take back what a previous run kept. A refresh token is not a session this
+    /// build can use — it is renewed with the app's client secret, which is not
+    /// here — so what an older build left in the store is dropped.
     pub fn restore(&mut self, kept: String) {
-        if kept.starts_with(github::REFRESH_PREFIX) {
-            self.refresh = Zeroizing::new(kept);
-        } else {
+        if !kept.starts_with(github::REFRESH_PREFIX) {
             self.token = Zeroizing::new(kept);
         }
     }
@@ -223,37 +198,20 @@ impl Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
-    /// A session is due exactly when it can be renewed and must not be used
-    /// again: a renewal is asked for at boot, never for a token that does not
-    /// expire, and never twice at once.
+    /// A restored session is the token itself, and a refresh token left behind by
+    /// an older build is not one: it is never sent as a bearer.
     #[test]
-    fn a_session_is_due_when_it_can_be_renewed_and_has_run_out() {
-        let now = Instant::now();
+    fn only_a_token_that_opens_requests_is_restored() {
         let mut sync = Sync::default();
-        assert!(!sync.signed() && !sync.due(now), "nothing is signed in");
+        assert!(!sync.signed(), "nothing is signed in");
 
         sync.restore("gho_plain".to_owned());
         assert!(sync.signed());
-        assert!(
-            !sync.due(now),
-            "a session with nothing to renew it with is not due, ever"
-        );
+        assert_eq!(sync.token.as_str(), "gho_plain");
 
-        // What the store gives back once a sign-in asked for an expiring
-        // session: the refresh half alone, minted into one on the first frame.
-        let mut sync = Sync::default();
-        sync.restore("ghr_kept".to_owned());
-        assert!(sync.signed());
-        assert!(sync.due(now), "a kept refresh token wants a token at once");
-
-        sync.token = Zeroizing::new("gho_a".to_owned());
-        sync.expires_at = Some(now + github::RENEW_WINDOW + Duration::from_secs(1));
-        assert!(!sync.due(now), "time left on it");
-        sync.expires_at = Some(now + github::RENEW_WINDOW);
-        assert!(sync.due(now), "inside the window it is traded in");
-        sync.expires_at = Some(now - Duration::from_secs(1));
-        assert!(sync.due(now), "and once it is gone");
+        let mut older = Sync::default();
+        older.restore("ghr_renewable".to_owned());
+        assert!(!older.signed(), "a refresh token opens nothing here");
     }
 }

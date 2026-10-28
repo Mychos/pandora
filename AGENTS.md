@@ -277,11 +277,14 @@ and will not offer it, and `sync::put` asks GitHub for `private` before it write
 a repo made public after it was picked is refused on the next push.
 `features/sync/github.rs` is the whole network surface: no git, just the Contents
 API moving one opaque encrypted blob. The OAuth device flow mints a session (`repo
-read:org offline_access`), and the client id is build-time (`PANDORA_GITHUB_CLIENT_ID`,
+read:org`, never `offline_access`: the eight-hour token that asks for is renewed with
+the app's client secret, and a build that ships its client id has none — the token it
+gets without it does not expire), and the client id is build-time (`PANDORA_GITHUB_CLIENT_ID`,
 `.cargo/config.toml`, not the repo); without it sign-in is refused as an unconfigured
 build. A token is a credential: it is `Zeroizing`, and the system credential store
-keeps the refresh token by default (`Prefs::remember`); turning that off takes it back
-out.
+keeps it by default (`Prefs::remember`); turning that off takes it back out. Nothing
+renews a token, because the one GitHub mints here does not run out; a 401 means the
+session is gone, so the token is dropped and the sign-in is asked for again.
 
 **The sign-in opens its own page.** The frame that lands the code copies it and hands
 GitHub's address — `verification_uri_complete` when GitHub sends one, so the code is

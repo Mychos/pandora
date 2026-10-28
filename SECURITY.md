@@ -354,7 +354,7 @@ updated by one.
   only after the user adds a repo. It asks GitHub for `private` before every
   write, so a repo made public after it was picked is refused on the next push.
 - The token is a credential: it is `Zeroizing`, and the system credential store
-  keeps the refresh token only while the user leaves that on.
+  keeps it only while the user leaves that on.
 - A commit subject is plaintext in the repo, so it is one fixed line and never a
   name, a count or which record moved.
 
