@@ -614,6 +614,42 @@ fn agent_card(ui: &mut egui::Ui, app: &mut App) {
             {
                 add = true;
             }
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            if theme::secondary_button(ui, &app.icons, Some(theme::Icon::Plus), "Import a key")
+                .clicked()
+            {
+                app.ask(
+                    ui.ctx(),
+                    || rfd::FileDialog::new().pick_file().into_iter().collect(),
+                    |app, mut paths| {
+                        let Some(path) = paths.pop() else {
+                            return;
+                        };
+                        match std::fs::read_to_string(&path) {
+                            Ok(text) => {
+                                let name = path
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("imported key")
+                                    .to_owned();
+                                match crate::features::agent::import_openssh(&text, &name) {
+                                    Ok(key) => {
+                                        if let Some(s) = app.boxes.session.as_mut() {
+                                            s.vault.ssh_keys.push(key);
+                                            s.mark_dirty();
+                                        }
+                                    }
+                                    Err(e) => app.shell.fail(e),
+                                }
+                            }
+                            Err(e) => app.shell.fail(crate::shared::i18n::tf(
+                                "could not read {name}: {error}",
+                                &[("name", &path.to_string_lossy()), ("error", &e)],
+                            )),
+                        }
+                    },
+                );
+            }
         } else {
             theme::hint(ui, t("open a box to manage its keys"));
         }

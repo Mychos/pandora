@@ -10,6 +10,7 @@
 //! user can reach it.
 
 use crate::vault::model::{SshKey, Vault};
+use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -249,6 +250,121 @@ pub fn public_blob(key: &SshKey) -> Vec<u8> {
     out
 }
 
+/// Import an unencrypted OpenSSH ed25519 private key. The file is parsed here, the
+/// seed is checked against the public half it carries, and nothing is written to
+/// disk: the result is a key the box can keep like one it made itself.
+pub fn import_openssh(text: &str, name: &str) -> Result<SshKey, String> {
+    let body: String = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("-----"))
+        .collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&body)
+        .map_err(|e| format!("not a base64 OpenSSH key: {e}"))?;
+
+    let magic = b"openssh-key-v1\0";
+    if !bytes.starts_with(magic) {
+        return Err("not an OpenSSH private key".to_owned());
+    }
+    let mut at = magic.len();
+
+    let cipher = take_str(&bytes, &mut at)?;
+    if cipher != "none" {
+        return Err("encrypted OpenSSH keys are not supported".to_owned());
+    }
+    let kdf = take_str(&bytes, &mut at)?;
+    if kdf != "none" {
+        return Err("encrypted OpenSSH keys are not supported".to_owned());
+    }
+    let _options = take_blob(&bytes, &mut at)?;
+    let count = take_u32(&bytes, &mut at).ok_or("truncated OpenSSH key")?;
+    if count != 1 {
+        return Err("expected exactly one key".to_owned());
+    }
+    let public_blob = take_blob(&bytes, &mut at)?;
+    let private_blob = take_blob(&bytes, &mut at)?;
+
+    // Public blob: string "ssh-ed25519", then the 32 public bytes.
+    let mut pub_at = 0;
+    let key_type = take_str_bytes(&public_blob, &mut pub_at)?;
+    if key_type != "ssh-ed25519" {
+        return Err("only ed25519 keys can be imported".to_owned());
+    }
+    let public_bytes = take_blob(&public_blob, &mut pub_at)?;
+    if public_bytes.len() != 32 {
+        return Err("unexpected public key length".to_owned());
+    }
+    let public: [u8; 32] = public_bytes.as_slice().try_into().unwrap();
+
+    // Private blob: two check ints, then key type, seed+public, comment, padding.
+    let mut priv_at = 0;
+    let check1 = take_u32(&private_blob, &mut priv_at).ok_or("truncated OpenSSH key")?;
+    let check2 = take_u32(&private_blob, &mut priv_at).ok_or("truncated OpenSSH key")?;
+    if check1 != check2 {
+        return Err("corrupt OpenSSH key (check ints differ)".to_owned());
+    }
+    let priv_type = take_str_bytes(&private_blob, &mut priv_at)?;
+    if priv_type != "ssh-ed25519" {
+        return Err("only ed25519 keys can be imported".to_owned());
+    }
+    // OpenSSH stores the public key first, then the private half (seed + public).
+    let _ = take_blob(&private_blob, &mut priv_at)?;
+    let private_half = take_blob(&private_blob, &mut priv_at)?;
+    if private_half.len() != 64 {
+        return Err("unexpected private key length".to_owned());
+    }
+    let embedded_public: [u8; 32] = private_half[32..].try_into().unwrap();
+    if embedded_public != public {
+        return Err("the public half does not match the seed".to_owned());
+    }
+    let seed_bytes = &private_half[..32];
+    let seed: [u8; 32] = seed_bytes.try_into().unwrap();
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let derived = signing.verifying_key().to_bytes();
+    if derived != public {
+        return Err("the seed does not derive the public key".to_owned());
+    }
+    let comment = take_str_bytes(&private_blob, &mut priv_at).unwrap_or_default();
+
+    let now = crate::vault::model::now_secs();
+    Ok(SshKey {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: if name.trim().is_empty() {
+            "imported key".to_owned()
+        } else {
+            name.to_owned()
+        },
+        private: zeroize::Zeroizing::new(seed.to_vec()),
+        public: zeroize::Zeroizing::new(public.to_vec()),
+        comment: if comment.is_empty() {
+            "imported".to_owned()
+        } else {
+            comment
+        },
+        allowed: false,
+        created: now,
+        modified: now,
+    })
+}
+
+fn take_str(bytes: &[u8], at: &mut usize) -> Result<String, String> {
+    let blob = take_blob(bytes, at)?;
+    String::from_utf8(blob).map_err(|_| "invalid utf-8 in OpenSSH key".to_owned())
+}
+
+fn take_str_bytes(bytes: &[u8], at: &mut usize) -> Result<String, String> {
+    take_str(bytes, at)
+}
+
+fn take_blob(bytes: &[u8], at: &mut usize) -> Result<Vec<u8>, String> {
+    let len = take_u32(bytes, at).ok_or("truncated OpenSSH key")? as usize;
+    let end = at.saturating_add(len);
+    let slice = bytes.get(*at..end).ok_or("truncated OpenSSH key")?;
+    *at = end;
+    Ok(slice.to_vec())
+}
+
 /// The line a user pastes into `authorized_keys`.
 pub fn public_line(key: &SshKey) -> String {
     let mut line = format!(
@@ -447,6 +563,18 @@ mod tests {
         let seed = crate::vault::codec::display(key.private.as_slice()).to_string();
         assert!(!format!("{key:?}").contains(&seed), "the seed stays hidden");
         assert_eq!(seed_of(&key).len(), 32);
+    }
+
+    /// An unencrypted OpenSSH ed25519 key imports into a key the agent can serve,
+    /// and its seed derives the public half it carried.
+    #[test]
+    fn an_openssh_ed25519_key_imports() {
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACB2lScPspZYT0suH+8DoQjoppMzE+kDOCuRHbvWLfEwLAAAAJBxtqOycbaj\nsgAAAAtzc2gtZWQyNTUxOQAAACB2lScPspZYT0suH+8DoQjoppMzE+kDOCuRHbvWLfEwLA\nAAAEDB3av168MoC/QvhMie6OI4JiOfogqbncEURpoFidAxtXaVJw+yllhPSy4f7wOhCOim\nkzMT6QM4K5Edu9Yt8TAsAAAADHRlc3RAcGFuZG9yYQE=\n-----END OPENSSH PRIVATE KEY-----\n";
+        let key = import_openssh(pem, "laptop").unwrap();
+        assert_eq!(key.name, "laptop");
+        assert_eq!(key.private.len(), 32);
+        assert_eq!(key.public.len(), 32);
+        assert!(!key.allowed);
     }
 
     /// A socket on disk is 0600 and answers, and stopping takes it away.
