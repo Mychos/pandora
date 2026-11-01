@@ -376,6 +376,9 @@ pub fn check(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Response {
                 crate::shared::i18n::text(text).into_owned(),
                 (ui.available_width() - ui.spacing().icon_width - ui.spacing().item_spacing.x)
                     .max(0.0),
+                // The label follows the box, never the page: a centred galley would
+                // paint its rows over the icon it was laid out after.
+                egui::Align::LEFT,
             ),
         )
     })
@@ -1311,6 +1314,37 @@ mod tests {
             _ => false,
         });
         (white_tick, green_box)
+    }
+
+    #[test]
+    fn a_centred_row_keeps_the_label_after_its_box() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut on = false;
+        let shapes =
+            crate::shared::ui::shot::frame(&ctx, egui::vec2(240.0, 60.0), Vec::new(), |ui| {
+                ui.vertical_centered(|ui| check(ui, &mut on, "Keep me signed in"));
+            });
+        let text = shapes
+            .iter()
+            .find(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Keep me signed in"))
+            .map(|s| s.shape.visual_bounding_rect())
+            .expect("the label is painted");
+        let icon = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Rect(r)
+                    if (r.rect.width() - r.rect.height()).abs() < 0.5 && r.rect.width() < 20.0 =>
+                {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .expect("the box is painted");
+        assert!(
+            text.left() >= icon.right(),
+            "the label clears its box: {text:?} over {icon:?}"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Balanced label text: the narrowest wrap width that keeps the row count.
 
-use egui::{Direction, FontSelection, Label, Ui, WidgetText};
+use egui::{Align, Direction, FontSelection, Label, Ui, WidgetText};
 use std::sync::Arc;
 
 /// Paints `text` as [`Ui::label`] would, with its lines balanced.
@@ -9,18 +9,23 @@ pub fn label(ui: &mut Ui, text: impl Into<WidgetText>) {
         ui.label(text);
         return;
     }
-    ui.add(Label::new(wrap(ui, text, ui.available_width())));
+    ui.add(Label::new(wrap(
+        ui,
+        text,
+        ui.available_width(),
+        ui.layout().horizontal_placement(),
+    )));
 }
 
 /// The same text laid out balanced, for a widget that takes a [`WidgetText`]: an
 /// atom layout would wrap `Text` at the full width.
-pub fn wrap(ui: &Ui, text: impl Into<WidgetText>, width: f32) -> WidgetText {
+pub fn wrap(ui: &Ui, text: impl Into<WidgetText>, width: f32, halign: Align) -> WidgetText {
     let mut job = Arc::unwrap_or_clone(text.into().into_layout_job(
         ui.style(),
         FontSelection::Default,
         ui.text_valign(),
     ));
-    job.halign = ui.layout().horizontal_placement();
+    job.halign = halign;
     job.justify = ui.layout().horizontal_justify();
     job.wrap.max_width = width;
 
