@@ -6,13 +6,16 @@ use crate::app::Session;
 use crate::app::{App, Screen, Tab};
 use crate::shared::theme;
 use crate::shared::ui::{chrome, responsive};
-use egui::{pos2, vec2, Align, Color32, Context, CornerRadius, Id, Layout, Rect, Ui};
+/// The pointer state a native move or resize takes with it, which every desktop has.
 #[cfg(not(target_os = "android"))]
-use egui::{CursorIcon, PointerButton, RichText, Sense, Stroke, StrokeKind, ViewportCommand};
+use egui::PointerState;
 /// macOS resizes a borderless window itself and does not support `BeginResize`, so it
 /// gets no strips: one would swallow the press the system needs.
 #[cfg(not(any(target_os = "android", target_os = "macos")))]
-use egui::{PointerState, ResizeDirection};
+use egui::ResizeDirection;
+use egui::{pos2, vec2, Align, Color32, Context, CornerRadius, Id, Layout, Rect, Ui};
+#[cfg(not(target_os = "android"))]
+use egui::{CursorIcon, PointerButton, RichText, Sense, Stroke, StrokeKind, ViewportCommand};
 
 /// A bar slot under a pointer; a finger asks [`responsive::grow_target`].
 const CONTROL: f32 = 38.0;
