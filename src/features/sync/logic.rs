@@ -784,7 +784,12 @@ impl App {
         }
         // After the write, because a save bumps the generation the fingerprint covers:
         // this is what the landing compares the box against to know it did not move.
-        let Some(sent) = self.boxes.session.as_ref().map(|s| Fingerprint::of(&s.vault)) else {
+        let Some(sent) = self
+            .boxes
+            .session
+            .as_ref()
+            .map(|s| Fingerprint::of(&s.vault))
+        else {
             return;
         };
         // Size before read: a box past GitHub's ceiling is refused without loading it.
