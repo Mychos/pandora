@@ -582,6 +582,7 @@
   "this provider does not let the app create the file": "este proveedor no deja crear el archivo",
   "this provider does not let the app delete the file": "este proveedor no deja borrar el archivo",
   "this provider does not let the app delete the file: {error}": "este proveedor no deja borrar el archivo: {error}",
+  "reading the repo…": "leyendo el repositorio…",
   "this repo has no boxes yet — create one below": "Este repositorio aún no tiene cajas — crea una abajo",
   "this repo is listed below — sign in to sync it": "Este repositorio aparece abajo — inicia sesión para sincronizarlo",
   "this seed gives no code": "esta semilla no da ningún código",
@@ -648,5 +649,6 @@
   "“{name}” leaves the box as “{file}” in your Downloads folder, and nothing encrypts it there.": "“{name}” sale de la caja como “{file}” en tu carpeta de Descargas, y allí nada lo cifra.",
   "“{name}” leaves this box sealed": "«{name}» sale de esta caja sellado",
   "“{name}” will be deleted for good.": "Se eliminará “{name}” definitivamente.",
-  "“{name}” will be deleted. Its contents move up one level.": "Se eliminará “{name}”. Su contenido subirá un nivel."
+  "“{name}” will be deleted. Its contents move up one level.": "Se eliminará “{name}”. Su contenido subirá un nivel.",
+  "the session ran out — renewing it": "la sesión ha caducado — renovándola"
 }

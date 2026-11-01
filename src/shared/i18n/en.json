@@ -580,6 +580,7 @@
   "this provider does not let the app create the file": "this provider does not let the app create the file",
   "this provider does not let the app delete the file": "this provider does not let the app delete the file",
   "this provider does not let the app delete the file: {error}": "this provider does not let the app delete the file: {error}",
+  "reading the repo…": "reading the repo…",
   "this repo has no boxes yet — create one below": "this repo has no boxes yet — create one below",
   "this repo is listed below — sign in to sync it": "this repo is listed below — sign in to sync it",
   "this seed gives no code": "this seed gives no code",
@@ -646,5 +647,6 @@
   "“{name}” leaves the box as “{file}” in your Downloads folder, and nothing encrypts it there.": "“{name}” leaves the box as “{file}” in your Downloads folder, and nothing encrypts it there.",
   "“{name}” leaves this box sealed": "“{name}” leaves this box sealed",
   "“{name}” will be deleted for good.": "“{name}” will be deleted for good.",
-  "“{name}” will be deleted. Its contents move up one level.": "“{name}” will be deleted. Its contents move up one level."
+  "“{name}” will be deleted. Its contents move up one level.": "“{name}” will be deleted. Its contents move up one level.",
+  "the session ran out — renewing it": "the session ran out — renewing it"
 }

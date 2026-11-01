@@ -128,12 +128,24 @@ pub fn default_path() -> PathBuf {
     data_dir().join(format!("vault.{EXT}"))
 }
 
-/// One working copy per box, named by a digest of the source: a folder called
+/// Where every working copy lives.
+pub fn sources_dir() -> PathBuf {
+    data_dir().join("sources")
+}
+
+/// The folder name of a working copy, named by a digest of the source: a folder called
 /// `sources/github/octocat/boxes` would say which repo somebody mirrors to.
+pub fn source_digest(kind: &str, target: &str) -> String {
+    crypto::digest(format!("{}|{target}", sanitize(kind)).as_bytes())
+}
+
+/// Whether a path is inside a working copy rather than somewhere the user keeps a box.
+pub fn working_copy(path: &Path) -> bool {
+    path.starts_with(sources_dir())
+}
+
 pub fn source_dir(kind: &str, target: &str) -> PathBuf {
-    let dir = data_dir().join("sources").join(crypto::digest(
-        format!("{}|{target}", sanitize(kind)).as_bytes(),
-    ));
+    let dir = sources_dir().join(source_digest(kind, target));
     // The old layout's folder is moved on first look: a copy that never reached the repo
     // is the only copy.
     let legacy = legacy_source_dir(kind, target);

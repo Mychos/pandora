@@ -7,7 +7,7 @@ use crate::features::sync::github::{self, Avatars, Quota, Repo};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 pub enum Reply {
@@ -123,6 +123,10 @@ pub struct Sync {
     /// Whether the repo picker's list has been fetched at all, so an empty answer
     /// is not asked for again every frame.
     pub repo_loaded: bool,
+    /// Whether this run already looked at the copies on disk for one whose source
+    /// was lost. Latched on the first signed frame, so the folder is read once a run
+    /// and not once a frame.
+    pub repaired: bool,
     /// The box files each source holds, keyed by `kind:target`. A key that is
     /// present has been asked for; an empty list is an empty folder.
     pub listing: HashMap<String, Vec<String>>,
@@ -149,6 +153,17 @@ pub struct Sync {
     /// nothing on its own — the box still needs its password — and staying put
     /// across a lock is what keeps automatic sending alive.
     pub token: Zeroizing<String>,
+    /// The companion GitHub sends for a token that runs out: what mints the next.
+    pub renew: Option<Zeroizing<String>>,
+    /// When the access token stops working, when GitHub said. A session minted
+    /// without an expiry has none.
+    pub expires_at: Option<Instant>,
+    /// The renewal in flight, if one is. One at a time, so a frame loop cannot
+    /// spend the same refresh token twice.
+    pub renewing: Option<mpsc::Receiver<Result<github::Session, String>>>,
+    /// Earliest next renewal after an attempt that never reached GitHub, so a
+    /// connection that is down is not asked once per frame.
+    pub renew_at: Option<Instant>,
     /// When the credential store is asked again after failing to hand back the
     /// remembered session at boot, in epoch seconds. A locked keyring is not a
     /// signed-out run, so the session is looked for again instead of written off.
@@ -185,13 +200,37 @@ impl Sync {
         !self.token.is_empty()
     }
 
-    /// Take back what a previous run kept. A refresh token is not a session this
-    /// build can use — it is renewed with the app's client secret, which is not
-    /// here — so what an older build left in the store is dropped.
+    /// Take back what a previous run kept: the token every request carries and,
+    /// on the next line, what renews it. A bare refresh token is older still, and
+    /// it is enough to mint a fresh pair.
     pub fn restore(&mut self, kept: String) {
-        if !kept.starts_with(github::REFRESH_PREFIX) {
-            self.token = Zeroizing::new(kept);
+        let mut lines = kept.split('\n');
+        let access = lines.next().unwrap_or_default();
+        if access.starts_with(github::REFRESH_PREFIX) {
+            self.renew = Some(Zeroizing::new(access.to_owned()));
+            return;
         }
+        self.token = Zeroizing::new(access.to_owned());
+        self.renew = lines
+            .next()
+            .filter(|token| !token.is_empty())
+            .map(|token| Zeroizing::new(token.to_owned()));
+    }
+
+    /// What the credential store holds: the token and, under it, its renewal, so a
+    /// restart picks the pair up instead of asking for a new one.
+    pub fn credential(&self) -> String {
+        match &self.renew {
+            Some(renew) => format!("{}\n{}", self.token.as_str(), renew.as_str()),
+            None => self.token.as_str().to_owned(),
+        }
+    }
+
+    /// How long the access token has left, when GitHub said. `None` is a token
+    /// with no deadline, which has nothing to renew.
+    pub fn left(&self) -> Option<Duration> {
+        self.expires_at
+            .map(|at| at.saturating_duration_since(Instant::now()))
     }
 }
 
@@ -199,19 +238,38 @@ impl Sync {
 mod tests {
     use super::*;
 
-    /// A restored session is the token itself, and a refresh token left behind by
-    /// an older build is not one: it is never sent as a bearer.
+    /// A restored session carries its renewal too, and a bare refresh token left
+    /// by an older build is enough to mint one: only a token is ever a bearer.
     #[test]
-    fn only_a_token_that_opens_requests_is_restored() {
+    fn a_restored_session_is_the_pair_the_store_holds() {
         let mut sync = Sync::default();
         assert!(!sync.signed(), "nothing is signed in");
 
         sync.restore("gho_plain".to_owned());
         assert!(sync.signed());
         assert_eq!(sync.token.as_str(), "gho_plain");
+        assert!(
+            sync.renew.is_none(),
+            "a token that never runs out needs none"
+        );
+        assert_eq!(sync.credential(), "gho_plain", "and it is what is kept");
+
+        let mut expiring = Sync::default();
+        expiring.restore("gho_a\nghr_b".to_owned());
+        assert!(expiring.signed());
+        assert_eq!(
+            expiring.renew.as_ref().map(|t| t.as_str()),
+            Some("ghr_b"),
+            "the renewal comes back with the token"
+        );
+        assert_eq!(expiring.credential(), "gho_a\nghr_b", "pair in, pair out");
 
         let mut older = Sync::default();
         older.restore("ghr_renewable".to_owned());
-        assert!(!older.signed(), "a refresh token opens nothing here");
+        assert!(!older.signed(), "a refresh token opens nothing as a bearer");
+        assert!(
+            older.renew.is_some(),
+            "but it is still good for minting one"
+        );
     }
 }

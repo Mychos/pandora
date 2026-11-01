@@ -60,6 +60,10 @@ pub struct Prefs {
     /// them, each its own folder of boxes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<Source>,
+    /// The repos the user stopped following. A copy of theirs stays on disk, so
+    /// the repo is remembered here and not readopted behind the user's back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stopped: Vec<Source>,
     /// Whether the GitHub token is handed to the system credential store, so a
     /// signed-in session survives a restart. On by default: a vault that asks for
     /// a device-flow sign-in every morning is a vault nobody signs into. The
@@ -75,7 +79,8 @@ pub struct Prefs {
     pub biometric: bool,
     /// Whether a browser may open a box on its own, with the master password typed
     /// into the extension. Off by default: with the app open the host relays to it
-    /// and never needs a password, and the one thing that would put a master password
+    /// and never needs a password, and with it closed the host starts the app and the
+    /// panel waits for a box there. The one thing that would put a master password
     /// inside a browser is this.
     #[serde(skip_serializing_if = "is_false")]
     pub unlock_from_browser: bool,
@@ -212,6 +217,7 @@ impl Default for Prefs {
             tries: HashMap::new(),
             remotes: HashMap::new(),
             sources: Vec::new(),
+            stopped: Vec::new(),
             remember: true,
             biometric: false,
             unlock_from_browser: false,
@@ -429,6 +435,37 @@ mod tests {
             },
         );
         assert_eq!(read(&dir).lang, Lang::Es, "the selected language persists");
+    }
+
+    /// A stopped source is remembered: its copies stay on disk and are not readopted
+    /// behind the user's back.
+    #[test]
+    fn stopped_sources_round_trip_and_start_empty() {
+        let dir = tmp("stopped");
+        assert!(
+            read(&dir).stopped.is_empty(),
+            "nothing is stopped on a fresh install"
+        );
+
+        let source = Source {
+            kind: GITHUB.to_owned(),
+            target: "octocat/boxes".to_owned(),
+        };
+        write(
+            &dir,
+            &Prefs {
+                stopped: vec![source.clone()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(read(&dir).stopped, vec![source]);
+
+        fs::write(dir.join("prefs.json"), br#"{"lock_after":0}"#).unwrap();
+        assert!(
+            read(&dir).stopped.is_empty(),
+            "a file written before stopped existed reads as none"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

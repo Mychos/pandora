@@ -428,7 +428,7 @@ fn a_repo_row_carries_its_mark_on_the_left() {
 }
 
 #[test]
-fn a_first_read_veils_the_card_instead_of_pushing_a_row() {
+fn a_first_read_says_it_is_reading_and_leaves_the_copies_in_place() {
     let ctx = egui::Context::default();
     theme::apply(&ctx);
     let mut app = App::blank(&ctx);
@@ -438,9 +438,14 @@ fn a_first_read_veils_the_card_instead_of_pushing_a_row() {
 
     let source = Source {
         kind: GITHUB.to_owned(),
-        target: "octocat/veiled".to_owned(),
+        target: "octocat/reading".to_owned(),
     };
     app.prefs.sources = vec![source.clone()];
+    let dir = store::source_dir(&source.kind, &source.target);
+    fs::create_dir_all(&dir).unwrap();
+    let copy = dir.join("kept.pandora");
+    fs::write(&copy, b"locked").unwrap();
+
     // The read has gone out and has not come back.
     let (_tx, rx) = std::sync::mpsc::channel();
     app.sync.repo_job = Some(crate::app::RepoJob {
@@ -449,35 +454,31 @@ fn a_first_read_veils_the_card_instead_of_pushing_a_row() {
         rx,
     });
 
-    let shapes = frame(&mut app, &ctx, Vec::new());
-    let words: Vec<String> = shapes
-        .iter()
-        .filter_map(|s| match &s.shape {
-            egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
-            _ => None,
-        })
-        .collect();
+    let words = texts(&frame(&mut app, &ctx, Vec::new()));
+    assert!(
+        words.contains(&"kept".to_owned()),
+        "the copy on disk is on screen while the repo answers: {words:?}"
+    );
     assert!(
         !words
             .iter()
-            .any(|w| w.starts_with("reading the repo") || w.starts_with("this repo has no boxes")),
-        "the wait is not a row, and an unread repo is not called empty: {words:?}"
+            .any(|w| w.starts_with("this repo has no boxes")),
+        "an unread repo is not called empty: {words:?}"
+    );
+    assert!(
+        !words.contains(&"reading the repo…".to_owned()),
+        "with copies on screen the wait covers nothing: {words:?}"
     );
 
-    let veil = shapes
-        .iter()
-        .find_map(|s| match &s.shape {
-            egui::Shape::Rect(r) if r.fill == theme::palette().panel.gamma_multiply(VEIL) => {
-                Some(r.rect)
-            }
-            _ => None,
-        })
-        .expect("the card wears the veil");
-    let spinner = shapes.iter().any(|s| match &s.shape {
-        egui::Shape::Path(p) => p.points.iter().all(|pt| veil.contains(*pt)),
-        _ => false,
-    });
-    assert!(spinner, "the spinner rides the veil over {veil:?}");
+    // With nothing on disk the wait is said, instead of a card that looks settled.
+    fs::remove_file(&copy).unwrap();
+    let words = texts(&frame(&mut app, &ctx, Vec::new()));
+    assert!(
+        words.contains(&"reading the repo…".to_owned()),
+        "the wait says what it waits for: {words:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -564,6 +565,50 @@ fn a_working_copy_sits_in_the_recents_beside_a_local_file() {
         listed,
         ["work", "plain"],
         "the file's own name, not the box's"
+    );
+}
+
+#[test]
+fn a_copy_carries_the_github_mark_before_its_source_is_known() {
+    let ctx = egui::Context::default();
+    theme::apply(&ctx);
+    let mut app = App::blank(&ctx);
+    let source = Source {
+        kind: GITHUB.to_owned(),
+        target: "octocat/recents-ui-test".to_owned(),
+    };
+    let inside = store::source_dir(&source.kind, &source.target).join("work.pandora");
+    let outside = PathBuf::from("/tmp/plain.pandora");
+    app.auth.recents = vec![
+        crate::features::auth::model::Recent {
+            path: inside.clone(),
+        },
+        crate::features::auth::model::Recent { path: outside },
+    ];
+
+    // The folder says the copy is a repo's even with no source in the prefs.
+    let listed = rows(&app);
+    assert_eq!(listed[0].2, Some(theme::Brand::Github));
+    assert_eq!(listed[1].2, None, "a local file carries no repo's mark");
+    assert_eq!(
+        listed[0].3,
+        short_path(&inside),
+        "an unknown repo is named by its folder"
+    );
+
+    app.screen = Screen::Sources;
+    app.auth.side = Some(Side::Machine);
+    let words = texts(&frame(&mut app, &ctx, Vec::new()));
+    assert!(
+        !words.contains(&"work".to_owned()),
+        "a copy belongs to the GitHub view: {words:?}"
+    );
+
+    app.prefs.sources.push(source);
+    assert_eq!(
+        rows(&app)[0].3,
+        "octocat/recents-ui-test",
+        "a known repo names its rows"
     );
 }
 
@@ -1235,6 +1280,39 @@ fn the_folder_section_names_the_file_and_offers_both_moves() {
         assert!(
             drawn.iter().any(|word| word == want),
             "{want:?} is missing: {drawn:?}"
+        );
+    }
+}
+
+#[test]
+fn the_asking_field_keeps_its_right_padding_at_any_width() {
+    for (w, h) in [(360.0, 640.0), (393.0, 851.0), (900.0, 700.0)] {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = login_app(&ctx);
+        app.auth.login.as_mut().expect("a sign-in is on").code = None;
+        let shapes = shot::frame(&ctx, egui::vec2(w, h), Vec::new(), |ui| run(ui, &mut app));
+
+        let line = rect_of(&shapes, "asking GitHub for a code…");
+        // The surface the wait sits on, not the card around it: the smallest one.
+        let field = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Rect(r)
+                    if r.fill == theme::palette().elev
+                        && (r.rect.center().y - line.center().y).abs() < 2.0
+                        && r.rect.width() > line.width() =>
+                {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .unwrap_or_else(|| panic!("the wait has a field around it at {w}x{h}"));
+
+        assert!(
+            field.right() - line.right() >= 40.0,
+            "the dots keep clear of the field's edge at {w}x{h}: {line:?} in {field:?}"
         );
     }
 }

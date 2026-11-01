@@ -114,6 +114,22 @@ fn a_source_dir_is_derived_and_stays_inside() {
 }
 
 #[test]
+fn only_a_path_inside_sources_is_a_working_copy() {
+    let digest = source_digest("github", "octocat/boxes");
+    assert!(working_copy(
+        &sources_dir().join(&digest).join("work.pandora")
+    ));
+    assert!(
+        !working_copy(&data_dir().join("vault.pandora")),
+        "a box the user keeps is not a copy"
+    );
+    assert!(
+        !working_copy(&data_dir().join("sources-old").join("work.pandora")),
+        "a folder that only starts with the name is not sources"
+    );
+}
+
+#[test]
 fn a_legacy_source_dir_is_moved_to_its_digest() {
     let target = "octocat/moved-for-the-test";
     let legacy = legacy_source_dir("github", target);

@@ -3,7 +3,7 @@
 
 use crate::app::{App, Job, Login, Reply, RepoJob, RepoReply, Screen, SignIn, StatusKind};
 use crate::features::settings::model::{self as prefs, Remote, Source, GITHUB};
-use crate::features::sync::github::{self as sync, Fingerprint};
+use crate::features::sync::github::{self as sync, Fingerprint, Repo};
 use crate::features::sync::remember;
 use crate::shared::i18n::tf;
 use crate::shared::ui::size;
@@ -17,6 +17,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
+/// Wait after a renewal that never reached GitHub: a connection that is down says
+/// nothing about the session, and without a wait a frame loop becomes a request storm.
+const RENEW_RETRY: Duration = Duration::from_secs(60);
+
 /// `owner/name` — the only shape the Contents API takes.
 fn repo_ok(repo: &str) -> bool {
     let mut parts = repo.split('/');
@@ -28,6 +32,59 @@ fn repo_ok(repo: &str) -> bool {
 
 pub(crate) fn source_key(source: &Source) -> String {
     format!("{}:{}", source.kind, source.target)
+}
+
+/// The folder name of every working copy on disk.
+fn folders() -> Vec<String> {
+    let Ok(entries) = fs::read_dir(store::sources_dir()) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .collect()
+}
+
+/// Whether a folder could be a digest at all. An older layout's `sources/<kind>/…`
+/// is not one, and no repo list can name what its folder never hashed.
+fn hashed(name: &str) -> bool {
+    name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Whether a copy is waiting for the repo that names it: its folder is a digest,
+/// so only the account's own repos can say which repo it was.
+fn stray(folders: &[String], prefs: &prefs::Prefs) -> bool {
+    let known: Vec<String> = prefs
+        .sources
+        .iter()
+        .chain(prefs.stopped.iter())
+        .map(|s| store::source_digest(&s.kind, &s.target))
+        .collect();
+    folders
+        .iter()
+        .any(|name| hashed(name) && !known.contains(name))
+}
+
+/// The sources a folder outlived: a copy stays on disk when its source is lost, so
+/// an answered repo whose digest is already a folder is offered back. A repo the
+/// user stopped following keeps its copy and is not offered again.
+fn orphans(prefs: &prefs::Prefs, repos: &[Repo]) -> Vec<Source> {
+    let folders = folders();
+    repos
+        .iter()
+        .filter(|repo| repo.private)
+        .map(|repo| Source {
+            kind: GITHUB.to_owned(),
+            target: repo.full_name.clone(),
+        })
+        .filter(|source| {
+            repo_ok(&source.target)
+                && !prefs.sources.contains(source)
+                && !prefs.stopped.contains(source)
+                && folders.contains(&store::source_digest(&source.kind, &source.target))
+        })
+        .collect()
 }
 
 /// Zero when due now, `STALE` for one just read; never read is due immediately.
@@ -213,8 +270,9 @@ impl App {
     /// Start the device flow: GitHub mints the code, the frame that draws it opens the
     /// page with the code inside, and nothing is listened on.
     pub fn github_login(&mut self) {
-        // A session already in hand would make a second device flow ask again.
-        if self.auth.login.is_some() || self.sync.signed() {
+        // A session already in hand, or one on its way from a stored refresh
+        // token, must not start a second device flow.
+        if self.auth.login.is_some() || self.sync.signed() || self.sync.renew.is_some() {
             return;
         }
         let (tx, rx) = mpsc::channel();
@@ -245,6 +303,10 @@ impl App {
     /// Forget the session; whatever the credential store held goes with it.
     pub fn github_logout(&mut self) {
         self.sync.token = Zeroizing::new(String::new());
+        self.sync.renew = None;
+        self.sync.expires_at = None;
+        self.sync.renewing = None;
+        self.sync.renew_at = None;
         self.sync.recall_at = None;
         self.sync.recalls = 0;
         match remember::forget() {
@@ -255,19 +317,94 @@ impl App {
         }
     }
 
-    /// The session that just landed is the token every request carries.
+    /// The session that just landed is the token every request carries, and the
+    /// renewal that keeps it alive past its deadline.
     fn adopt(&mut self, session: sync::Session) {
         self.sync.token = session.access;
+        self.sync.renew = session.refresh;
+        self.sync.expires_at = session.expires_at;
+        self.sync.renewing = None;
+        self.sync.renew_at = None;
         self.sync.recall_at = None;
         self.sync.recalls = 0;
     }
 
-    /// GitHub refused the token itself, whatever the request was: it is wiped
-    /// before anything carries it again, and the user signs in again — nothing
-    /// this build holds could mint another one.
+    /// GitHub refused the token itself, whatever the request was. With a refresh
+    /// token in hand that is not the session gone: it is renewed, and the next
+    /// request carries the new one. Without it there is nothing to mint another,
+    /// so the dead token is dropped and the user signs in again.
     fn expire(&mut self, why: String) {
+        if self.sync.renew.is_some() {
+            self.sync.expires_at = Some(Instant::now());
+            self.sync.renew_at = None;
+            self.shell.set_status(
+                crate::shared::i18n::t("the session ran out — renewing it"),
+                StatusKind::Info,
+            );
+            return;
+        }
         self.github_logout();
         self.shell.fail(why);
+    }
+
+    /// Trade the refresh token in before the access token runs out, so no request
+    /// ever carries a dead one. One at a time, and a failed attempt waits instead
+    /// of spending the frame loop on a GitHub that cannot be reached.
+    fn renew(&mut self, ctx: &egui::Context) {
+        if self.auth.login.is_some() {
+            return;
+        }
+        if let Some(rx) = self.sync.renewing.take() {
+            match rx.try_recv() {
+                Ok(Ok(session)) => {
+                    self.adopt(session);
+                    log::info!("pandora: the GitHub session was renewed");
+                    if self.prefs.remember {
+                        if let Err(e) = remember::save(&self.sync.credential()) {
+                            self.shell.fail(e);
+                        }
+                    }
+                }
+                Ok(Err(e)) if sync::expired(&e) => {
+                    self.github_logout();
+                    self.shell.fail(e);
+                    return;
+                }
+                Ok(Err(e)) => {
+                    log::warn!("pandora: the session could not be renewed yet: {e}");
+                    self.sync.renew_at = Some(Instant::now() + RENEW_RETRY);
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.sync.renewing = Some(rx);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.sync.renew_at = Some(Instant::now() + RENEW_RETRY);
+                }
+            }
+        }
+        let Some(refresh) = self.sync.renew.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        if let Some(at) = self.sync.renew_at.filter(|at| *at > now) {
+            ctx.request_repaint_after(at - now);
+            return;
+        }
+        let left = self.sync.left();
+        // A restored pair has no deadline: renewing it once is cheaper than
+        // finding out with a 401 which half died while the app was closed.
+        if let Some(left) = left {
+            if left > sync::RENEW_WINDOW {
+                ctx.request_repaint_after(left - sync::RENEW_WINDOW);
+                return;
+            }
+        }
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(sync::refresh(&refresh));
+        });
+        self.sync.renewing = Some(rx);
     }
 
     /// The token a request goes out with.
@@ -278,7 +415,7 @@ impl App {
     /// Match the "keep me signed in" choice: hand the session to the store or take it out.
     pub fn keep(&mut self) {
         let result = if self.prefs.remember {
-            remember::save(&self.sync.token)
+            remember::save(&self.sync.credential())
         } else {
             remember::forget()
         };
@@ -295,7 +432,7 @@ impl App {
         }
     }
 
-    pub fn repo_repos(&mut self) {
+    pub fn repo_repos(&mut self, announce: bool) {
         if self.sync.repo_job.is_some() {
             return;
         }
@@ -312,11 +449,13 @@ impl App {
         });
         self.sync.repo_job = Some(RepoJob {
             source: None,
-            announce: true,
+            announce,
             rx,
         });
-        self.shell
-            .set_status("asking GitHub for your repos…", StatusKind::Info);
+        if announce {
+            self.shell
+                .set_status("asking GitHub for your repos…", StatusKind::Info);
+        }
     }
 
     /// Add a repo as a source, alongside the local boxes and the other repos.
@@ -342,13 +481,19 @@ impl App {
             return;
         }
         self.prefs.sources.push(source.clone());
+        self.prefs.stopped.retain(|s| s != &source);
         prefs::save(&self.prefs);
         self.source_refresh(&source, true);
     }
 
-    /// Forget a source; its working copies stay on disk and in the local list.
+    /// Stop following a source; its working copies stay on disk, out of the local
+    /// list and reachable only through the GitHub view. The source is remembered as
+    /// stopped, so a repo that answers again is not readopted behind the user's back.
     pub fn source_remove(&mut self, source: &Source) {
         self.prefs.sources.retain(|s| s != source);
+        if !self.prefs.stopped.contains(source) {
+            self.prefs.stopped.push(source.clone());
+        }
         self.sync.listing.remove(&source_key(source));
         self.sync.failed.remove(&source_key(source));
         self.sync.read_at.remove(&source_key(source));
@@ -429,13 +574,28 @@ impl App {
             .map(Vec::as_slice)
     }
 
-    /// The source whose folder holds `path`, if any.
+    /// The source `path` belongs to. The identity comes from the prefs — a folder is
+    /// a digest and says nothing — so a copy whose source was lost has none until its
+    /// repo answers again and the folder is readopted.
     pub fn source_of(&self, path: &Path) -> Option<Source> {
         self.prefs
             .sources
             .iter()
             .find(|s| path.starts_with(store::source_dir(&s.kind, &s.target)))
             .cloned()
+    }
+
+    /// Ask GitHub for the repo list when a copy on disk waits for the repo that
+    /// names it: the folder is a digest, so nothing else can say which repo it was.
+    /// Once per run — the disk is read once, and never again whatever it held.
+    fn repair(&mut self) {
+        if self.sync.repaired || !self.sync.signed() {
+            return;
+        }
+        self.sync.repaired = true;
+        if self.sync.repo_job.is_none() && stray(&folders(), &self.prefs) {
+            self.repo_repos(false);
+        }
     }
 
     /// Bring a source's box to disk and ask for its password; the sha comes with it,
@@ -612,7 +772,6 @@ impl App {
         let path = s.path.clone();
         let unsaved = s.dirty;
         // One fixed subject: a commit message is plaintext in the repo.
-        let sent = Fingerprint::of(&s.vault);
         let message = Fingerprint::SUBJECT.to_owned();
 
         if unsaved {
@@ -623,6 +782,11 @@ impl App {
                 return;
             }
         }
+        // After the write, because a save bumps the generation the fingerprint covers:
+        // this is what the landing compares the box against to know it did not move.
+        let Some(sent) = self.boxes.session.as_ref().map(|s| Fingerprint::of(&s.vault)) else {
+            return;
+        };
         // Size before read: a box past GitHub's ceiling is refused without loading it.
         let size = match fs::metadata(&path) {
             Ok(meta) => meta.len(),
@@ -706,6 +870,10 @@ impl App {
         if let Some(at) = self.sync.recall_at.filter(|at| *at > now) {
             ctx.request_repaint_after(Duration::from_secs(at - now));
         }
+        self.renew(ctx);
+        // A copy whose source was lost is named by the repos the account holds, so
+        // the list is asked for on its own: once a run, not once a frame.
+        self.repair();
 
         let mut signed: Option<SignIn> = None;
         if let Some(login) = self.auth.login.as_mut() {
@@ -731,7 +899,7 @@ impl App {
                 self.auth.login = None;
                 self.adopt(session);
                 if self.prefs.remember {
-                    match remember::save(&self.sync.token) {
+                    match remember::save(&self.sync.credential()) {
                         Ok(()) => self.shell.set_status(
                             "signed in — kept in the system keyring",
                             StatusKind::Saved,
@@ -841,6 +1009,12 @@ impl App {
                 Ok(RepoReply::Repos(mut list, avatars)) => {
                     // Stable order, private repos first: the only ones a box can take.
                     list.sort_by_key(|r| !r.private);
+                    // A copy left behind by a lost source comes back with its repo.
+                    let adopted = orphans(&self.prefs, &list);
+                    if !adopted.is_empty() {
+                        self.prefs.sources.extend(adopted);
+                        prefs::save(&self.prefs);
+                    }
                     self.sync.repos = list;
                     self.sync.avatars = avatars;
                     self.sync.avatar_textures.clear();
@@ -930,7 +1104,6 @@ impl App {
             .remote
             .as_ref()
             .is_some_and(|remote| remote.kind == GITHUB)
-            || s.behind
             || s.conflict
         {
             return None;
@@ -1078,7 +1251,9 @@ impl App {
                 // push that was due still is.
                 if !refused {
                     s.baseline = Some(Fingerprint::of(&s.vault));
-                    if !send {
+                    // A copy that did not land left this box holding an edit the repo
+                    // does not have, so that edit keeps the push it already asked for.
+                    if !send && !s.dirty {
                         s.push_at = None;
                     }
                 }
@@ -1101,9 +1276,13 @@ impl App {
             if let Some(r) = &mut s.remote {
                 r.sha = sha;
             }
-            // This box just handed the repo its version; nothing is waiting to go out.
+            // An edit made while the request was out did not leave, so its push stays
+            // due instead of being wiped by the landing of the version before it.
+            let same = Fingerprint::of(&s.vault) == sent;
             s.baseline = Some(sent);
-            s.push_at = None;
+            if same {
+                s.push_at = None;
+            }
             s.behind = false;
             mirror = Some(s.remote.clone());
         }
@@ -1250,6 +1429,36 @@ mod tests {
         assert!(app.auth.login.is_none(), "no device flow while signed in");
     }
 
+    /// A stored refresh token is already a session on its way: a second device
+    /// flow would mint one over it.
+    #[test]
+    fn github_login_waits_for_a_stored_renewal() {
+        let ctx = egui::Context::default();
+        let mut app = crate::app::App::blank(&ctx);
+        app.sync.restore("ghr_kept".to_owned());
+        app.github_login();
+        assert!(
+            app.auth.login.is_none(),
+            "the renewal is what brings the token back"
+        );
+    }
+
+    /// A 401 is not the session gone while a refresh token can mint another: the
+    /// token is kept and the next frame renews it, instead of asking to sign in.
+    #[test]
+    fn an_expired_token_with_a_renewal_keeps_the_session() {
+        let ctx = egui::Context::default();
+        let mut app = App::blank(&ctx);
+        app.sync.restore("gho_a\nghr_b".to_owned());
+        app.expire(sync::EXPIRED.to_owned());
+        assert!(app.sync.signed(), "the renewal is still in hand");
+        assert!(
+            app.sync.left().is_some_and(|left| left.is_zero()),
+            "the renewal is due now, not at the old deadline"
+        );
+        assert!(app.sync.renew.is_some());
+    }
+
     #[test]
     fn a_repo_is_owner_slash_name_and_nothing_else() {
         assert!(repo_ok("octocat/boxes"));
@@ -1257,6 +1466,107 @@ mod tests {
         for bad in ["", "boxes", "/boxes", "octocat/", "a/b/c", "/"] {
             assert!(!repo_ok(bad), "{bad:?} is not a repo");
         }
+    }
+
+    /// The disk is looked at once per run: a copy still waiting does not make the
+    /// next frame ask again.
+    #[test]
+    fn the_disk_is_read_once_a_run() {
+        let ctx = egui::Context::default();
+        let mut app = crate::app::App::blank(&ctx);
+        app.sync.restore("gho_kept".to_owned());
+        app.sync.repaired = true;
+
+        let source = Source {
+            kind: GITHUB.to_owned(),
+            target: "octocat/latched".to_owned(),
+        };
+        let dir = store::source_dir(&source.kind, &source.target);
+        fs::create_dir_all(&dir).unwrap();
+
+        app.repair();
+        assert!(
+            app.sync.repo_job.is_none(),
+            "a run that has already looked asks nothing"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn repo(full_name: &str, private: bool) -> Repo {
+        Repo {
+            full_name: full_name.to_owned(),
+            owner: full_name.split('/').next().unwrap().to_owned(),
+            private,
+        }
+    }
+
+    /// A copy outlives the source that made it: when the repo answers again, the
+    /// folder it left behind is what brings it back.
+    #[test]
+    fn a_copy_whose_source_was_lost_is_readopted() {
+        let source = Source {
+            kind: GITHUB.to_owned(),
+            target: "octocat/readopted".to_owned(),
+        };
+        let dir = store::source_dir(&source.kind, &source.target);
+        fs::create_dir_all(&dir).unwrap();
+
+        let listed = [
+            repo("octocat/readopted", true),
+            repo("octocat/public", false),
+            repo("octocat/absent", true),
+        ];
+        assert_eq!(
+            orphans(&prefs::Prefs::default(), &listed),
+            vec![source.clone()],
+            "only a private repo with a folder is readopted"
+        );
+
+        let mut held = prefs::Prefs::default();
+        held.sources.push(source.clone());
+        assert!(
+            orphans(&held, &listed).is_empty(),
+            "a source still followed is not adopted twice"
+        );
+
+        let mut stopped = prefs::Prefs::default();
+        stopped.stopped.push(source);
+        assert!(
+            orphans(&stopped, &listed).is_empty(),
+            "the repo the user walked away from stays away"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A folder nobody follows asks for the repo list; one the user walked away
+    /// from, and one an older layout left, do not.
+    #[test]
+    fn a_folder_nobody_follows_asks_for_the_repos() {
+        let source = Source {
+            kind: GITHUB.to_owned(),
+            target: "octocat/stray".to_owned(),
+        };
+        let digest = store::source_digest(&source.kind, &source.target);
+        let plain = prefs::Prefs::default();
+
+        assert!(stray(std::slice::from_ref(&digest), &plain));
+        assert!(
+            !stray(&["github".to_owned()], &plain),
+            "an older layout's folder is not a digest"
+        );
+
+        let mut followed = prefs::Prefs::default();
+        followed.sources.push(source.clone());
+        assert!(!stray(std::slice::from_ref(&digest), &followed));
+
+        let mut stopped = prefs::Prefs::default();
+        stopped.stopped.push(source);
+        assert!(
+            !stray(&[digest], &stopped),
+            "the repo the user walked away from stays quiet"
+        );
     }
 
     /// A pull folds the repo's copy into this one: the edit made here and the edit
@@ -1329,6 +1639,102 @@ mod tests {
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&theirs_path);
+    }
+
+    /// A push carries what left. An edit made while the request was out did not
+    /// leave, so it keeps its own push instead of being wiped by the landing.
+    #[test]
+    fn an_edit_made_while_a_push_is_out_keeps_its_own_push() {
+        let (mut app, path, _) = diverged(|_| {}, |_| {});
+        let sent = app
+            .boxes
+            .session
+            .as_ref()
+            .map(|s| Fingerprint::of(&s.vault))
+            .unwrap();
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            s.vault.logins.push(crate::vault::model::Login::new(1));
+            s.mark_dirty();
+        }
+
+        app.land_push(&path, "sha-9".to_owned(), sent);
+
+        let s = app.boxes.session.as_ref().unwrap();
+        assert!(
+            s.push_at.is_some(),
+            "the edit that did not leave is still owed"
+        );
+        assert_eq!(
+            s.remote.as_ref().unwrap().sha,
+            "sha-9",
+            "and the next push names what landed"
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// A landing nobody overtook is the version the repo holds: the wait is over.
+    #[test]
+    fn a_push_that_lands_unchanged_clears_the_wait() {
+        let (mut app, path, _) = diverged(|_| {}, |_| {});
+        let sent = app
+            .boxes
+            .session
+            .as_ref()
+            .map(|s| Fingerprint::of(&s.vault))
+            .unwrap();
+        app.boxes.find(&path).unwrap().push_at = Some(std::time::Instant::now());
+
+        app.land_push(&path, "sha-1".to_owned(), sent);
+
+        assert!(
+            app.boxes.find(&path).unwrap().push_at.is_none(),
+            "nothing is waiting to go out"
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// A pull that leaves an edit alone changed nothing on disk, so the edit keeps
+    /// the push it was already waiting for.
+    #[test]
+    fn a_pull_that_leaves_an_edit_alone_keeps_its_push() {
+        let (mut app, path, bytes) = diverged(|_| {}, |_| {});
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            s.vault.logins[0].name = "Mine".to_owned();
+            s.mark_dirty();
+        }
+
+        app.land_pull(&path, bytes, "sha-2".to_owned());
+
+        let s = app.boxes.session.as_ref().unwrap();
+        assert!(s.dirty, "the edit stayed");
+        assert!(s.push_at.is_some(), "and the repo still owes it a push");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// The repo being ahead is not a reason to park the queue: a push under a stale
+    /// sha is refused as a conflict and pulled again, so it heals by itself.
+    #[test]
+    fn the_repo_being_ahead_does_not_stop_the_next_push() {
+        let (mut app, path, _) = diverged(|_| {}, |_| {});
+        app.sync.restore("gho_x".to_owned());
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            s.behind = true;
+            s.push_at = Some(std::time::Instant::now());
+        }
+
+        assert!(
+            app.push_wait(std::time::Instant::now())
+                .is_some_and(|wait| wait.is_zero()),
+            "a conflict is retried, not parked"
+        );
+
+        let _ = fs::remove_file(&path);
     }
 
     /// This box, opened and saved, with a remote copy made by saving a changed clone

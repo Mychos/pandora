@@ -57,7 +57,7 @@ pub fn run(ui: &mut egui::Ui, app: &mut App) {
                 auth::wordmark(ui, &app.icons);
                 picker(ui, app);
                 ui.add_space(2.0);
-                let card = theme::card(ui, "", |ui| {
+                theme::card(ui, "", |ui| {
                     // The recents carry one fixed band; the other two fill what they are given.
                     if side(app) == Side::Machine {
                         machine(ui, app);
@@ -88,10 +88,6 @@ pub fn run(ui: &mut egui::Ui, app: &mut App) {
                         |ui| recent(ui, app),
                     );
                 });
-                // After the card: the wait must not write a row into the list.
-                if side(app) == Side::Github && reading(app) {
-                    veil(ui, card.response.rect);
-                }
             });
         });
     modal(ui.ctx(), app);
@@ -184,26 +180,7 @@ fn side(app: &App) -> Side {
     app.auth.side.unwrap_or(Side::Recents)
 }
 
-/// Whether the GitHub view is still reading repos nobody read once: only that first
-/// pass is veiled, never a re-read or a repo that answered with a failure.
-fn reading(app: &App) -> bool {
-    app.sync
-        .repo_job
-        .as_ref()
-        .is_some_and(|job| job.source.is_some())
-        && app.prefs.sources.iter().any(|s| {
-            app.boxes_of(s).is_none()
-                && !app
-                    .sync
-                    .failed
-                    .contains_key(&crate::features::sync::logic::source_key(s))
-        })
-}
-
-/// The wait's scrim: dims without hiding what is under it.
-const VEIL: f32 = 0.86;
-
-/// Lighter than the card's: a dialog still has to read as itself under the wait.
+/// The dialog's scrim: dims without hiding what is under it.
 const SCRIM: f32 = 0.55;
 
 const SPIN: f32 = 22.0;
@@ -224,13 +201,6 @@ fn spinner(ui: &egui::Ui, rect: egui::Rect) {
         .size(SPIN)
         .color(theme::ACCENT)
         .paint_at(ui, at);
-}
-
-/// The card while its repos are read: a spinner over a scrim, with nothing reserved,
-/// so the list never shifts and the working copies under it still open.
-fn veil(ui: &mut egui::Ui, rect: egui::Rect) {
-    scrim(ui, rect, VEIL);
-    spinner(ui, rect);
 }
 
 /// The ways into a local file, stacked in a narrow window.
@@ -262,12 +232,12 @@ fn file_actions(ui: &mut egui::Ui, app: &mut App) {
 fn machine(ui: &mut egui::Ui, app: &mut App) {
     file_actions(ui, app);
     ui.add_space(8.0);
-    let boxes: Vec<(PathBuf, String, bool)> = app
+    let boxes: Vec<(PathBuf, String, Option<theme::Brand>, String)> = app
         .auth
         .recents
         .iter()
-        .filter(|r| app.source_of(&r.path).is_none())
-        .map(|r| (r.path.clone(), r.label(), false))
+        .filter(|r| !store::working_copy(&r.path))
+        .map(|r| (r.path.clone(), r.label(), None, short_path(&r.path)))
         .collect();
     let current = app.auth.unlock_path.clone();
     let band = recents_rows(ui).min((ui.available_height() - BOTTOM).max(0.0));
@@ -623,6 +593,10 @@ fn repo_boxes(ui: &mut egui::Ui, app: &mut App, source: &Source) {
             // this session cannot reach is not a repo without boxes.
             if let Some(why) = why.as_deref() {
                 failure(ui, why);
+            } else if files.is_empty() && !live && signed {
+                // A repo nobody read yet is not an empty one, and the read says so
+                // instead of covering the copies already on disk.
+                theme::hint(ui, "reading the repo…");
             } else if files.is_empty() && live {
                 theme::hint(ui, "this repo has no boxes yet — create one below");
             } else if files.is_empty() && !signed {
@@ -703,7 +677,12 @@ fn field(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     let row = ui.allocate_ui_with_layout(
         egui::vec2(ui.available_width(), side + 2.0 * AIR),
         egui::Layout::left_to_right(egui::Align::Center),
-        add,
+        |ui| {
+            // The field is as wide as the row, not as wide as what it holds: a
+            // short value or a wait must not shrink the surface around it.
+            ui.set_min_width(ui.available_width());
+            add(ui);
+        },
     );
     surface.paint(
         ui,
@@ -800,22 +779,34 @@ fn login(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-/// Every box opened before; the mark says where it lives: a repo's brand or a local lock.
-fn recent(ui: &mut egui::Ui, app: &mut App) {
-    let boxes: Vec<(PathBuf, String, bool)> = app
-        .auth
+/// Every recent box as a row; the mark says where it lives: a repo's brand or a local lock.
+/// A copy in a repo is named by the repo it came from; anything else by where it sits,
+/// since its folder is a digest and says nothing.
+fn rows(app: &App) -> Vec<(PathBuf, String, Option<theme::Brand>, String)> {
+    app.auth
         .recents
         .iter()
         .map(|r| {
+            let remote = store::working_copy(&r.path);
+            let sub = app
+                .source_of(&r.path)
+                .map(|s| s.target)
+                .unwrap_or_else(|| short_path(&r.path));
             (
                 r.path.clone(),
                 // The row is called after the file it points at: the box's own
                 // name is inside the box, and this list is not.
                 r.label(),
-                app.source_of(&r.path).is_some(),
+                remote.then_some(theme::Brand::Github),
+                sub,
             )
         })
-        .collect();
+        .collect()
+}
+
+/// Every box opened before.
+fn recent(ui: &mut egui::Ui, app: &mut App) {
+    let boxes = rows(app);
 
     let q = app.auth.recent_search.trim().to_lowercase();
     let current = app.auth.unlock_path.clone();
@@ -929,7 +920,7 @@ fn roster(
     ui: &mut egui::Ui,
     app: &App,
     id: &'static str,
-    boxes: &[(PathBuf, String, bool)],
+    boxes: &[(PathBuf, String, Option<theme::Brand>, String)],
     q: &str,
     current: &str,
 ) -> (Option<PathBuf>, usize) {
@@ -938,8 +929,7 @@ fn roster(
     let mut shown = 0usize;
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = GAP;
-        for (path, name, remote) in boxes {
-            let sub = short_path(path);
+        for (path, name, mark, sub) in boxes {
             if !q.is_empty() && !name.to_lowercase().contains(q) && !sub.to_lowercase().contains(q)
             {
                 continue;
@@ -951,8 +941,8 @@ fn roster(
                 icons,
                 (id, path),
                 name,
-                Some(&sub),
-                remote.then_some(theme::Brand::Github),
+                Some(sub),
+                *mark,
                 if current == key {
                     RowState::Selected
                 } else {
@@ -1105,7 +1095,7 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
         theme::height(ui, room.height());
         let closed = theme::head(ui, &app.icons, "GitHub");
         if !app.sync.repo_loaded && app.sync.repo_job.is_none() {
-            app.repo_repos();
+            app.repo_repos(true);
         }
         pick(ui, app, list);
         // The wait rides the whole dialog, and it is the scrim the GitHub half
@@ -1210,7 +1200,7 @@ fn pick(ui: &mut egui::Ui, app: &mut App, height: f32) {
         app.sync.repos.clear();
         app.sync.avatars.clear();
         app.sync.avatar_textures.clear();
-        app.repo_repos();
+        app.repo_repos(true);
     }
     if let Some(repo) = chosen {
         app.source_add(repo);
