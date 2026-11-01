@@ -184,12 +184,6 @@ pub fn seal(bundle: &Bundle, from: &str, mode: &SealTo<'_>, now: u64) -> Result<
             let mine = PublicKey::from(&secret);
             let shared = secret.diffie_hellman(&PublicKey::from(*public));
             let key = exchange(shared.as_bytes(), mine.as_bytes(), public.as_slice());
-            eprintln!(
-                "SEAL shared={:02x?} mine={:02x?} pub={:02x?}",
-                shared.as_bytes(),
-                mine.as_bytes(),
-                public
-            );
             let header = Header {
                 mode: "key".to_owned(),
                 nonce: String::new(),
@@ -255,12 +249,6 @@ pub fn open(
             seed.copy_from_slice(&identity.private);
             let secret = StaticSecret::from(seed);
             let shared = secret.diffie_hellman(&PublicKey::from(to_array(&ephemeral)?));
-            eprintln!(
-                "OPEN shared={:02x?} eph={:02x?} pub={:02x?}",
-                shared.as_bytes(),
-                ephemeral,
-                identity.public
-            );
             exchange(shared.as_bytes(), &ephemeral, &identity.public)
         }
         Mode::Passphrase => {
@@ -422,5 +410,36 @@ mod tests {
         assert!(open(b"PANDORASHARE1\n{}\nbody", None, Some("x")).is_err());
         let bytes = seal(&bundle(), "Box", &SealTo::Passphrase("pw"), now_secs()).unwrap();
         assert!(open(&bytes[..bytes.len() - 1], None, Some("pw")).is_err());
+    }
+
+    /// `seal` and `open` say nothing on stderr: the shared secret, the plaintext and
+    /// the header have no business in a log. A test cannot read back its own stderr, so
+    /// the check runs in a child of this same test binary.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn a_share_says_nothing_on_stderr() {
+        if std::env::var_os("PANDORA_SHARE_QUIET").is_some() {
+            let alice = Keypair::make();
+            let to = public_array(&alice.public_text()).unwrap();
+            let sealed = seal(&bundle(), "Ana's box", &SealTo::Key(to), 42).unwrap();
+            assert_eq!(info(&sealed).unwrap().mode, Mode::Key);
+            open(&sealed, Some(&alice), None).unwrap();
+            let sealed = seal(&bundle(), "Ana's box", &SealTo::Passphrase("pw"), 1).unwrap();
+            open(&sealed, None, Some("pw")).unwrap();
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "vault::share::tests::a_share_says_nothing_on_stderr",
+                // Without this the child's own harness captures the stderr this looks at.
+                "--nocapture",
+            ])
+            .env("PANDORA_SHARE_QUIET", "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "the child run failed: {stderr}");
+        assert!(out.stderr.is_empty(), "a share wrote to stderr: {stderr}");
     }
 }

@@ -136,6 +136,9 @@ fn password(file: Option<&Path>) -> Result<Zeroizing<String>, String> {
     if let Some(program) = env::var_os("PANDORA_ASKPASS").or_else(|| env::var_os("SSH_ASKPASS")) {
         let out = Command::new(&program)
             .arg("Master password for Pandora")
+            // The one secret in this environment is not the child's to inherit: askpass
+            // is a script somebody else wrote.
+            .env_remove("PANDORA_PASSWORD")
             .output()
             .map_err(|e| format!("{:?}: {e}", Path::new(&program)))?;
         if !out.status.success() {

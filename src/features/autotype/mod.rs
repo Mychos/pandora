@@ -15,7 +15,8 @@ use crate::app::{App, StatusKind};
 use crate::shared::i18n::{t, tf};
 use crate::vault::model::{now_secs, Login, Vault};
 use crate::vault::totp;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -168,21 +169,48 @@ impl Backend {
                 std::thread::sleep(Duration::from_millis(u64::from(*ms)));
                 Ok(())
             }
-            (Backend::Wtype, Step::Text(text)) => self.run(&["-d", "10", text]),
+            (_, Step::Text(text)) => self.type_text(text),
             (Backend::Wtype, Step::Key(Key::Enter)) => self.run(&["-k", "Return"]),
             (Backend::Wtype, Step::Key(Key::Tab)) => self.run(&["-k", "Tab"]),
-            (Backend::Xdotool, Step::Text(text)) => {
-                self.run(&["type", "--clearmodifiers", "--", text])
-            }
             (Backend::Xdotool, Step::Key(Key::Enter)) => {
                 self.run(&["key", "--clearmodifiers", "Return"])
             }
             (Backend::Xdotool, Step::Key(Key::Tab)) => {
                 self.run(&["key", "--clearmodifiers", "Tab"])
             }
-            (Backend::Ydotool, Step::Text(text)) => self.run(&["type", "--", text]),
             (Backend::Ydotool, Step::Key(Key::Enter)) => self.run(&["key", "28:1", "28:0"]),
             (Backend::Ydotool, Step::Key(Key::Tab)) => self.run(&["key", "15:1", "15:0"]),
+        }
+    }
+
+    /// The text rides stdin and never `argv`: `/proc/<pid>/cmdline` is readable by
+    /// every process of the same user, and a password there is a password shown. Each
+    /// tool takes `-` as the text or the file to read it from.
+    fn typing(&self) -> &'static [&'static str] {
+        match self {
+            Backend::Wtype => &["-d", "10", "-"],
+            Backend::Xdotool => &["type", "--clearmodifiers", "--file", "-"],
+            Backend::Ydotool => &["type", "--file", "-"],
+        }
+    }
+
+    fn type_text(&self, text: &str) -> Result<(), String> {
+        let mut child = Command::new(self.program())
+            .args(self.typing())
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("{}: {e}", self.program()))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            // A failed write is the tool having quit, which its status says better.
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let status = child
+            .wait()
+            .map_err(|e| format!("{}: {e}", self.program()))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("{} refused ({status})", self.program()))
         }
     }
 
@@ -441,6 +469,18 @@ mod tests {
         assert!(window_matches("Terminal", "user@host: ~/terminal"));
         assert!(window_matches("terminal", "TERMINAL"));
         assert!(!window_matches("Firefox", "Terminal"));
+    }
+
+    /// No backend can put a typed value in `argv`: each takes it on stdin.
+    #[test]
+    fn a_password_never_rides_in_argv() {
+        for backend in [Backend::Wtype, Backend::Xdotool, Backend::Ydotool] {
+            assert_eq!(
+                backend.typing().last(),
+                Some(&"-"),
+                "{backend:?} reads the text from stdin"
+            );
+        }
     }
 
     /// No tool on `PATH` means no backend: the caller says so instead of typing into
