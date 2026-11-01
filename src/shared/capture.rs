@@ -30,7 +30,7 @@ fn windows(handle: Option<&RawWindowHandle>, allow: bool) {
     let Some(RawWindowHandle::Win32(win)) = handle else {
         return;
     };
-    let hwnd = win.hwnd.as_ptr() as HWND;
+    let hwnd = win.hwnd.get() as HWND;
     unsafe {
         if allow {
             SetWindowDisplayAffinity(hwnd, WDA_NONE);

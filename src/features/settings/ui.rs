@@ -62,6 +62,7 @@ pub fn run(ui: &mut egui::Ui, app: &mut App, compact: bool) {
                         ui.add_space(CARD);
                         browser(ui, app);
                         ui.add_space(CARD);
+                        #[cfg(unix)]
                         agent_card(ui, app);
                         ui.add_space(CARD);
                         #[cfg(target_os = "android")]
@@ -524,6 +525,7 @@ fn recovery_card(ui: &mut egui::Ui, app: &mut App) {
 /// The SSH agent: the switch, where its socket is, and the keys the user allows. A key
 /// is made here, never imported: a private key file from outside is its own parser and
 /// its own policy, and this box can make its own.
+#[cfg(unix)]
 fn agent_card(ui: &mut egui::Ui, app: &mut App) {
     card(ui, "SSH agent", |ui| {
         let mut on = app.prefs.ssh_agent;

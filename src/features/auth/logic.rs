@@ -111,6 +111,7 @@ impl App {
 
     /// The agent follows the box: started when the switch is on, handed the keys the
     /// user allowed, emptied when the box locks or closes.
+    #[cfg(unix)]
     fn pump_agent(&mut self) {
         let wanted = self
             .prefs
@@ -121,6 +122,7 @@ impl App {
     }
 
     pub fn pump(&mut self) {
+        #[cfg(unix)]
         self.pump_agent();
         let Some(op) = self.auth.op.take() else {
             return;

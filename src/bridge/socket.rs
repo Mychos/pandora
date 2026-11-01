@@ -117,6 +117,11 @@ mod windows {
         next: Mutex<Option<HANDLE>>,
     }
 
+    // The instance waiting in `next` is a kernel handle, an integer in a pointer's
+    // clothes: it moves and is shared between threads exactly as `Stream` does.
+    unsafe impl Send for Listener {}
+    unsafe impl Sync for Listener {}
+
     impl Listener {
         /// A second app finds the first one waiting and gets `None`, so only one answers.
         pub fn bind_at(path: &Path) -> io::Result<Option<Self>> {
