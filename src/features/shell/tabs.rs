@@ -3,10 +3,61 @@
 
 use crate::app::{App, Screen, Session};
 use crate::features::boxes::model::Boxes;
+use crate::vault::model::Vault;
 use std::path::Path;
 use zeroize::Zeroize;
 
 impl Boxes {
+    /// Every open box, the one on screen first: the browser lists them and names the
+    /// one it reads from. A parked tab keeps the box's name, so a listing costs no
+    /// decrypting.
+    pub fn open(&self) -> Vec<(&Path, &str)> {
+        self.session
+            .iter()
+            .chain(self.tabs.iter())
+            .map(|s| (s.path.as_path(), s.vault.name.as_str()))
+            .collect()
+    }
+
+    /// The box a browser request reads: the one it picked while that box is still
+    /// open, else the one on screen. A parked tab is loaded for the answer — it holds
+    /// the key already, so no password is asked — and the caller parks it again.
+    pub fn pick(&mut self, path: Option<&Path>) -> Result<Option<&mut Session>, String> {
+        let Some(path) = path else {
+            return Ok(self.session.as_mut());
+        };
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.path.as_path() == path)
+        {
+            return Ok(self.session.as_mut());
+        }
+        if let Some(at) = self.tabs.iter().position(|s| s.path.as_path() == path) {
+            self.tabs[at].load_parked()?;
+            return Ok(Some(&mut self.tabs[at]));
+        }
+        Ok(self.session.as_mut())
+    }
+
+    /// Every open box's vault, for a read that spans them: the one on screen, then
+    /// the strip. A parked tab stays parked once `f` is done with it — it is decrypted
+    /// for the look and put back, so a page can match what every box holds.
+    pub fn scan<R>(&mut self, mut f: impl FnMut(&Path, &Vault) -> R) -> Vec<R> {
+        let mut out = Vec::new();
+        for session in self.session.iter_mut().chain(self.tabs.iter_mut()) {
+            let parked = session.parked;
+            if parked && session.load_parked().is_err() {
+                continue;
+            }
+            out.push(f(session.path.as_path(), &session.vault));
+            if parked {
+                session.park();
+            }
+        }
+        out
+    }
+
     pub(crate) fn position(&self, path: &Path) -> Option<usize> {
         if self
             .session

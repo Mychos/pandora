@@ -9,8 +9,9 @@
 use super::logic;
 use crate::bridge::protocol::{self, Request, Response};
 use crate::bridge::socket::{Listener, Stream};
-use crate::features::boxes::model::Session;
+use crate::features::boxes::model::Boxes;
 use crate::features::settings::model::Prefs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -81,6 +82,9 @@ pub struct Bridge {
     rx: Receiver<Incoming>,
     inflight: Arc<AtomicUsize>,
     waiting: Vec<Waiting>,
+    /// The open box the browser reads from, by path. `None` reads the one on screen,
+    /// and a box closed under it falls back to that same one.
+    pub picked: Option<PathBuf>,
     /// Where the prompt's "remember" box starts.
     pub remember: bool,
 }
@@ -105,6 +109,7 @@ impl Default for Bridge {
             rx,
             inflight: Arc::new(AtomicUsize::new(0)),
             waiting: Vec::new(),
+            picked: None,
             remember: true,
         }
     }
@@ -139,7 +144,7 @@ impl Bridge {
     /// A frame of the bridge: take what the threads read, answer it, and give up on
     /// whoever took too long. Never blocks — that is the whole reason the reads are
     /// on threads.
-    pub fn pump(&mut self, mut session: Option<&mut Session>, prefs: &Prefs) -> Effect {
+    pub fn pump(&mut self, boxes: &mut Boxes, prefs: &Prefs) -> Effect {
         let mut effect = Effect::None;
         for incoming in self.rx.try_iter().collect::<Vec<_>>() {
             let Incoming {
@@ -177,7 +182,7 @@ impl Bridge {
                 continue;
             }
 
-            let response = logic::answer(request, session.as_deref_mut());
+            let response = logic::answer(request, boxes, &mut self.picked);
             if effect != Effect::Lock {
                 // A write is worth telling the app about; a read only refreshes the
                 // away timer. A frame that already wrote keeps saying so.
@@ -201,7 +206,7 @@ impl Bridge {
         &mut self,
         allow: bool,
         remember: bool,
-        session: Option<&mut Session>,
+        boxes: &mut Boxes,
         prefs: &mut Prefs,
     ) -> bool {
         if self.waiting.is_empty() {
@@ -228,7 +233,7 @@ impl Bridge {
         let response = if matches!(waiting.request, Request::Lock) {
             Response::Ok
         } else {
-            logic::answer(waiting.request, session)
+            logic::answer(waiting.request, boxes, &mut self.picked)
         };
         self.reply(waiting.stream, waiting.id, &response);
         remembered

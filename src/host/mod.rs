@@ -1,6 +1,7 @@
 //! The stdio host the browser launches. Every secret operation goes through `vault/`,
 //! so the extension never learns the format or the crypto; it draws nothing.
 
+mod launch;
 pub mod passkeys;
 mod session;
 
@@ -66,13 +67,15 @@ fn caller() -> String {
 
 /// Hand the message to the app. `None` means nothing is listening and the host
 /// answers on its own; an error response means the app was there and failed, which is
-/// not the host's to paper over. Two requests never leave here: listing boxes (the
-/// recents are ours) and unlocking (the window's job).
+/// not the host's to paper over. One request never leaves here: unlocking, which is the
+/// window's job. Listing boxes does leave, because the boxes the browser may read from
+/// are the ones the app has open — the recents below are only what is left when the app
+/// is not there to answer.
 fn relay(bytes: &[u8], envelope: &Envelope, caller: &str) -> Option<Response> {
     let Ok(request) = &envelope.request else {
         return None;
     };
-    if matches!(request, Request::ListBoxes | Request::Unlock { .. }) {
+    if matches!(request, Request::Unlock { .. } | Request::Launch) {
         return None;
     }
 
@@ -128,6 +131,10 @@ fn app_failed() -> Response {
 
 fn handle(current: &mut Option<Session>, request: Request, prefs: &Prefs) -> Response {
     match request {
+        // Starting the window is not opening a box, so this needs no permission: the
+        // password is still typed in the app, never here.
+        Request::Launch => launch::open(),
+
         // Listing and unlocking are the window's business unless the user allowed browser unlock.
         Request::ListBoxes | Request::Unlock { .. } if !prefs.unlock_from_browser => {
             Response::Error {
@@ -144,6 +151,8 @@ fn handle(current: &mut Option<Session>, request: Request, prefs: &Prefs) -> Res
                     name: recent.label(),
                 })
                 .collect(),
+            // The host opens one box at a time: there is nothing to pick between.
+            picked: None,
         },
 
         Request::Unlock { path, password } => {
@@ -187,6 +196,7 @@ fn handle(current: &mut Option<Session>, request: Request, prefs: &Prefs) -> Res
             id,
             username,
             password,
+            ..
         } => match current {
             Some(session) => {
                 let secret = password.map(Zeroizing::new);

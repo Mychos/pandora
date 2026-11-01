@@ -52,7 +52,7 @@ pub fn read(request: &Request, peer: Peer<'_>) -> Option<Response> {
             },
         }),
 
-        Request::Reveal { id } => Some(match peer {
+        Request::Reveal { id, .. } => Some(match peer {
             Peer::Locked { .. } => locked(),
             Peer::Open(vault) => match reveal(vault, id) {
                 Some((username, password)) => Response::Secret { username, password },
@@ -203,6 +203,9 @@ pub fn candidate(item: &Login, uri: Option<&str>) -> Candidate {
         name: item.name.clone(),
         username: item.username.clone(),
         uri: uri.map(str::to_owned),
+        // The host reads one box, so a row has no other to name.
+        box_path: None,
+        box_name: None,
     }
 }
 

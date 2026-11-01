@@ -83,11 +83,21 @@ pub fn parse(bytes: &[u8]) -> Envelope {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
+    /// The boxes the app has open, and which one the browser is reading from.
     ListBoxes,
+    /// Read from another open box: a page does not know which box holds what, so
+    /// the browser says which one it means before it asks.
+    Select {
+        path: String,
+    },
     Unlock {
         path: String,
         password: String,
     },
+    /// Start the app when it is not running, so the browser does not have to send the
+    /// user to another window and make them click twice. A box is still opened there:
+    /// `status` is what the extension waits on.
+    Launch,
     Lock,
     Status,
     Entries,
@@ -112,6 +122,10 @@ pub enum Request {
         username: Option<String>,
         #[serde(default)]
         password: Option<String>,
+        /// The box the row came from, when the entry was listed from several. Left
+        /// out, the request lands on the box the browser selected.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        box_path: Option<String>,
     },
     /// A password for a signup form: never stored, it rides back to the page.
     Generate {
@@ -120,6 +134,9 @@ pub enum Request {
     },
     Reveal {
         id: String,
+        /// The box the row came from; see [`Request::Update`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        box_path: Option<String>,
     },
     /// The passkeys a site may use; a listing never carries a key.
     PasskeyList {
@@ -166,6 +183,13 @@ pub struct Candidate {
     pub username: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
+    /// The box this entry was listed from, when the listing spanned several. The
+    /// panel hands it back with a reveal or an update, and draws `box_name` beside
+    /// the row so two boxes' entries are told apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_name: Option<String>,
 }
 
 /// A passkey as the extension may see it: no key and no seed, only what a page needs
@@ -198,6 +222,9 @@ pub struct CodeInfo {
 pub enum Response {
     Boxes {
         boxes: Vec<BoxInfo>,
+        /// The box the browser reads from, when it picked one that is still open.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        picked: Option<String>,
     },
     Unlocked {
         name: String,

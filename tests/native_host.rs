@@ -413,3 +413,80 @@ fn opening_a_box_from_the_browser_is_off_until_the_user_says_so() {
     drop(host);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A fake app on disk: a shell script that leaves a file, so a test can tell whether
+/// the host started it without starting a window.
+#[cfg(unix)]
+fn fake_app(dir: &std::path::Path, sentinel: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let app = dir.join("pandora");
+    std::fs::write(&app, format!("#!/bin/sh\ntouch '{}'\n", sentinel.display())).unwrap();
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+    app
+}
+
+/// The browser is where the user already is, so a host with nothing to relay to starts
+/// the app instead of answering with a sentence about another window.
+#[test]
+#[cfg(unix)]
+fn the_host_starts_the_app_when_nothing_is_listening() {
+    let dir = std::env::temp_dir().join(format!("pandora-launch-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sentinel = dir.join("started");
+    let app = fake_app(&dir, &sentinel);
+    let env = [
+        ("PANDORA_DATA_DIR", dir.to_string_lossy().into_owned()),
+        (
+            "PANDORA_BRIDGE_SOCKET",
+            dir.join("none.sock").to_string_lossy().into_owned(),
+        ),
+        ("PANDORA_APP", app.to_string_lossy().into_owned()),
+    ];
+
+    let mut host = Host::spawned(&[], &env);
+    let reply = host.call(json!({ "_id": 1, "type": "launch" }));
+    assert_eq!(reply["type"], "ok");
+
+    // The spawn is asynchronous, so the evidence is waited for rather than read once.
+    for _ in 0..100 {
+        if sentinel.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(sentinel.exists(), "the host must have started the app");
+    drop(host);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An app that is already listening is not started a second time: the second instance
+/// would only fight the lock and exit.
+#[test]
+#[cfg(unix)]
+fn the_host_starts_nothing_while_the_app_is_listening() {
+    use std::os::unix::net::UnixListener;
+
+    let dir = std::env::temp_dir().join(format!("pandora-launch-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("bridge.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let sentinel = dir.join("started");
+    let app = fake_app(&dir, &sentinel);
+    let env = [
+        ("PANDORA_DATA_DIR", dir.to_string_lossy().into_owned()),
+        (
+            "PANDORA_BRIDGE_SOCKET",
+            socket.to_string_lossy().into_owned(),
+        ),
+        ("PANDORA_APP", app.to_string_lossy().into_owned()),
+    ];
+
+    let mut host = Host::spawned(&[], &env);
+    let reply = host.call(json!({ "_id": 1, "type": "launch" }));
+    assert_eq!(reply["type"], "ok");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(!sentinel.exists(), "a listening app is left alone");
+    drop(listener);
+    drop(host);
+    let _ = std::fs::remove_dir_all(dir);
+}

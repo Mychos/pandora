@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::Field;
+use crate::app::{Field, Session};
 use crate::bridge::serve;
 use crate::features::boxes::model::Tab;
 use crate::features::entries::model::{Axis, View};
@@ -9,6 +9,17 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+/// One answer off the boxes the test opened, with no box picked: the box on screen
+/// speaks, exactly as it does before the browser chooses one.
+fn answer(request: Request, boxes: &mut Boxes) -> Response {
+    logic::answer(request, boxes, &mut None)
+}
+
+/// The box on screen, for a test that reads one back after an answer.
+fn shown(boxes: &Boxes) -> &Vault {
+    &boxes.session.as_ref().expect("a box is open").vault
+}
+
 const SECRET: &str = "apple";
 
 /// How long a test waits on the browser's own thread. The answer comes off a
@@ -17,6 +28,14 @@ const SECRET: &str = "apple";
 /// suite runs hundreds of tests at once.
 const PATIENCE: Duration = Duration::from_secs(10);
 const BROWSER: &str = "chrome-extension://faked/";
+
+/// One open box, the way the app hands it to the bridge.
+fn open(items: &[(&str, &str, &str)]) -> Boxes {
+    Boxes {
+        session: Some(session(items)),
+        ..Default::default()
+    }
+}
 
 fn session(items: &[(&str, &str, &str)]) -> Session {
     let mut vault = Vault::new("Box");
@@ -111,10 +130,10 @@ fn ask(socket: &Path, message: &str) -> std::sync::mpsc::Receiver<String> {
 }
 
 /// Pump until the bridge has taken the connection, or give up.
-fn settle(bridge: &mut Bridge, session: &mut Session, prefs: &Prefs) -> Effect {
+fn settle(bridge: &mut Bridge, boxes: &mut Boxes, prefs: &Prefs) -> Effect {
     let mut effect = Effect::None;
     for _ in 0..100 {
-        let next = bridge.pump(Some(session), prefs);
+        let next = bridge.pump(boxes, prefs);
         if next != Effect::None {
             effect = next;
         }
@@ -125,10 +144,13 @@ fn settle(bridge: &mut Bridge, session: &mut Session, prefs: &Prefs) -> Effect {
 
 #[test]
 fn a_locked_app_answers_locked() {
-    let mut none = None;
+    let mut boxes = Boxes::default();
     for request in [
         Request::Entries,
-        Request::Reveal { id: "x".to_owned() },
+        Request::Reveal {
+            id: "x".to_owned(),
+            box_path: None,
+        },
         Request::Match {
             host: Some("example.com".to_owned()),
             url: None,
@@ -136,7 +158,7 @@ fn a_locked_app_answers_locked() {
     ] {
         assert!(
             matches!(
-                logic::answer(request, none.as_mut()),
+                answer(request, &mut boxes),
                 Response::Error { ref message } if message == "locked"
             ),
             "a box the app does not have open is locked"
@@ -144,7 +166,7 @@ fn a_locked_app_answers_locked() {
     }
     // Status answers rather than errors — "locked" is an answer to that one.
     assert!(matches!(
-        logic::answer(Request::Status, none.as_mut()),
+        answer(Request::Status, &mut boxes),
         Response::Status {
             unlocked: false,
             ..
@@ -158,8 +180,8 @@ fn a_locked_app_answers_locked() {
 /// back something the box stores.
 #[test]
 fn no_answer_but_a_pick_carries_a_secret() {
-    let mut session = session(&[("GitHub", "octocat", "github.com")]);
-    let id = session.vault.logins[0].id.clone();
+    let mut boxes = open(&[("GitHub", "octocat", "github.com")]);
+    let id = shown(&boxes).logins[0].id.clone();
 
     let requests = [
         Request::Status,
@@ -175,15 +197,16 @@ fn no_answer_but_a_pick_carries_a_secret() {
             id: id.clone(),
             username: None,
             password: None,
+            box_path: None,
         },
     ];
     for request in requests {
-        let json = serde_json::to_string(&logic::answer(request, Some(&mut session))).unwrap();
+        let json = serde_json::to_string(&answer(request, &mut boxes)).unwrap();
         assert!(!json.contains(SECRET), "{json}");
     }
 
     let json =
-        serde_json::to_string(&logic::answer(Request::Reveal { id }, Some(&mut session))).unwrap();
+        serde_json::to_string(&answer(Request::Reveal { id, box_path: None }, &mut boxes)).unwrap();
     assert!(
         json.contains(SECRET),
         "reveal is the way out for a password"
@@ -196,15 +219,16 @@ fn no_answer_but_a_pick_carries_a_secret() {
 #[test]
 fn an_answer_never_repeats_what_the_caller_sent() {
     const SENT: &str = "hunter2-never-in-a-reply";
-    let mut session = session(&[]);
+    let mut boxes = open(&[]);
 
-    let json = serde_json::to_string(&logic::answer(
+    let json = serde_json::to_string(&answer(
         Request::Update {
             id: "no such entry".to_owned(),
             username: Some(SENT.to_owned()),
             password: Some(SENT.to_owned()),
+            box_path: None,
         },
-        Some(&mut session),
+        &mut boxes,
     ))
     .unwrap();
     assert!(!json.contains(SENT), "the request came back out: {json}");
@@ -221,40 +245,50 @@ fn an_answer_never_repeats_what_the_caller_sent() {
 
 #[test]
 fn the_app_refuses_the_requests_its_window_owns() {
-    let mut session = session(&[]);
+    let mut boxes = open(&[]);
     assert!(matches!(
-        logic::answer(
+        answer(
             Request::Unlock {
                 path: "/tmp/x.pandora".to_owned(),
                 password: "pw".to_owned(),
             },
-            Some(&mut session)
+            &mut boxes
         ),
         Response::Error { .. }
     ));
-    assert!(matches!(
-        logic::answer(Request::ListBoxes, Some(&mut session)),
-        Response::Error { .. }
-    ));
+    // What the app does answer is which boxes it has open, so the browser can pick
+    // one: opening a box is still the window's job.
+    let listed = answer(Request::ListBoxes, &mut boxes);
+    assert!(
+        matches!(
+            &listed,
+            Response::Boxes { boxes, picked: Some(path) }
+                if boxes.len() == 1 && path == "/tmp/pandora-bridge-test.pandora"
+        ),
+        "the one open box is listed, and it is the one the browser reads: {listed:?}"
+    );
 }
 
 #[test]
 fn a_save_from_the_browser_lands_in_the_open_box() {
-    let mut session = session(&[]);
-    let reply = logic::answer(
+    let mut boxes = open(&[]);
+    let reply = answer(
         Request::Create {
             name: "Example".to_owned(),
             username: "eve".to_owned(),
             password: "typed".to_owned(),
             url: "https://example.com/login".to_owned(),
         },
-        Some(&mut session),
+        &mut boxes,
     );
     assert!(matches!(reply, Response::Saved { .. }));
-    assert!(session.dirty, "the app's own autosave is what writes it");
-    assert_eq!(session.vault.logins.len(), 1);
+    assert!(
+        boxes.session.as_ref().unwrap().dirty,
+        "the app's own autosave is what writes it"
+    );
+    assert_eq!(shown(&boxes).logins.len(), 1);
     assert_eq!(
-        serve::matches(&session.vault, "https://example.com/session").len(),
+        serve::matches(shown(&boxes), "https://example.com/session").len(),
         1,
         "and it claims the page it came from"
     );
@@ -262,29 +296,31 @@ fn a_save_from_the_browser_lands_in_the_open_box() {
 
 #[test]
 fn an_update_keeps_what_it_was_not_sent() {
-    let mut session = session(&[("GitHub", "octocat", "github.com")]);
-    let id = session.vault.logins[0].id.clone();
+    let mut boxes = open(&[("GitHub", "octocat", "github.com")]);
+    let id = shown(&boxes).logins[0].id.clone();
 
-    logic::answer(
+    answer(
         Request::Update {
             id: id.clone(),
             username: None,
             password: Some("rotated".to_owned()),
+            box_path: None,
         },
-        Some(&mut session),
+        &mut boxes,
     );
-    let item = &session.vault.logins[0];
+    let item = &shown(&boxes).logins[0];
     assert_eq!(item.username, "octocat", "not sent, so it stays");
     assert_eq!(item.password.as_str(), "rotated");
 
     assert!(matches!(
-        logic::answer(
+        answer(
             Request::Update {
                 id: "nope".to_owned(),
                 username: None,
                 password: None,
+                box_path: None,
             },
-            Some(&mut session)
+            &mut boxes
         ),
         Response::Error { .. }
     ));
@@ -294,14 +330,14 @@ fn an_update_keeps_what_it_was_not_sent() {
 fn an_unapproved_browser_waits_for_the_prompt() {
     let (dir, socket) = tmp();
     let mut bridge = Bridge::start_at(&socket);
-    let mut session = session(&[("GitHub", "octocat", "github.com")]);
+    let mut boxes = open(&[("GitHub", "octocat", "github.com")]);
     let mut prefs = Prefs::default();
 
     let reply = ask(
         &socket,
         &format!(r#"{{"_id":1,"caller":"{BROWSER}","type":"status"}}"#),
     );
-    assert_eq!(settle(&mut bridge, &mut session, &prefs), Effect::None);
+    assert_eq!(settle(&mut bridge, &mut boxes, &prefs), Effect::None);
 
     assert_eq!(bridge.asking(), Some(BROWSER));
     assert!(
@@ -310,7 +346,7 @@ fn an_unapproved_browser_waits_for_the_prompt() {
     );
 
     assert!(
-        bridge.resolve(true, true, Some(&mut session), &mut prefs),
+        bridge.resolve(true, true, &mut boxes, &mut prefs),
         "the caller is told to write the approval down"
     );
     assert!(prefs.browsers.contains(&BROWSER.to_owned()));
@@ -324,16 +360,16 @@ fn an_unapproved_browser_waits_for_the_prompt() {
 fn a_refused_browser_is_told_no_and_remembers_nothing() {
     let (dir, socket) = tmp();
     let mut bridge = Bridge::start_at(&socket);
-    let mut session = session(&[]);
+    let mut boxes = open(&[]);
     let mut prefs = Prefs::default();
 
     let reply = ask(
         &socket,
         &format!(r#"{{"_id":2,"caller":"{BROWSER}","type":"entries"}}"#),
     );
-    assert_eq!(settle(&mut bridge, &mut session, &prefs), Effect::None);
+    assert_eq!(settle(&mut bridge, &mut boxes, &prefs), Effect::None);
 
-    assert!(!bridge.resolve(false, true, Some(&mut session), &mut prefs));
+    assert!(!bridge.resolve(false, true, &mut boxes, &mut prefs));
     assert!(prefs.browsers.is_empty(), "a refusal is not remembered");
     let answered = reply.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(answered.contains("refused"), "{answered}");
@@ -344,7 +380,7 @@ fn a_refused_browser_is_told_no_and_remembers_nothing() {
 fn an_approved_browser_is_answered_without_a_prompt() {
     let (dir, socket) = tmp();
     let mut bridge = Bridge::start_at(&socket);
-    let mut session = session(&[("GitHub", "octocat", "github.com")]);
+    let mut boxes = open(&[("GitHub", "octocat", "github.com")]);
     let prefs = Prefs {
         browsers: vec![BROWSER.to_owned()],
         ..Prefs::default()
@@ -355,7 +391,7 @@ fn an_approved_browser_is_answered_without_a_prompt() {
         &format!(r#"{{"_id":3,"caller":"{BROWSER}","type":"match","url":"https://github.com/x"}}"#),
     );
     assert_eq!(
-        settle(&mut bridge, &mut session, &prefs),
+        settle(&mut bridge, &mut boxes, &prefs),
         Effect::Activity,
         "approved browser activity refreshes the away timer"
     );
@@ -395,7 +431,7 @@ fn a_browser_knock_wakes_the_idle_frame() {
 fn a_write_from_the_browser_is_worth_telling_the_app() {
     let (dir, socket) = tmp();
     let mut bridge = Bridge::start_at(&socket);
-    let mut session = session(&[]);
+    let mut boxes = open(&[]);
     let prefs = Prefs {
         browsers: vec![BROWSER.to_owned()],
         ..Prefs::default()
@@ -408,11 +444,14 @@ fn a_write_from_the_browser_is_worth_telling_the_app() {
         ),
     );
     assert_eq!(
-        settle(&mut bridge, &mut session, &prefs),
+        settle(&mut bridge, &mut boxes, &prefs),
         Effect::Wrote,
         "a browser save is the effect the app reports"
     );
-    assert!(session.dirty, "and it landed in the open box");
+    assert!(
+        boxes.session.as_ref().unwrap().dirty,
+        "and it landed in the open box"
+    );
     let _ = reply.recv_timeout(Duration::from_secs(5)).unwrap();
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -421,14 +460,14 @@ fn a_write_from_the_browser_is_worth_telling_the_app() {
 fn a_prompt_nobody_answers_expires() {
     let (dir, socket) = tmp();
     let mut bridge = Bridge::start_at(&socket);
-    let mut session = session(&[]);
+    let mut boxes = open(&[]);
     let prefs = Prefs::default();
 
     let reply = ask(
         &socket,
         &format!(r#"{{"_id":4,"caller":"{BROWSER}","type":"entries"}}"#),
     );
-    settle(&mut bridge, &mut session, &prefs);
+    settle(&mut bridge, &mut boxes, &prefs);
     assert_eq!(bridge.asking(), Some(BROWSER));
 
     bridge.expire_at(Instant::now() + APPROVAL);
@@ -528,4 +567,157 @@ fn the_prompt_draws_both_answers() {
     let deny = at("Deny").expect("the safe answer is drawn");
     assert!(allow > deny, "Allow sits to the right of Deny");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A page's fill spans every box the app has open, and each row says which box it
+/// came from: a page has no idea which box holds what.
+#[test]
+fn a_fill_spans_every_open_box_and_says_which() {
+    let mut boxes = open(&[("Work", "me", "example.com")]);
+    let mut second = session(&[("Bank", "me", "example.com")]);
+    second.path = PathBuf::from("/tmp/pandora-bridge-second.pandora");
+    second.vault.name = "Second".to_owned();
+    boxes.tabs.push(second);
+
+    let reply = answer(
+        Request::Match {
+            host: Some("example.com".to_owned()),
+            url: None,
+        },
+        &mut boxes,
+    );
+    let Response::Entries { entries } = reply else {
+        panic!("a match lists entries");
+    };
+    assert_eq!(
+        entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+        ["Work", "Bank"],
+        "both boxes answered, the one on screen first"
+    );
+    assert_eq!(entries[0].box_name.as_deref(), Some("Box"));
+    assert_eq!(entries[1].box_name.as_deref(), Some("Second"));
+    assert_eq!(
+        entries[1].box_path.as_deref(),
+        Some("/tmp/pandora-bridge-second.pandora")
+    );
+}
+
+/// A row listed from another box reads that box: the entry's id alone would land on
+/// whichever box happens to answer next.
+#[test]
+fn a_row_from_another_box_reads_that_box() {
+    let mut boxes = open(&[("Work", "me", "example.com")]);
+    let mut second = session(&[("Bank", "me", "example.com")]);
+    second.path = PathBuf::from("/tmp/pandora-bridge-other.pandora");
+    let id = second.vault.logins[0].id.clone();
+    // The other box's own secret: only the box the row came from decides which one.
+    second.vault.logins[0].password = Zeroizing::new("other-secret".to_owned());
+    boxes.tabs.push(second);
+
+    let reply = answer(
+        Request::Reveal {
+            id: id.clone(),
+            box_path: Some("/tmp/pandora-bridge-other.pandora".to_owned()),
+        },
+        &mut boxes,
+    );
+    assert!(
+        matches!(reply, Response::Secret { ref password, .. } if password == "other-secret"),
+        "the row's own box answered"
+    );
+
+    let reply = answer(
+        Request::Reveal {
+            id: shown(&boxes).logins[0].id.clone(),
+            box_path: None,
+        },
+        &mut boxes,
+    );
+    assert!(
+        matches!(reply, Response::Secret { ref password, .. } if password == SECRET),
+        "with no box named, the one on screen answers"
+    );
+}
+
+/// The browser reads from the box it picked; a tab closed under the pick falls back
+/// to the one on screen rather than answering nothing.
+#[test]
+fn the_browser_reads_the_box_it_picked() {
+    let mut boxes = open(&[]);
+    let mut second = session(&[]);
+    second.path = PathBuf::from("/tmp/pandora-bridge-picked.pandora");
+    second.vault.name = "Picked".to_owned();
+    boxes.tabs.push(second);
+    let mut picked = None;
+
+    assert!(matches!(
+        logic::answer(
+            Request::Select {
+                path: "/tmp/pandora-bridge-picked.pandora".to_owned()
+            },
+            &mut boxes,
+            &mut picked
+        ),
+        Response::Ok
+    ));
+    assert!(
+        matches!(
+            logic::answer(Request::Refresh, &mut boxes, &mut picked),
+            Response::Unlocked { ref name, .. } if name == "Picked"
+        ),
+        "the picked box answers, not the one on screen"
+    );
+    assert!(matches!(
+        logic::answer(Request::ListBoxes, &mut boxes, &mut picked),
+        Response::Boxes {
+            picked: Some(ref path),
+            ..
+        } if path == "/tmp/pandora-bridge-picked.pandora"
+    ));
+
+    boxes.tabs.clear();
+    assert!(
+        matches!(
+            logic::answer(Request::Refresh, &mut boxes, &mut picked),
+            Response::Unlocked { ref name, .. } if name == "Box"
+        ),
+        "a pick whose box closed reads the one on screen"
+    );
+    assert!(
+        matches!(
+            logic::answer(Request::ListBoxes, &mut boxes, &mut picked),
+            Response::Boxes {
+                picked: Some(ref path),
+                ..
+            } if path == "/tmp/pandora-bridge-test.pandora"
+        ),
+        "the listing names the box on screen once the pick's box is gone"
+    );
+    assert!(matches!(
+        logic::answer(
+            Request::Select {
+                path: "/tmp/never-open.pandora".to_owned()
+            },
+            &mut boxes,
+            &mut picked
+        ),
+        Response::Error { .. }
+    ));
+}
+
+/// A parked tab whose box cannot be read says why: a placeholder vault is never the
+/// answer to a browser.
+#[test]
+fn a_parked_tab_that_cannot_be_read_is_an_error() {
+    let mut boxes = open(&[]);
+    let mut second = session(&[]);
+    second.path = PathBuf::from("/tmp/pandora-bridge-missing.pandora");
+    second.parked = true;
+    boxes.tabs.push(second);
+    let mut picked = Some(PathBuf::from("/tmp/pandora-bridge-missing.pandora"));
+
+    assert!(matches!(
+        logic::answer(Request::Refresh, &mut boxes, &mut picked),
+        Response::Error { .. }
+    ));
 }

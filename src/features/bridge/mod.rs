@@ -53,8 +53,9 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
 
     if let Some(allow) = decision {
         app.bridge.remember = remember;
-        let session = app.boxes.session.as_mut();
-        let remembered = app.bridge.resolve(allow, remember, session, &mut app.prefs);
+        let remembered = app
+            .bridge
+            .resolve(allow, remember, &mut app.boxes, &mut app.prefs);
         if remembered {
             crate::features::settings::model::save(&app.prefs);
         }
