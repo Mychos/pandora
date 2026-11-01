@@ -61,10 +61,13 @@ pub fn png(
         prims = ctx.tessellate(out.shapes, 1.0);
     }
     let bytes = raster(&prims, &atlas, w as usize, h as usize);
-    image::RgbaImage::from_raw(w, h, bytes)
+    // A shot is a look at the frame, never the test's subject: a folder that is
+    // not there, or a disk that will not take it, leaves the assertion alone.
+    let dir = std::path::Path::new("/tmp/opencode");
+    let _ = std::fs::create_dir_all(dir);
+    let _ = image::RgbaImage::from_raw(w, h, bytes)
         .expect("the raster is w * h * 4")
-        .save(format!("/tmp/opencode/{name}.png"))
-        .expect("the shots folder is writable");
+        .save(dir.join(format!("{name}.png")));
 }
 
 /// Every text run painted, in paint order.

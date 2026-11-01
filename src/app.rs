@@ -301,7 +301,7 @@ impl App {
         // A logout or a `kill` ends the run without the window ever closing, so the
         // signals are taken over before anything else: the frame that reads the flag
         // writes the boxes and only then lets the process go.
-        #[cfg(not(target_os = "android"))]
+        #[cfg(unix)]
         crate::shared::stop::listen(cc.egui_ctx.clone());
         // A picker copy that never reached a save is plaintext; drop it now.
         store::clear_staging();
@@ -705,7 +705,7 @@ impl App {
         let ctx = ui.ctx().clone();
         // A signal asked to stop: everything in memory goes to disk, and only then
         // does the window close. The exit hook writes again, which is free when clean.
-        #[cfg(not(target_os = "android"))]
+        #[cfg(unix)]
         if crate::shared::stop::asked() {
             self.boxes.flush_all(&mut self.shell);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);

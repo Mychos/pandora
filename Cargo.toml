@@ -147,8 +147,12 @@ arboard = { version = "3.6", default-features = false, features = [
     "wayland-data-control",
 ] }
 system-idle-time = "1.0.4"
-libc = "0.2"
 zbus = "5.19"
+
+# The signals that end a run where it stands: `shared::stop` takes SIGTERM and
+# SIGINT over before the frame loop reads the flag. Both desktops have them.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 system-idle-time = { version = "1.0.4", default-features = false }

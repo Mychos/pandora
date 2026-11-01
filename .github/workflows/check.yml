@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
-          toolchain: ${{ env.TOOLCHAIN }}
+          toolchain: "1.99.0"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       # The audio preview links against ALSA, and the windowing backends look
@@ -53,7 +53,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
-          toolchain: ${{ env.TOOLCHAIN }}
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
       - name: typecheck every target
         run: cargo check --all-targets
@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
-          toolchain: ${{ env.TOOLCHAIN }}
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
       - name: typecheck every target
         run: cargo check --all-targets
@@ -97,7 +97,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # Fuzzing needs nightly, and `libfuzzer-sys` wants a C++ toolchain.
+      # A dated nightly, not the newest one: 2026-11 mis-compiles `zvariant` with
+      # "cycle detected ... needs async drop", and these fuzzers link the whole crate.
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-10-21
       - uses: taiki-e/install-action@cargo-fuzz
       # The prebuilt binary is what usually lands; a run where the installer found
       # nothing to place leaves the subcommand missing, so it is built as a fallback.

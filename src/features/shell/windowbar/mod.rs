@@ -97,7 +97,7 @@ pub fn resize(ui: &mut Ui, app: &mut App) {
 /// The compositor keeps the pointer for a native move or resize and never delivers
 /// the button release, so egui would hold the press; the native op owns the gesture
 /// from here. `emilk/egui#7959`.
-#[cfg(not(any(target_os = "android", target_os = "macos")))]
+#[cfg(not(target_os = "android"))]
 fn handoff(ctx: &Context) {
     ctx.input_mut(|i| i.pointer = PointerState::default());
     ctx.stop_dragging();
