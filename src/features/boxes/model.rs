@@ -80,12 +80,8 @@ pub struct Session {
     pub parked_seq: u64,
     pub dirty: bool,
     /// The change was finished the moment it happened — a create, a delete, a
-    /// move — so the next tick writes it instead of waiting out the safety timer.
+    /// move — so the next tick writes it instead of waiting out the debounce.
     pub immediate: bool,
-    /// An editor is open: its fields are written on disk only when it closes.
-    /// The timer that writes a dirty box is a safety net for edits made outside
-    /// one, and must never fire while this is set.
-    pub editing: bool,
     pub last_edit: Option<Instant>,
     pub last_mtime: Option<SystemTime>,
     pub conflict: bool,
@@ -188,7 +184,6 @@ impl Session {
             parked_seq: 0,
             dirty: false,
             immediate: false,
-            editing: false,
             last_edit: None,
             last_mtime: None,
             conflict: false,
@@ -231,7 +226,8 @@ impl Session {
         self.edit_version = self.edit_version.wrapping_add(1);
         self.last_edit = Some(Instant::now());
         // The commit waits for the box to settle, because GitHub counts commits
-        // against an hourly budget and typing is not a change.
+        // against an hourly budget and typing is not a change. The file does not wait
+        // that long: `AUTOSAVE` writes it a second after the last keystroke.
         self.push_at = Some(Instant::now() + crate::features::sync::github::PUSH_QUIET);
     }
 

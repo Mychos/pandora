@@ -3,6 +3,8 @@ pub mod autofill;
 pub mod capture;
 pub mod i18n;
 pub mod idle;
+#[cfg(not(target_os = "android"))]
+pub mod stop;
 pub mod theme;
 pub mod ui;
 pub mod utils;

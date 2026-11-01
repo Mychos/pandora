@@ -298,6 +298,11 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // A logout or a `kill` ends the run without the window ever closing, so the
+        // signals are taken over before anything else: the frame that reads the flag
+        // writes the boxes and only then lets the process go.
+        #[cfg(not(target_os = "android"))]
+        crate::shared::stop::listen(cc.egui_ctx.clone());
         // A picker copy that never reached a save is plaintext; drop it now.
         store::clear_staging();
         // Drop orphaned atomic-write temps left by a crashed save.
@@ -698,6 +703,14 @@ impl App {
 
     pub fn run_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // A signal asked to stop: everything in memory goes to disk, and only then
+        // does the window close. The exit hook writes again, which is free when clean.
+        #[cfg(not(target_os = "android"))]
+        if crate::shared::stop::asked() {
+            self.boxes.flush_all(&mut self.shell);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         // A native move can take the focus away for as long as the gesture lasts;
         // that is not the user walking away from the window.
         self.shell.settle(
@@ -761,11 +774,6 @@ impl App {
         if self.boxes.session.is_some() {
             self.boxes.pump_io(&mut self.shell);
             self.boxes.tick(&mut self.shell);
-        }
-        // An editor marks the session on every frame it paints, so the flag a
-        // closed one may have left behind cannot hold the safety write back.
-        if let Some(s) = self.boxes.session.as_mut() {
-            s.editing = false;
         }
         // What a phone's autofill may offer, kept in step after the tick that can
         // save and the watch that can lock: one call, so no transition forgets it.
@@ -904,21 +912,25 @@ impl eframe::App for App {
         self.run_ui(ui);
     }
 
-    /// Quitting is the one exit the clip countdown never sees; without this a copied
-    /// password outlives the app on the clipboard.
+    /// Quitting is the two last moments at once: the box on screen and every parked tab
+    /// are written, so nothing that only lived in memory dies with the window, and the
+    /// clipboard is taken back, which the countdown never gets to see.
     #[cfg(all(not(target_os = "android"), feature = "glow"))]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.boxes.flush_all(&mut self.shell);
         self.shell.take_back_clip();
     }
 
     #[cfg(all(not(target_os = "android"), not(feature = "glow")))]
     fn on_exit(&mut self) {
+        self.boxes.flush_all(&mut self.shell);
         self.shell.take_back_clip();
     }
 
     /// The same for the phone: glow's exit hook hands over the GL context, unused.
     #[cfg(target_os = "android")]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.boxes.flush_all(&mut self.shell);
         self.shell.take_back_clip();
     }
 }

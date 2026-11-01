@@ -361,7 +361,6 @@ pub fn trash_modal(ctx: &egui::Context, app: &mut App) {
 
     let mut restore: Option<String> = None;
     let mut empty = false;
-    app.boxes.editing(true);
     let open = theme::dialog(ctx, egui::Id::new("trash"), |ui| {
         theme::width(ui, 380.0);
         let closed = theme::head(ui, &app.icons, "Trash");
@@ -420,7 +419,6 @@ pub fn trash_modal(ctx: &egui::Context, app: &mut App) {
     } else {
         return;
     }
-    app.boxes.editing(false);
     app.boxes.flush(&mut app.shell);
 }
 
@@ -1280,9 +1278,9 @@ fn reader(available: bool, sealed: bool, wanted: bool) -> Reader {
 /// The fingerprint card. A desktop never paints it (the master password is the only
 /// door); Android always does, and a reader it may not use explains itself.
 /// Whether a browser may open a box of its own. Separate from the bridge, which needs
-/// no switch: with the app open the extension uses the box this window has and never
-/// asks for a password. This is the other thing — a master password typed into a
-/// browser — so it starts off.
+/// no switch: with the app open the extension uses the box this window has, and with it
+/// closed the host starts the app rather than asking for a password. This is the other
+/// thing — a master password typed into a browser — so it starts off.
 fn browser(ui: &mut egui::Ui, app: &mut App) {
     card(ui, "Browsers", |ui| {
         let mut on = app.prefs.unlock_from_browser;

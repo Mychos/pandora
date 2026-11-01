@@ -36,7 +36,6 @@ fn session(items: &[(&str, &str, &str)]) -> Session {
         parked_seq: 0,
         dirty: false,
         immediate: false,
-        editing: false,
         last_edit: None,
         last_mtime: None,
         conflict: false,

@@ -502,8 +502,7 @@ impl App {
             return self.shell.fail("cannot read the box file");
         };
         let local = digest(&bytes);
-        let local_changed =
-            s.dirty || s.editing || remote.digest.is_empty() || local != remote.digest;
+        let local_changed = s.dirty || remote.digest.is_empty() || local != remote.digest;
 
         match seen {
             // The file disappeared. Putting this box back is the only way the
@@ -923,7 +922,7 @@ mod tests {
 
         let s = app.boxes.session.as_mut().expect("a box");
         s.vault.logins.push(login("mine", "Mine"));
-        s.editing = true;
+        s.mark_dirty();
 
         app.land_seen(&path, Seen::Changed(Some(stamp), theirs));
         wait(&mut app);
@@ -931,7 +930,7 @@ mod tests {
         assert_eq!(
             s.vault.logins.len(),
             2,
-            "the editor's record was not dropped"
+            "the record made here was not dropped"
         );
     }
 

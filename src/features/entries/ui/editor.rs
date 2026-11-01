@@ -45,7 +45,6 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
     let max_h = (screen.height() - 48.0).max(200.0);
     let width = 520.0;
 
-    app.boxes.editing(true);
     let open = theme::dialog(ctx, egui::Id::new("entry"), |ui| {
         theme::width(ui, width);
         ui.set_max_height(max_h);
@@ -73,7 +72,6 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
         if let Some(s) = app.boxes.session.as_mut() {
             s.selected = None;
         }
-        app.boxes.editing(false);
         app.boxes.flush(&mut app.shell);
     }
 }
@@ -1118,7 +1116,6 @@ pub(crate) mod tests {
             parked_seq: 0,
             dirty: false,
             immediate: false,
-            editing: false,
             last_edit: None,
             last_mtime: None,
             conflict: false,

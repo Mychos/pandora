@@ -45,7 +45,6 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
         Form::Send { .. } => t("Share a record"),
         Form::Open { .. } => t("Open a share"),
     };
-    app.boxes.editing(true);
     let open = theme::dialog(ctx, egui::Id::new("share"), |ui| {
         theme::width(ui, 360.0);
         let mut closed = false;
@@ -90,7 +89,6 @@ pub fn modal(ctx: &egui::Context, app: &mut App) {
     }
     if close || !open {
         app.share.clear();
-        app.boxes.editing(false);
         app.boxes.flush(&mut app.shell);
     }
 }

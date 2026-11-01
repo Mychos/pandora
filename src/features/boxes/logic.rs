@@ -5,9 +5,10 @@ use crate::shared::i18n::{t, tf};
 use crate::vault::store;
 use std::path::PathBuf;
 
-/// A last resort, not an autosave: an edit made outside an editor is written
-/// after this long, so a crash cannot lose it. Editors write when they close.
-const SAFETY_WRITE: std::time::Duration = std::time::Duration::from_secs(60);
+/// A debounce, not a timer: a box is written once its last change is this old. Typing
+/// continuously writes nothing until it stops, and nothing ever sits in memory longer
+/// than this plus a frame — a hard kill cannot cost more than that.
+const AUTOSAVE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Which half of a credentials entry a copy takes.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -295,12 +296,12 @@ impl Boxes {
                 meta_req = Some(s.path.clone());
             }
 
-            // An open editor is never written under: its fields land when it
-            // closes, however long they have been dirty. A change that is already
-            // finished — a create, a delete, a move — does not wait at all.
-            if s.dirty && !s.conflict && !s.editing {
-                let safety = s.last_edit.is_some_and(|t| t.elapsed() >= SAFETY_WRITE);
-                if s.immediate || safety {
+            // A box is written while its editor is open too: the edit only lives in
+            // memory until then, so an open editor is a reason to write, not to wait.
+            // `immediate` is a finished change (create, delete, move) and does not wait.
+            if s.dirty && !s.conflict {
+                let quiet = s.last_edit.is_none_or(|t| t.elapsed() >= AUTOSAVE);
+                if s.immediate || quiet {
                     save_now = true;
                 }
             }
@@ -400,10 +401,14 @@ impl Boxes {
                             s.save_pending = false;
                             match result {
                                 Ok(()) => {
-                                    s.dirty = false;
-                                    s.immediate = false;
-                                    s.last_edit = None;
+                                    // The box is clean only when nothing changed while the
+                                    // save was out: `edit_version` moves on every edit and
+                                    // on the dispatch, so a later edit leaves the two
+                                    // apart, and that edit is still waiting for a write.
                                     if s.edit_version == s.save_version {
+                                        s.dirty = false;
+                                        s.immediate = false;
+                                        s.last_edit = None;
                                         s.saved = Some(
                                             crate::features::sync::github::Fingerprint::of(&vault),
                                         );
@@ -431,6 +436,20 @@ impl Boxes {
         }
     }
 
+    /// Let a save already in flight land before writing over it: the worker writes the
+    /// file itself, and its snapshot is older than what is on screen, so its write would
+    /// be the one that arrives last. Blocking here is the point — this runs on the
+    /// moments that must not lose anything (Ctrl+S, park, lock, exit), not per keystroke.
+    fn drain(&mut self, shell: &mut Shell) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.session.as_ref().is_some_and(|s| s.save_pending)
+            && std::time::Instant::now() < deadline
+        {
+            self.pump_io(shell);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// Test helper: block until all pending I/O replies have been applied.
     #[cfg(test)]
     pub fn wait_io(&mut self, shell: &mut Shell) {
@@ -450,22 +469,16 @@ impl Boxes {
     }
 
     pub fn persist(&mut self, shell: &mut Shell) {
+        self.drain(shell);
         if let Some(s) = &mut self.session {
             write(s, shell, false);
-        }
-    }
-
-    /// An editor is on screen, or has just left it. While it is, the timer that
-    /// writes a dirty box stays away.
-    pub fn editing(&mut self, on: bool) {
-        if let Some(s) = self.session.as_mut() {
-            s.editing = on;
         }
     }
 
     /// The last moment before its key is dropped (tab switch, tab close, lock):
     /// write the unsaved, conflict-free edits.
     pub fn flush(&mut self, shell: &mut Shell) {
+        self.drain(shell);
         if let Some(s) = &mut self.session {
             write_if_dirty(s, shell);
             if s.remote
@@ -482,6 +495,7 @@ impl Boxes {
     /// Every unlocked box, not just the one on screen: locking drops the parked
     /// tabs too, and their edits only ever lived in the vault.
     pub fn flush_all(&mut self, shell: &mut Shell) {
+        self.drain(shell);
         if let Some(s) = &mut self.session {
             write_if_dirty(s, shell);
             if s.remote
@@ -859,6 +873,103 @@ mod tests {
         );
         assert!(!s.dirty, "and the session is clean");
         assert!(!s.save_pending, "no save left in flight");
+    }
+
+    /// A write that has to be right now (Ctrl+S, park, lock, exit) waits for the save
+    /// already in flight: the worker writes the file itself with an older snapshot, and
+    /// its write would otherwise land last and undo the newer one.
+    #[test]
+    fn a_write_waits_for_the_save_in_flight_instead_of_being_overtaken() {
+        let mut app = opened(&unique());
+        let path = app.boxes.session.as_ref().unwrap().path.clone();
+        let creds = app.boxes.session.as_ref().unwrap().creds.clone();
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            s.vault.logins.push(Login::new(1));
+            s.mark_now();
+        }
+        // The save goes out with one login and has not come back yet.
+        app.boxes.tick(&mut app.shell);
+
+        // A second edit, and the user leaves at once.
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            s.vault.logins.push(Login::new(2));
+            s.mark_dirty();
+        }
+        app.boxes.flush_all(&mut app.shell);
+        app.boxes.wait_io(&mut app.shell);
+
+        let mut on_disk = store::load(&path, &creds).unwrap();
+        assert_eq!(
+            on_disk.logins.len(),
+            2,
+            "the older snapshot did not land on top of the newer one"
+        );
+        let _ = &mut on_disk;
+    }
+
+    /// An edit inside an editor is on disk a second later: nothing that only lives in
+    /// memory outlives a crash just because an editor was open.
+    #[test]
+    fn an_edit_in_an_open_editor_reaches_disk_on_the_debounce() {
+        let mut app = opened(&unique());
+        let path = app.boxes.session.as_ref().unwrap().path.clone();
+        let creds = app.boxes.session.as_ref().unwrap().creds.clone();
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            s.vault.logins.push(Login::new(1));
+            s.mark_dirty();
+        }
+
+        // Mid-typing: the debounce holds the write back.
+        app.boxes.tick(&mut app.shell);
+        app.boxes.wait_io(&mut app.shell);
+        assert_eq!(
+            store::load(&path, &creds).unwrap().logins.len(),
+            0,
+            "a change a keystroke old is not written yet"
+        );
+        assert!(
+            app.boxes.session.as_ref().unwrap().dirty,
+            "and it is still waiting"
+        );
+
+        // The typing stopped a debounce ago.
+        app.boxes.session.as_mut().unwrap().last_edit = Some(std::time::Instant::now() - AUTOSAVE);
+        app.boxes.tick(&mut app.shell);
+        app.boxes.wait_io(&mut app.shell);
+
+        let s = app.boxes.session.as_ref().unwrap();
+        assert_eq!(
+            store::load(&path, &s.creds).unwrap().logins.len(),
+            1,
+            "the edit was written once the box settled"
+        );
+        assert!(!s.dirty, "and the session is clean");
+    }
+
+    /// Quitting writes what is only in memory: `on_exit` runs this, and the last
+    /// keystroke must not be the one the window takes with it.
+    #[test]
+    fn leaving_writes_the_box_before_its_key_is_dropped() {
+        let mut app = opened(&unique());
+        let path = app.boxes.session.as_ref().unwrap().path.clone();
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            s.vault.logins.push(Login::new(1));
+            s.mark_dirty();
+        }
+
+        app.boxes.flush_all(&mut app.shell);
+
+        let s = app.boxes.session.as_ref().unwrap();
+        assert_eq!(
+            store::load(&path, &s.creds).unwrap().logins.len(),
+            1,
+            "the box on screen was written before the exit"
+        );
+        assert!(!s.dirty);
     }
 
     /// A box that leaves the screen only lives in its vault: whatever it holds
