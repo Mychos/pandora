@@ -1,5 +1,5 @@
-//! The two catalogs and the one lookup that reads them. A key is the English
-//! sentence itself, so a missing translation is visible in the source.
+//! The catalogs, one per `Lang`, and the one lookup that reads them. A key is the
+//! English sentence itself, so a missing translation is visible in the source.
 
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -93,7 +93,7 @@ fn catalogs() -> &'static [HashMap<&'static str, &'static str>; 3] {
     })
 }
 
-/// Both catalogs are `include_str!`d, so every key and value is a slice of the
+/// Every catalog is `include_str!`d, so each key and value is a slice of the
 /// binary: nothing is copied and nothing leaks.
 fn parse(json: &'static str) -> HashMap<&'static str, &'static str> {
     serde_json::from_str(json).expect("valid translation catalog")
@@ -106,36 +106,24 @@ mod tests {
     #[test]
     fn catalogs_share_keys_and_named_placeholders() {
         let catalogs = catalogs();
-        assert_eq!(
-            catalogs[Lang::En as usize]
-                .keys()
-                .collect::<std::collections::HashSet<_>>(),
-            catalogs[Lang::Es as usize]
-                .keys()
-                .collect::<std::collections::HashSet<_>>(),
-        );
-        assert_eq!(
-            catalogs[Lang::En as usize]
-                .keys()
-                .collect::<std::collections::HashSet<_>>(),
-            catalogs[Lang::Fr as usize]
-                .keys()
-                .collect::<std::collections::HashSet<_>>(),
-        );
+        let english = &catalogs[Lang::En as usize];
         assert!(catalogs
             .iter()
             .all(|catalog| catalog.values().all(|value| !value.is_empty())));
-        for key in catalogs[Lang::En as usize].keys() {
+        for lang in Lang::ALL {
+            let catalog = &catalogs[lang as usize];
             assert_eq!(
-                placeholders(catalogs[Lang::En as usize][key]),
-                placeholders(catalogs[Lang::Es as usize][key]),
-                "placeholder mismatch for {key}"
+                english.keys().collect::<std::collections::HashSet<_>>(),
+                catalog.keys().collect::<std::collections::HashSet<_>>(),
+                "{lang:?} does not share the English key set"
             );
-            assert_eq!(
-                placeholders(catalogs[Lang::En as usize][key]),
-                placeholders(catalogs[Lang::Fr as usize][key]),
-                "placeholder mismatch for {key} (fr)"
-            );
+            for key in english.keys() {
+                assert_eq!(
+                    placeholders(english[key]),
+                    placeholders(catalog[key]),
+                    "placeholder mismatch for {key} in {lang:?}"
+                );
+            }
         }
         assert_eq!(Lang::Es.tr("{count} minutes"), "{count} minutos");
         assert_eq!(
@@ -160,7 +148,7 @@ mod tests {
         assert_eq!(entry(Lang::En, "a sentence nobody translated"), None);
     }
 
-    /// Every word the auto-type pane paints is in both hand-written catalogs: the
+    /// Every word the auto-type pane paints is in every hand-written catalog: the
     /// lookup falls back to English, so a key missing from `es` reads as English on
     /// a Spanish screen and no other test would say so.
     #[test]
