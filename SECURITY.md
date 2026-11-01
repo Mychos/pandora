@@ -152,6 +152,19 @@ process that already runs as you.
 extension open a box on its own. Turning it on means the master password can be
 typed into a browser window; the setting says so.
 
+Starting the app is not that. `launch` needs no permission and grants none: it spawns
+the Pandora binary when nothing is listening, and the box is still opened by hand in
+the window. The most a hostile caller gets from it is a window it could have opened
+with `xdg-open`, and a `status` that says nothing until the user unlocks.
+
+A flatpak browser is the one exception to "no permission": its host runs inside the
+sandbox and the app is outside it, so `launch` goes through `flatpak-spawn --host`,
+which only works because `install.sh` grants `org.freedesktop.Flatpak` to Zen. That
+grant is real sandbox escape width — Zen could run anything as the user through it —
+and it is the price of the button working there. `flatpak override --user
+--no-talk-name=org.freedesktop.Flatpak app.zen_browser.zen` takes it back, and the
+button then reports that it could not start the app.
+
 ## Passkeys
 
 A passkey is stored like the rest of the box: the private key, the credential id and
@@ -354,7 +367,7 @@ updated by one.
   only after the user adds a repo. It asks GitHub for `private` before every
   write, so a repo made public after it was picked is refused on the next push.
 - The token is a credential: it is `Zeroizing`, and the system credential store
-  keeps it only while the user leaves that on.
+  keeps it and its refresh token only while the user leaves that on.
 - A commit subject is plaintext in the repo, so it is one fixed line and never a
   name, a count or which record moved.
 
@@ -369,6 +382,13 @@ updated by one.
   is for, and no password rides on a listing.
 - Refusing a box that is not v4, or a copy older than the one on screen
   (`store::ROLLED_BACK`) — that is the guard working.
+- A box file written to be expensive to open. Its KDF parameters sit in the
+  plaintext header and are bounded there, before anything is derived: at most four
+  times what this app writes (256 MiB, 12 passes, 16 lanes), and a combination
+  Argon2 itself rejects is a parameter error rather than a derivation. The ceiling
+  is what stops a header from asking for gigabytes; the cost that remains — a few
+  seconds and a quarter gigabyte per attempt, on a file you chose to open — is a
+  refusal you can see, not an attack the app can prevent for you.
 - The user's own lost keyfile or forgotten password. There is no recovery path, and
   that is the design.
 

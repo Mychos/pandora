@@ -186,7 +186,8 @@ export SSH_AUTH_SOCK="$HOME/Library/Application Support/pandora/agent.sock"
   provider's stamp and merged when both sides moved. Any folder will do — see
   [Folder mirror](#folder-mirror).
 - **Browser extension.** Chrome and Firefox, filling logins and codes through a
-  native host. It never reads the vault and never runs the crypto.
+  native host. It never reads the vault and never runs the crypto. With the app shut
+  it starts it and waits, so the browser is where the click happens.
 - **Autofill on Android.** The phone's own fill panel, in any app whose login form
   is a WebView: the entries claiming the page, one row each, and the codes for a
   field that asks for one. It reads the box open in the app and nothing else.
@@ -240,7 +241,8 @@ phone's fill panel ──▶ the app's copy of the open box (no socket, no secon
 
 The app holds the key while a box is unlocked. The browser asks a small native host,
 which relays to the app — or opens the box itself, if you allowed that in Settings →
-Browser. Android's fill panel cannot do that: it may be started with no activity at
+Browser. With the app closed the host starts it and the panel waits for a box, so the
+click never has to be spent twice. Android's fill panel cannot do that: it may be started with no activity at
 all, so the app leaves it a copy of the open box instead, dropped the moment the box
 locks.
 
@@ -361,6 +363,7 @@ to `/build/...` by `scripts/appimage.sh`.
 | `PANDORA_X11=1` | Force winit's X11 backend on Linux, which is what brings back drag-and-drop. |
 | `PANDORA_DATA_DIR` | Data directory for the native host. Used by the flatpak browser install; the app itself always uses the platform's own. |
 | `PANDORA_BRIDGE_SOCKET` | Override the bridge socket path (`$XDG_RUNTIME_DIR/pandora/bridge.sock` by default). |
+| `PANDORA_APP` | The app the native host starts when a browser asks and nothing is listening. Without it the host looks next to its own binary and then on `PATH`; the flatpak install sets it to a host-side path, because the sandbox has no filesystem in common with the app. |
 | `PANDORA_GITHUB_CLIENT_ID` | Build-time OAuth client id for the GitHub mirror. Without it, sign-in is refused. |
 
 ## Development

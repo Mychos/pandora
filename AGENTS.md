@@ -205,7 +205,12 @@ re-keyed on the first read and written back. `recent.json` does keep the path �
 list is the way back into a box — but nothing else: what a row is called is the file's
 name, never the box's (`Recent::label`). The working copies live in
 `sources/<digest>/`, not `sources/<kind>/<owner>/<repo>/`, and the folder an older build
-left there is moved over once.
+left there is moved over once. A copy outlives the source that made it: the digest is
+matched against the private repos an answer lists, and a folder nobody follows any more
+is readopted into `sources` — unless the user stopped that repo, which `Prefs::stopped`
+remembers so the same copy is never taken back twice. The account's own repo list is
+asked for on its own, once a run, while such a folder is on disk: the picker is what
+the user opens to add a repo, never what names a copy.
 
 **One pane per shape of record.** The strip holds `Passwords` (`features/entries`, a
 login), `Files` (`features/drive`, a note or a document), `Codes` (`features/codes`, a
@@ -274,14 +279,15 @@ and will not offer it, and `sync::put` asks GitHub for `private` before it write
 a repo made public after it was picked is refused on the next push.
 `features/sync/github.rs` is the whole network surface: no git, just the Contents
 API moving one opaque encrypted blob. The OAuth device flow mints a session (`repo
-read:org`, never `offline_access`: the eight-hour token that asks for is renewed with
-the app's client secret, and a build that ships its client id has none — the token it
-gets without it does not expire), and the client id is build-time (`PANDORA_GITHUB_CLIENT_ID`,
+read:org`), and the client id is build-time (`PANDORA_GITHUB_CLIENT_ID`,
 `.cargo/config.toml`, not the repo); without it sign-in is refused as an unconfigured
 build. A token is a credential: it is `Zeroizing`, and the system credential store
-keeps it by default (`Prefs::remember`); turning that off takes it back out. Nothing
-renews a token, because the one GitHub mints here does not run out; a 401 means the
-session is gone, so the token is dropped and the sign-in is asked for again.
+keeps it by default (`Prefs::remember`); turning that off takes it back out. A
+session GitHub gives a refresh token comes back with one and is renewed on a worker
+thread before it runs out — a device-flow token renews with the client id alone, no
+client secret — and the pair is what the store keeps, so a restart renews instead of
+asking again. A token minted without an expiry has nothing to renew: a 401 on that
+one means the session is gone, and the sign-in is asked for again.
 
 **The sign-in opens its own page.** The frame that lands the code copies it and hands
 GitHub's address — `verification_uri_complete` when GitHub sends one, so the code is
@@ -361,6 +367,16 @@ password field, by construction). `host/` is a driver like `app`: it composes `v
 `vault.logins` and nothing else: `serve::entries`, `serve::matches` and `serve::reveal`,
 plus the host's own create/update, never look at a note or a code.
 
+**Any open box, not just the one on screen.** The app answers the browser from the box
+it has open, and it may have several: `ListBoxes` names them (`Boxes::open`, the one on
+screen first, a parked tab still knowing its own name) and `Select` says which one to
+read from, kept in `Bridge::picked`. A pick whose tab closed falls back to the box on
+screen, so a request is never answered by a box the panel does not name. A page's
+listing (`Entries`, `Match`) is not one box's: `Boxes::scan` decrypts every parked tab
+for the look and parks it again, and each `Candidate` carries `box_path`/`box_name`, so
+the panel can say which box a row came from and hand the path back with `reveal` or
+`update`. The host never has more than one, so it sends neither.
+
 **Matching** is `vault/matching.rs`, shared by `host/` and the passwords pane. `parse`
 reduces any host or URL to a `Site` (canonical host + registrable domain via the Public
 Suffix List, IDN folded to punycode). Each of an entry's URLs carries a `Rule`: `Domain`
@@ -390,17 +406,25 @@ mount and never saw this.
 The browser names the caller: Chromium puts the extension origin in the host's `argv[1]`,
 Firefox the add-on id in `argv[2]`, and the host passes it along as `caller` because the
 app cannot see the browser's process table. A caller the user has not approved waits on a
-modal, remembered in `Prefs::browsers`, and gives up after 30 s. Two requests never leave
-the host — `list_boxes` and `unlock`, because opening a box is the window's job — and
-`Prefs::unlock_from_browser`, off by default, is the only thing that lets a browser do it
-at all. Reads are answered by `bridge::serve`, shared by both peers; writes change the
+modal, remembered in `Prefs::browsers`, and gives up after 30 s. Three requests never
+leave the host — `list_boxes` and `unlock`, because opening a box is the window's job,
+and `launch`, which is only `host::launch` starting the app when nothing is listening so
+the panel that asked can wait on `status` instead of sending the user to another window
+and making them click again. `Prefs::unlock_from_browser`, off by default, is the only
+thing that lets a browser open a box itself. Reads are answered by `bridge::serve`, shared by both peers; writes change the
 app's live session and mark it dirty, so **the app is the only writer** and there is no
 mtime conflict to detect. The channel is protected by being user-private — the socket
 by its mode and directory, the pipe by `PIPE_REJECT_REMOTE_CLIENTS` and the creator's
 DACL — not by the modal: same-user malware can claim any caller id, exactly as it can
 against KeePassXC.
-With no app listening the host is on its own again, which is what `tests/native_host.rs`
-pins down.
+With no app listening the host starts one (`host/launch.rs`: `PANDORA_APP`, then the
+binary next to its own, then `PATH`) and answers nothing else, which is what
+`tests/native_host.rs` pins down: the extension's `status` stays locked until the user
+opens a box in the window that just came up. Inside a flatpak the app is on the other
+side of the sandbox, so that same module goes through `flatpak-spawn --host` — which is
+why the Zen override carries `PANDORA_APP` (a host-side path) and the
+`org.freedesktop.Flatpak` talk name, and why that grant is described as what it is in
+`SECURITY.md`.
 
 **Writing.** `Create`, `Update` and `Generate` are the only requests that change
 anything. They are unlocked-only, they name fields rather than a path, and they write
@@ -526,9 +550,18 @@ an encrypted manifest at the end. Only v4 opens; an older container is refused.
   form offers the keyfile field every time.
 - Argon2id (64 MiB / 3 / 4) takes seconds: derive on the worker thread, never the UI
   thread, and show a spinner.
-- Autosave is debounced (900 ms) and skipped while a sync conflict is pending; a save
-  also refuses when the file changed under it. External edits are detected by file mtime,
-  and a different box on disk asks the user instead of replacing the vault.
+- Nothing that only lives in memory may die with the process. A finished change (create,
+  delete, move) is written by the next tick (`mark_now`); anything else, an open editor
+  included, `AUTOSAVE` after its last change — a debounce, so typing writes nothing until
+  it stops and nothing is ever a second old. The editor exception was removed on purpose:
+  an editor open for an hour used to mean an hour with nothing on disk. The exits write
+  too: `on_exit` (`flush_all`) for a closed window, and SIGTERM/SIGINT (`shared::stop`)
+  for a logout or a `kill`, where the frame reads the flag, flushes and only then closes.
+  A write waits for a save already in flight (`Boxes::drain`), because the worker writes
+  the file itself with an older snapshot and would otherwise land last. A save is skipped
+  while a sync conflict is pending, and refuses when the file changed under it: external
+  edits are detected by file mtime, and a different box on disk asks the user instead of
+  replacing the vault. What is left is a `kill -9` or a power cut inside one debounce.
 
 ## Secrets
 
@@ -604,8 +637,8 @@ thing that should come back out of a log or a panel.
   picker keeps its own bands, capped by `available_height`. A **dialog does not
   scroll**: one taller than `chrome::body` is clipped, so its content stays under a
   380x520 window or gets a band of its own.
-- New user-facing text goes through `shared::i18n` (`t`, `tf`); the English and Spanish
-  catalogs must share a key set, which a test enforces.
+- New user-facing text goes through `shared::i18n` (`t`, `tf`); every catalog in
+  `Lang::ALL` must share a key set with the English one, which a test enforces.
 - A dialog asks for its width with `theme::width`; `chrome::GAP` is the room the card
   keeps off the window's edge. It rides the content that is asked for, never the
   modal's own area: that area is what the backdrop is painted through.
