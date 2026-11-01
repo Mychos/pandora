@@ -8,8 +8,8 @@
 # Linux is built on 22.04 rather than `ubuntu-latest` on purpose: the AppImage
 # inherits the runner's glibc floor, and 2.35 still opens on Debian 12 and
 # Ubuntu 22.04. Windows is a portable zip, macOS a universal unsigned .dmg and
-# .zip, Android an arm64 release APK signed with the debug key (see
-# android/app/build.gradle).
+# .zip, Android an arm64 release APK signed with the release key, which a tag
+# without is refused for (see `android/app/build.gradle` and the keystore step).
 name: release
 
 on:
