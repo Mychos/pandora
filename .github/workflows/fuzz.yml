@@ -1,0 +1,83 @@
+# The parsers that take bytes from a stranger: the box's base64, the CSV reader, the
+# three importers, and the share format. On a schedule, not on every push: a minute
+# per target is only worth it when the inputs it found are still there next time, and
+# the corpus is what carries them from one run to the next.
+#
+# A failure here is a finding, so the job is red and its inputs are attached. The
+# compiler it runs on is pinned in `fuzz/rust-toolchain.toml`, the same way the crate
+# pins its own: a bug in a nightly then reads as one, not as a flake.
+name: fuzz
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Time per target, in seconds."
+        required: false
+        default: "120"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  FUZZ_SECONDS: ${{ github.event.inputs.seconds || '120' }}
+
+jobs:
+  parsers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # Fuzzing needs nightly and `libfuzzer-sys` wants a C++ toolchain. The same
+      # version `fuzz/rust-toolchain.toml` pins, named here because the toolchain is
+      # installed before anything enters that directory.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: nightly-2026-10-21
+      - uses: taiki-e/install-action@cargo-fuzz
+      # The prebuilt binary is what usually lands; a run where the installer found
+      # nothing to place leaves the subcommand missing, so it is built as a fallback.
+      - name: cargo-fuzz
+        run: cargo fuzz --version || cargo install cargo-fuzz --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      # The box crate links ALSA and the windowing backends even under a fuzzer.
+      - name: system libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libxkbcommon-dev
+      # What every earlier run found. A miss is a first run and costs nothing.
+      - name: inputs
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: fuzz every parser
+        working-directory: fuzz
+        run: |
+          for target in codec csv import share; do
+            cargo fuzz run "$target" -- -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=4096
+          done
+      # The corpus is small and the cache step above saves it on the way out; an
+      # artifact keeps the inputs of a red run even when the cache does not land.
+      - name: the inputs of this run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus
+          path: fuzz/corpus
+          if-no-files-found: ignore
+      - name: keep what it found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

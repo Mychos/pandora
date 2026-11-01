@@ -1,4 +1,7 @@
-# Fuzzing needs nightly: `libfuzzer-sys` and `-Z sanitizer` are not on stable.
+# Fuzzing needs nightly: `libfuzzer-sys` and `-Z sanitizer` are not on stable. Pinned,
+# like the root `rust-toolchain.toml`, so a local run and the scheduled one compile with
+# the same compiler — and a nightly that mis-compiles a dependency reads as a toolchain
+# bug instead of a flake.
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-10-21"
 profile = "minimal"
