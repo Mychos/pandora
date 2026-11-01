@@ -15,11 +15,24 @@ pub fn challenge(box_id: &str) -> Vec<u8> {
     Sha256::digest(box_id.as_bytes()).to_vec()
 }
 
+/// Whether this host can talk USB at all, asked once. The crate's `Yubico::new` unwraps
+/// its context, and a container or a runner with no usbfs panics instead of answering —
+/// which, asked by a frame that draws the settings page, would take the frame with it.
+/// A host without USB is a host without a key, and the answer does not change.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn usb() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| std::panic::catch_unwind(yubikey_hmac_otp::Yubico::new).is_ok())
+}
+
 /// Whether a key is plugged in. Looks at the bus and never waits for a touch, so it is
 /// safe to ask on a frame.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn present() -> bool {
     use yubikey_hmac_otp::Yubico;
+    if !usb() {
+        return false;
+    }
     Yubico::new()
         .find_all_yubikeys()
         .map(|keys| !keys.is_empty())
@@ -38,6 +51,9 @@ pub fn respond(challenge: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
     use yubikey_hmac_otp::config::{Config, Mode, Slot};
     use yubikey_hmac_otp::Yubico;
 
+    if !usb() {
+        return Err("this host cannot reach a USB key".to_owned());
+    }
     let mut yubico = Yubico::new();
     let key = yubico
         .find_yubikey()
