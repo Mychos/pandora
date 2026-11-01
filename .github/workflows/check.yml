@@ -51,9 +51,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: "1.99.0"
+      # `rustup` itself, not the action: this runner handed that one an empty
+      # `toolchain` input whatever the workflow said. `rust-toolchain.toml` already
+      # pins the version the step installs.
+      - name: rust
+        shell: bash
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --no-self-update
+          rustup default 1.99.0
       - uses: Swatinem/rust-cache@v2
       - name: typecheck every target
         run: cargo check --all-targets
