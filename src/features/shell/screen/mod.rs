@@ -154,7 +154,7 @@ fn tabs(ui: &mut Ui, app: &mut App) {
                     (Tab::Passwords, theme::Icon::Key, "Passwords"),
                     (Tab::Drive, theme::Icon::Folder, "Files"),
                     (Tab::Codes, theme::Icon::RefreshCw, "Codes"),
-                    (Tab::Health, theme::Icon::History, "Review"),
+                    (Tab::Health, theme::Icon::ShieldAlert, "Review"),
                 ] {
                     if tab(ui, &app.icons, icon, label, want == pane) {
                         picked = pane;

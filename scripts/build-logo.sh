@@ -17,9 +17,15 @@ trap 'rm -rf "$tmp"' EXIT
 accent='#00a650'
 
 # Paint every path white: the root fill covers unpainted paths, the explicit
-# replacements cover sources that spell the colour out.
+# replacements cover sources that spell the colour out. The editor's own cruft goes
+# with it: a source saved by Inkscape carries prefixed attributes whose namespace
+# declaration lives on the root tag, and the tile reuses the paths without it.
 sed -z \
+    -e 's|<?xml[^>]*>||' \
     -e 's|<svg|<svg fill="#ffffff"|' \
+    -e 's|<sodipodi:namedview[^>]*>||' \
+    -e 's| sodipodi:[a-z-]*="[^"]*"||g' \
+    -e 's| inkscape:[a-z-]*="[^"]*"||g' \
     -e 's|stroke="currentColor"|stroke="#ffffff"|g' \
     -e 's|stroke:currentColor|stroke:#ffffff|g' \
     -e 's|fill="currentColor"|fill="#ffffff"|g' \
