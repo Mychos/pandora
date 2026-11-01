@@ -1257,6 +1257,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
+name = "data-encoding"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
+
+[[package]]
 name = "der"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2788,6 +2794,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "minisign-verify"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871285dc19d8d0ebe0eef3d0e99a205f2a71363b122632cbbfa4a6c370a960ce"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3468,7 +3480,7 @@ dependencies = [
 
 [[package]]
 name = "pandora"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "android-activity",
  "android_logger",
@@ -3478,6 +3490,7 @@ dependencies = [
  "blake2",
  "chacha20poly1305",
  "ciborium",
+ "data-encoding",
  "dirs",
  "ed25519-dalek",
  "eframe",
@@ -3490,10 +3503,13 @@ dependencies = [
  "keyring",
  "libc",
  "log",
+ "minisign-verify",
+ "objc2-app-kit 0.3.2",
  "p256",
  "percent-encoding",
  "psl2",
  "quick-xml",
+ "raw-window-handle",
  "rfd",
  "rodio",
  "rxing",
