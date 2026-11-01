@@ -164,14 +164,9 @@ impl App {
                     self.mirror(&source, &path);
                     self.send(false);
                 }
-                self.shell.set_status(
-                    if op.kind == OpKind::Create {
-                        "box created"
-                    } else {
-                        "unlocked"
-                    },
-                    StatusKind::Saved,
-                );
+                if op.kind == OpKind::Create {
+                    self.shell.set_status("box created", StatusKind::Saved);
+                }
             }
             Ok(OpOutcome::PasswordChanged(path, creds, erase_remote)) => {
                 // The vault may have left the screen while the derivation ran: only the file it started on takes the new key.
