@@ -87,6 +87,8 @@ jobs:
       # toolchain for `aws-lc-sys`, which is a minute of CI for nothing.
       - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422
         with:
-          tool: cargo-audit
+          # Named, not `latest`: what this resolves to here cannot read the advisory
+          # database it then loads, and an audit that cannot load is not an audit.
+          tool: cargo-audit@0.22.2
       - name: advisories in the lock file
         run: cargo audit
