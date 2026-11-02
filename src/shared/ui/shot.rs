@@ -25,8 +25,10 @@ pub fn frame(
     out.shapes
 }
 
-/// Run `draw` until egui's fades settle and write the pixels to
-/// `/tmp/opencode/{name}.png`; `held` drags from one point to another across the first frames.
+/// Run `draw` until egui's fades settle and, when `PANDORA_SHOTS` names a folder, write
+/// the pixels to `{folder}/{name}.png`; `held` drags from one point to another across the
+/// first frames. A test that draws a screen is not a test that writes files, so nothing
+/// is written unless somebody asked.
 pub fn png(
     ctx: &egui::Context,
     name: &str,
@@ -61,9 +63,12 @@ pub fn png(
         prims = ctx.tessellate(out.shapes, 1.0);
     }
     let bytes = raster(&prims, &atlas, w as usize, h as usize);
-    // A shot is a look at the frame, never the test's subject: a folder that is
-    // not there, or a disk that will not take it, leaves the assertion alone.
-    let dir = std::path::Path::new("/tmp/opencode");
+    // A look at the frame, never the test's subject: a folder that cannot be written
+    // leaves the assertion alone.
+    let Some(dir) = std::env::var_os("PANDORA_SHOTS") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
     let _ = std::fs::create_dir_all(dir);
     let _ = image::RgbaImage::from_raw(w, h, bytes)
         .expect("the raster is w * h * 4")
