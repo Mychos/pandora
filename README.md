@@ -22,8 +22,8 @@ Native desktop (egui/eframe), same code on Android.
 
 ## Why Pandora
 
-Every other password manager puts your secrets on someone else's computer. Pandora
-does not.
+Almost every other password manager puts your secrets on someone else's computer.
+Pandora does not.
 
 - **Yours.** One file. Uninstall the app and it still opens in the next version.
 - **Offline.** Works unplugged, measures nothing. Three requests exist, all
@@ -39,7 +39,39 @@ does not.
 - **Undo.** Autosave, atomic writes, one backup beside the box, a trash and `Ctrl+Z`.
 
 **Not for teams.** No sharing, roles, admin console or account recovery — there is no
-account. Need those? Use a hosted manager.
+account. Need those? Use a hosted manager — [How it compares](#how-it-compares) says
+which one, and what each of them asks in return.
+
+## How it compares
+
+The table below measures the shape of a manager: where the data lives, whether it
+needs an account, what it can fill, and what it costs. It does not measure how well
+any of them does it — that is taste, and it changes with every release.
+
+| | Pandora | KeePassXC | Bitwarden | 1Password | Proton Pass |
+| --- | --- | --- | --- | --- | --- |
+| Where the vault lives | One `.pandora` file you own | One `.kdbx` file you own | Their servers, or yours | Their servers | Proton's servers |
+| Account and server | None | None | Account, `bitwarden.com` or self-hosted | Account, hosted only | Proton account, hosted only |
+| Sync | Yours: a private repo or any folder | Yours: any file sync | Built in | Built in | Built in |
+| Cost | Free | Free | Free tier, paid plans | Paid only | Free tier, paid plans |
+| Open source | MIT, the whole app | GPL, the whole app | Clients and server, mostly AGPL | Closed | Clients only, not the server |
+| Platforms | Linux, macOS, Windows, Android; no iOS | Linux, macOS, Windows; no iOS | All, iOS included | All, iOS included | All, iOS included |
+| Desktop autofill | Extension, and auto-type for the rest | Extension, and auto-type | Extension | Extension and app | Extension |
+| Android autofill | WebViews only | No app | Native apps and browsers | Native apps and browsers | Native apps and browsers |
+| Passkeys | Chrome 129+ only | Yes, through the browser `~` | Yes | Yes | Yes |
+| TOTP | Yes, in the box | Yes | ~ paid plans | Yes | ~ paid plans |
+| Attachments | Yes, no local ceiling | Yes, in the file | ~ paid plans | ~ paid plans | ~ paid plans |
+| SSH agent | Yes, Unix only | Yes | ~ | Yes | No |
+| Sharing | One sealed file, no collaboration | The file itself | Organisations | Vaults, families, teams | Vault sharing |
+| Import / export | CSV and 1pux in, CSV out | CSV in and out | Many in, JSON or CSV out | 1pux and CSV | Many in, CSV or JSON out |
+| Teams | No | No | Yes | Yes | Yes |
+| External audit | Not audited — [what that leaves open](SECURITY.md) | No public report | Audits published | Audits published | Audits published |
+
+`~` marks a detail that is paid-only or moved recently, so the cell is not a
+promise about this year's plans.
+
+The other columns are each vendor's own documentation and pricing page, read on
+2026-11. A cell older than that date is worth re-reading before acting on it.
 
 ## First questions
 
