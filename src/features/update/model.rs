@@ -4,9 +4,9 @@ use std::sync::mpsc;
 
 /// Where a released Pandora lives. Renaming the repository renames it here, in
 /// `github.rs`, and in the notice the user clicks.
-pub const REPO: &str = "Pandora-Secrets/pandora";
+pub const REPO: &str = "Mychos/pandora";
 
-pub const RELEASES: &str = "https://github.com/Pandora-Secrets/pandora/releases";
+pub const RELEASES: &str = "https://github.com/Mychos/pandora/releases";
 
 /// The build this process is, as `Cargo.toml` writes it.
 pub fn current() -> &'static str {

@@ -322,7 +322,7 @@ mod tests {
         let json = r#"[
             {
                 "tag_name": "v0.1.1",
-                "html_url": "https://github.com/Pandora-Secrets/pandora/releases/tag/v0.1.1",
+                "html_url": "https://github.com/Mychos/pandora/releases/tag/v0.1.1",
                 "draft": false,
                 "prerelease": false,
                 "assets": [
@@ -338,7 +338,7 @@ mod tests {
             },
             {
                 "tag_name": "v0.2.0",
-                "html_url": "https://github.com/Pandora-Secrets/pandora/releases/tag/v0.2.0",
+                "html_url": "https://github.com/Mychos/pandora/releases/tag/v0.2.0",
                 "draft": true,
                 "prerelease": false,
                 "assets": []
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(newest.tag_name, "v0.1.1");
         assert_eq!(
             newest.html_url,
-            "https://github.com/Pandora-Secrets/pandora/releases/tag/v0.1.1"
+            "https://github.com/Mychos/pandora/releases/tag/v0.1.1"
         );
         assert_eq!(newest.assets.len(), 2);
         assert_eq!(
