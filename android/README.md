@@ -70,29 +70,48 @@ assumes arm64.
 ## The release keystore
 
 Android installs an APK as an update only when it carries the same signing key as
-the copy already there. That key is `android/pandora-release.jks`: one file, and
-whoever holds it can sign an APK every existing user will accept as an update. It
-is not in the repository (`.gitignore` keeps `android/*.jks` out), and it must
-not be.
+the copy already there. That key is one file, and whoever holds it can sign an APK
+every existing user will accept as an update. It lives outside the repository, in
+the user's own directory, and the checkout only points at it:
 
 ```bash
-keytool -genkeypair -keystore android/pandora-release.jks -storetype PKCS12 \
-    -alias pandora -keyalg RSA -keysize 4096 -validity 10000 \
-    -dname "CN=Pandora, O=Pandora-Secrets, C=ES"
+mkdir -p ~/.local/share/pandora-android-signing
+keytool -genkeypair \
+    -keystore ~/.local/share/pandora-android-signing/pandora-release.jks \
+    -storetype PKCS12 -alias pandora -keyalg RSA -keysize 4096 -validity 10000 \
+    -dname "CN=Pandora, O=Mychos, C=ES"
 ```
 
-A release reads it from four repository secrets, and `release.yml` fails in
-`meta` — before anything builds — when a tag run is missing one:
+Outside the tree on purpose: `git clean -xdf` deletes what `.gitignore` protects,
+and this file cannot be regenerated. The password is random, kept beside it in a
+`credentials.env` only its owner can read, and backed up with the file — losing
+both means every user uninstalls once.
+
+A local build finds it through `android/keystore.properties` (gitignored, so a
+password never rides in the environment of a shell):
+
+```properties
+storeFile=/home/you/.local/share/pandora-android-signing/pandora-release.jks
+storePassword=…
+keyAlias=pandora
+keyPassword=…
+```
+
+The `PANDORA_*` variables win over that file, which is what makes CI and a laptop
+sign with the same fingerprint. A release reads the key from four repository
+secrets, and `release.yml` fails in `meta` — before anything builds — when a tag
+run is missing one:
 
 | Secret | What it is |
 | --- | --- |
-| `PANDORA_KEYSTORE_BASE64` | the whole file, `base64 -w0 android/pandora-release.jks` |
+| `PANDORA_KEYSTORE_BASE64` | the whole file, `base64 -w0 ~/.local/share/pandora-android-signing/pandora-release.jks` |
 | `PANDORA_KEYSTORE_PASSWORD` | the store's password |
 | `PANDORA_KEY_ALIAS` | `pandora` |
 | `PANDORA_KEY_PASSWORD` | the same string: PKCS12 keeps no second password |
 
-The `android` job decodes the file, proves the bytes and the password open
-together with `keytool -list`, and only then exports the path to Gradle.
+The `android` job decodes the file into `$RUNNER_TEMP` (never into the
+checkout), proves the bytes and the password open together with `keytool -list`,
+and only then exports the path to Gradle.
 
 With none of them set, `app/build.gradle` falls back to the debug key, so a local
 build — and `scripts/android-apk.sh` on a machine that has no keystore — still
