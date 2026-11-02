@@ -49,10 +49,11 @@ cargo audit
 
 # The parsers that take bytes from a stranger. Nightly, with a C++ toolchain:
 # `libfuzzer-sys` and the sanitizer are not on stable, and `fuzz/rust-toolchain.toml`
-# pins which one. One target at a time. This is never a push gate:
+# pins which one. One target at a time. This is never a gate:
 # `.github/workflows/nightly.yml` runs the same loop on a schedule, carrying the corpus
 # from one run to the next, which is the only thing that makes a minute per target
-# worth it.
+# worth it. `check.yml` is the same bargain: a pull request, a tag, or the daily run,
+# never a push to a branch.
 cd fuzz
 cargo fuzz run codec -- -max_total_time=60
 cargo fuzz run csv   -- -max_total_time=60

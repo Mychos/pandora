@@ -9,14 +9,18 @@
 # still have to be seen by rustc.
 name: check
 
+# Never on a push to a branch: a commit is verified by the daily run below, and a tag
+# is verified before anything ships. A pull request and a hand-run are the two moments
+# somebody is waiting on the answer.
 on:
-  push:
-    branches: [master]
-    # Prose changes nothing this job builds; a markdown commit is not worth a runner.
-    paths-ignore: ["**.md"]
   pull_request:
+  push:
+    tags: ["v*"]
+  schedule:
+    - cron: "40 4 * * *"
+  workflow_dispatch:
 
-# Two pushes in a row are one question, and the answer to the first costs minutes.
+# Two runs of the same ref are one question, and the answer to the first costs minutes.
 concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
