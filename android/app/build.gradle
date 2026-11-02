@@ -12,19 +12,47 @@ def appVersion = "0.0.0"
 def digits = appVersion.tokenize('.').collect { it.toInteger() }
 assert digits.size() == 3, "the app version must be MAJOR.MINOR.PATCH: $appVersion"
 def appCode = digits[0] * 10000 + digits[1] * 100 + digits[2]
+// Android refuses a versionCode of 0, so 0.0.0 — the first release — ships as 1.
+// The name is what a user reads; this number only has to be larger than the last.
+if (appCode == 0) {
+    appCode = 1
+}
 
 // The key every released APK is signed with. It is a secret: `.gitignore` keeps
-// it out of the repository and CI decodes it from one, so a local build has none
-// and the release type below spends the debug key instead.
-def signingPath = System.getenv("PANDORA_KEYSTORE")?.trim()
-def signingFile = signingPath ? file(signingPath) : null
+// it out of the repository and CI decodes it from one. A local build names it in
+// `android/keystore.properties` (gitignored) or through the `PANDORA_*` variables;
+// with neither, the release type below spends the debug key, so a machine with no
+// keystore still installs over `adb`.
+def keyProps = new Properties()
+def keyPropsFile = rootProject.file("keystore.properties")
+if (keyPropsFile.isFile()) {
+    keyPropsFile.withInputStream { keyProps.load(it) }
+}
+
+// The environment wins, so CI says what to use and a stale properties file cannot.
+def keyValue = { String fromEnv, String fromFile ->
+    def value = System.getenv(fromEnv)?.trim()
+    if (value) {
+        return value
+    }
+    def stored = keyProps.getProperty(fromFile)?.trim()
+    return stored ? stored : null
+}
+
+def signingPath = keyValue("PANDORA_KEYSTORE", "storeFile")
+def signingFile = signingPath ? rootProject.file(signingPath) : null
 if (signingFile != null && !signingFile.isFile()) {
-    logger.warn("PANDORA_KEYSTORE is set but ${signingFile} is not a file")
+    logger.warn("${signingPath} is not a file: this APK is signed with the debug key")
     signingFile = null
 }
 if (signingFile == null) {
-    logger.warn("PANDORA_KEYSTORE is not set: this APK is signed with the debug key and cannot replace a released install")
+    logger.warn("no keystore in android/keystore.properties or PANDORA_KEYSTORE: this APK is signed with the debug key and cannot replace a released install")
 }
+// Not `storePassword`/`keyAlias`: inside `signingConfigs` those name the DSL's own
+// methods, and a local variable of the same name is the one that loses.
+def keystorePassword = keyValue("PANDORA_KEYSTORE_PASSWORD", "storePassword")
+def keystoreAlias = keyValue("PANDORA_KEY_ALIAS", "keyAlias") ?: "pandora"
+def keystoreKeyPassword = keyValue("PANDORA_KEY_PASSWORD", "keyPassword") ?: keystorePassword
 
 android {
     // The Java package the Rust side calls into (`dev/pandora/Pandora`),
@@ -52,9 +80,9 @@ android {
                 // PKCS12, the only type `keytool` writes by default: it keeps
                 // nothing in the key password, so both are the store's.
                 storeType "pkcs12"
-                storePassword System.getenv("PANDORA_KEYSTORE_PASSWORD")
-                keyAlias System.getenv("PANDORA_KEY_ALIAS") ?: "pandora"
-                keyPassword System.getenv("PANDORA_KEY_PASSWORD") ?: System.getenv("PANDORA_KEYSTORE_PASSWORD")
+                storePassword keystorePassword
+                keyAlias keystoreAlias
+                keyPassword keystoreKeyPassword
             }
         }
     }

@@ -15,6 +15,9 @@ replay_pid*.log
 /android/local.properties
 
 # The key that signs every APK users install as an update: in the repo, it is
-# the ability to ship them a malicious one.
+# the ability to ship them a malicious one. `keystore.properties` names it for a
+# local build and carries its password, so it is as secret as the file itself.
 /android/*.jks
+/android/*.keystore
 /android/pandora-release.jks
+/android/keystore.properties
