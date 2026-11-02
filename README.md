@@ -127,8 +127,8 @@ through Save. Both are plaintext and both warn you first.
   socket the user turns on in Settings → box → SSH agent.
 - Only the keys marked **allowed** are listed and only they sign; the socket is `0600`
   and answers only while a box is unlocked — locking it empties the agent.
-- Keys are made here. A private key file from another machine is not imported: it has
-  its own format, its own parser and its own policy.
+- A key is made here, or imported from an unencrypted OpenSSH ed25519 private key file
+  on the desktop. An encrypted key file is not imported.
 
 ```sh
 export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR:-$HOME/.local/share/pandora}/pandora-agent.sock"
@@ -179,7 +179,8 @@ export SSH_AUTH_SOCK="$HOME/Library/Application Support/pandora/agent.sock"
   are a document's bytes erased.
 - **Edits written on close**, with a 60 s safety net for the rest; atomic writes, one
   `.bak` beside the box.
-- **CSV import/export**, reading KeePassXC, KeePass and Bitwarden aliases.
+- **CSV import/export**, reading KeePassXC, KeePass and Bitwarden aliases, plus
+  1Password's `.1pux`.
 - **GitHub mirror.** One encrypted blob through the Contents API. Private repos
   only, and one made public later is refused on the next push.
 - **Folder mirror.** One encrypted file written in place, guarded by the
@@ -246,8 +247,9 @@ click never has to be spent twice. Android's fill panel cannot do that: it may b
 all, so the app leaves it a copy of the open box instead, dropped the moment the box
 locks.
 
-A box is a 4 KiB header, 1 MiB encrypted chunks and an encrypted manifest. Only v4
-opens; an older container is refused rather than migrated. Byte layout in
+A box is a 4 KiB header, 1 MiB encrypted chunks and an encrypted manifest. This
+version writes v5; a v4 box still opens and is rewritten as v5 on the next save, and
+an older container is refused rather than migrated. Byte layout in
 [`AGENTS.md`](AGENTS.md#vault-format).
 
 The vault core has no UI and no platform knowledge, so desktop and phone run the same
@@ -389,11 +391,10 @@ Releases — workflow, artifacts, the Android signing key, `act` — are in
 ## Limitations
 
 - iOS is not wired up: the icons exist, the entry point does not.
-- A phone keeps two panes on the floor: review and the SSH agent are reached from a
-  wide window.
+- A phone's floor carries three panes (passwords, files, codes); review is reached
+  from a wide window, and the SSH agent's socket has nothing on a phone to talk to it.
 - Auto-type types into whatever has the focus; it does not check the window's title the
   way KeePassXC does, so a mistimed click types into the wrong window.
-- The SSH agent makes its keys; importing an OpenSSH private key is not implemented.
 - Changing the master password drops the box's other factors — the YubiKey and the
   recovery code — because both are derived from the key being replaced. Re-enrol them
   after a change; the settings page says so.
@@ -406,8 +407,8 @@ Releases — workflow, artifacts, the Android signing key, `act` — are in
 - GitHub caps a blob at 100 MB, so a box with a huge attachment may not fit there;
   the folder mirror has no such ceiling. Local storage has none at all.
 - A keyfile box cannot be opened from the browser.
-- No video preview, no auto-type, no server-side sync, no plugin API.
-- The format is not frozen: v4 is all this version reads and writes, and a future
+- No video preview, no server-side sync, no plugin API.
+- The format is not frozen: this version writes v5 and still opens v4, and a future
   version may add fields (they must be optional).
 - Android packages only `arm64-v8a`.
 

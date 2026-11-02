@@ -47,45 +47,7 @@ master password.
   requests the bridge does not serve get one fixed sentence, because an unknown
   shape can carry a password. On Android there is a second plaintext copy while a
   box is open — what the fill panel reads — and it is dropped when the box locks
-  (`## Auto-type
-
-Auto-type types the login into whatever window has the focus, through `xdotool`,
-`wtype` or `ydotool`. The box is not the boundary here — the session is: a process that
-can type into the focused window can type anywhere, which is why nothing runs unless
-the user presses `Ctrl+T` on a selected login and clicks the field in the two seconds
-that follow. There is no window-title matching: a mistimed click types the password into
-whatever is in front.
-
-## Sealed shares
-
-A share is a bundle encrypted to one recipient — their X25519 public key, or a
-passphrase — and it is exactly the payload an import lands, so it cannot carry anything
-an import could not. The header says who sealed it and when, and it is authenticated by
-the ciphertext's tag: changing the recipient or the moment makes the file refuse to
-open. A passphrase share is sealed with Argon2id, and its strength is the passphrase's.
-
-## The recovery code
-
-A box created or changed by this version can carry one slot in its header: the box's
-own key, encrypted under a 256-bit code the user writes down (base32, so a printer and
-a person can tell an `O` from a `0`). It is not a second password and it is not a
-reset — nothing on this side can recover a box whose code was never made.
-
-- **What the slot is.** The same key the password derives, wrapped with Argon2id over
-  the code and XChaCha20-Poly1305, with the salt, the nonce and the wrapped key in the
-  clear header like the KDF parameters. It says nothing on its own, and it is inside
-  the header's AAD, so it cannot be swapped for another wrapped key.
-- **What it costs.** Anyone holding the box file and the code opens the box. The code
-  is a second key to the same door: keep it away from the file, and treat a photograph
-  of it as a key.
-- **When it goes.** A rekey — a new master password, a new keyfile, enrolling or
-  dropping the YubiKey — drops the slot: what it wraps is the key being replaced. The
-  settings page says so, and a new code is one click after.
-- **v5.** The header grew this slot, which the AAD covers, so the version moved to 5.
-  A v4 box still opens and is written as v5 on the next save; a v5 box is refused by an
-  older build, as every newer box is.
-
-## Autofill on Android`).
+  (`src/shared/autofill/`).
 - **The clipboard.** A copied secret is cleared after a countdown (30 s by
   default; `0` never clears). What is remembered is a BLAKE2 fingerprint of the
   text, not the text, and it is only cleared while reading the clipboard back
@@ -380,8 +342,8 @@ updated by one.
   documents it and offers the delete.
 - The extension seeing a site's entry names, usernames and URLs: that is what it
   is for, and no password rides on a listing.
-- Refusing a box that is not v4, or a copy older than the one on screen
-  (`store::ROLLED_BACK`) — that is the guard working.
+- Refusing a box whose container version this build does not read, or a copy
+  older than the one on screen (`store::ROLLED_BACK`) — that is the guard working.
 - A box file written to be expensive to open. Its KDF parameters sit in the
   plaintext header and are bounded there, before anything is derived: at most four
   times what this app writes (256 MiB, 12 passes, 16 lanes), and a combination
@@ -399,7 +361,7 @@ updated by one.
 | Key derivation | Argon2id, 64 MiB, 3 passes, 4 lanes, 16-byte salt | `vault/crypto.rs` |
 | Keyfile | BLAKE2b-512 of the file, appended to the password before derivation | `vault/crypto.rs` |
 | Encryption | XChaCha20-Poly1305, random 24-byte nonce per chunk and manifest | `vault/crypto.rs`, `vault/store.rs` |
-| Header binding | header as the manifest's AEAD associated data (v4) | `vault/store.rs` |
+| Header binding | header as the manifest's AEAD associated data, version-tagged (`pandora4\|…`, `pandora5\|…`) | `vault/store/header.rs` |
 | Clipboard fingerprint | BLAKE2, never the text | `vault/crypto.rs`, `features/shell/clipboard.rs` |
 | Box key in prefs | 128-bit BLAKE2b digest of the canonical path | `vault/crypto.rs`, `crypto::digest` |
 | Phone seal | platform keystore (Keystore/Keychain) over the derived key | `features/auth/biometric/` |
@@ -409,8 +371,8 @@ well-known one from the RustCrypto crates, chosen for what it is.
 
 ## Supported versions
 
-The project is pre-1.0 and single-track: fixes land on `main`. This version only
-reads and writes v4; an older container is refused rather than migrated. The
+The project is pre-1.0 and single-track: fixes land on `main`. This version reads
+v4 and v5 and writes v5; an older container is refused rather than migrated. The
 format is not frozen yet, so a new persisted field is always optional.
 
 ## Audit checklist (for an external review)

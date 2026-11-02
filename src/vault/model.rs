@@ -183,8 +183,7 @@ pub struct SshKey {
 }
 
 impl SshKey {
-    /// A fresh Ed25519 key, made here and never imported: a private key file from the
-    /// outside is its own parser and its own policy, and this box can make its own.
+    /// A fresh Ed25519 key generated here — the seed is new, and nothing is read from disk.
     pub fn make(now: u64, name: &str, comment: &str) -> Self {
         let seed = crypto::random_bytes::<32>();
         let signing = ed25519_dalek::SigningKey::from_bytes(&seed);

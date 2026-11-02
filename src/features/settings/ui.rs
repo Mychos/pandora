@@ -522,8 +522,8 @@ fn recovery_card(ui: &mut egui::Ui, app: &mut App) {
 }
 
 /// The SSH agent: the switch, where its socket is, and the keys the user allows. A key
-/// is made here, never imported: a private key file from outside is its own parser and
-/// its own policy, and this box can make its own.
+/// is made here or read from an OpenSSH file the user picks, never through a general
+/// private-key parser: `agent::import_openssh` is the one format this box reads.
 #[cfg(not(unix))]
 fn agent_card(ui: &mut egui::Ui, _app: &mut App) {
     // OpenSSH on Windows listens on a named pipe this build does not speak, so there is
