@@ -648,5 +648,6 @@
   "“{name}” leaves this box sealed": "“{name}” leaves this box sealed",
   "“{name}” will be deleted for good.": "“{name}” will be deleted for good.",
   "“{name}” will be deleted. Its contents move up one level.": "“{name}” will be deleted. Its contents move up one level.",
-  "the session ran out — renewing it": "the session ran out — renewing it"
+  "the session ran out — renewing it": "the session ran out — renewing it",
+  "the SSH agent serves a unix socket, and this platform has none": "the SSH agent serves a unix socket, and this platform has none"
 }

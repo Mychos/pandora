@@ -648,5 +648,6 @@
   "“{name}” leaves this box sealed": "« {name} » quitte ce coffre scellé",
   "“{name}” will be deleted for good.": "« {name} » sera définitivement supprimé.",
   "“{name}” will be deleted. Its contents move up one level.": "« {name} » sera supprimé. Son contenu remonte d'un niveau.",
-  "the session ran out — renewing it": "la session a expiré — renouvellement"
+  "the session ran out — renewing it": "la session a expiré — renouvellement",
+  "the SSH agent serves a unix socket, and this platform has none": "l'agent SSH sert une socket unix, et cette plateforme n'en a pas"
 }

@@ -650,5 +650,6 @@
   "“{name}” leaves this box sealed": "«{name}» sale de esta caja sellado",
   "“{name}” will be deleted for good.": "Se eliminará “{name}” definitivamente.",
   "“{name}” will be deleted. Its contents move up one level.": "Se eliminará “{name}”. Su contenido subirá un nivel.",
-  "the session ran out — renewing it": "la sesión ha caducado — renovándola"
+  "the session ran out — renewing it": "la sesión ha caducado — renovándola",
+  "the SSH agent serves a unix socket, and this platform has none": "el agente SSH sirve un socket unix, y esta plataforma no tiene ninguno"
 }
