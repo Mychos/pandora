@@ -3,6 +3,7 @@ pub mod autofill;
 pub mod capture;
 pub mod i18n;
 pub mod idle;
+pub mod socket;
 #[cfg(unix)]
 pub mod stop;
 pub mod theme;
