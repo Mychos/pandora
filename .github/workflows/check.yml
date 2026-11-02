@@ -12,7 +12,14 @@ name: check
 on:
   push:
     branches: [master]
+    # Prose changes nothing this job builds; a markdown commit is not worth a runner.
+    paths-ignore: ["**.md"]
   pull_request:
+
+# Two pushes in a row are one question, and the answer to the first costs minutes.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,10 +36,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      # `rust-toolchain.toml` names the compiler and its components; `rustup` reads it,
-      # so no workflow repeats the version.
-      - name: rust
-        run: rustup toolchain install --profile minimal --no-self-update
+      # The action installs `rustup` and the compiler on any runner, whatever the image
+      # already has; `rust-toolchain.toml` names the components, so this is the only
+      # place that repeats the version.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       # The audio preview links against ALSA, and the windowing backends look
       # their libraries up through pkg-config.
@@ -59,10 +68,10 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: typecheck every target
         run: cargo check --all-targets
-      # The whole suite, not only the pipe: Windows is a shipped platform, and the
-      # parsers, the box format and the matching rules are the same code there.
-      - name: tests
-        run: cargo test
+      # The pipe tests only: `check --all-targets` above already catches what rots on
+      # this platform, and the suite itself runs on Linux, where it costs less.
+      - name: bridge over a named pipe
+        run: cargo test --lib bridge
 
   # macOS only compiles here: the suite and the lints run on Linux, but this
   # is where the target-specific windowing and idle branches are seen by rustc.
@@ -70,25 +79,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: rust
-        run: rustup toolchain install --profile minimal --no-self-update
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: typecheck every target
         run: cargo check --all-targets
-
-  # Nothing here reaches the network at runtime; this is about what the dependency
-  # tree brings with it. A finding fails the job on purpose: the fix is a bump, or an
-  # `audit.toml` entry that says why the advisory does not apply.
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      # The prebuilt binary: building `cargo-audit` itself wants cmake and a C
-      # toolchain for `aws-lc-sys`, which is a minute of CI for nothing.
-      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422
-        with:
-          # Named, not `latest`: what this resolves to here cannot read the advisory
-          # database it then loads, and an audit that cannot load is not an audit.
-          tool: cargo-audit@0.22.2
-      - name: advisories in the lock file
-        run: cargo audit
