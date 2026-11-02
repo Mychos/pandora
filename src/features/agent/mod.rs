@@ -438,13 +438,6 @@ fn write_message(stream: &mut Stream, body: &[u8]) -> std::io::Result<()> {
     stream.flush()
 }
 
-/// A key's seed leaves memory when the snapshot does; this is the one place a test
-/// reads it.
-#[cfg(test)]
-fn seed_of(key: &SshKey) -> Vec<u8> {
-    key.private.to_vec()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,7 +553,7 @@ mod tests {
         assert!(public_line(&key).ends_with(" ana@example"));
         let seed = crate::vault::codec::display(key.private.as_slice()).to_string();
         assert!(!format!("{key:?}").contains(&seed), "the seed stays hidden");
-        assert_eq!(seed_of(&key).len(), 32);
+        assert_eq!(key.private.len(), 32, "the seed is one ed25519 scalar");
     }
 
     /// An unencrypted OpenSSH ed25519 key imports into a key the agent can serve,

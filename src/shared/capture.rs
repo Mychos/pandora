@@ -62,13 +62,12 @@ fn macos(handle: Option<&RawWindowHandle>, allow: bool) {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(any(target_os = "windows", target_os = "macos"))))]
 mod tests {
     use super::*;
 
     /// A system without the API says so instead of promising a window nobody can
     /// capture, and applying it is not an error either.
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn a_system_without_the_api_says_so() {
         assert!(!supported());
