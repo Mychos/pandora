@@ -225,14 +225,16 @@ mod windows {
 
     pub struct Stream {
         handle: HANDLE,
-        timeout: Mutex<Option<Duration>>,
+        read_timeout: Mutex<Option<Duration>>,
+        write_timeout: Mutex<Option<Duration>>,
     }
 
     impl Stream {
         fn new(handle: HANDLE) -> Self {
             Self {
                 handle,
-                timeout: Mutex::new(None),
+                read_timeout: Mutex::new(None),
+                write_timeout: Mutex::new(None),
             }
         }
 
@@ -276,7 +278,7 @@ mod windows {
 
     impl Read for Stream {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let timeout = *self.timeout.lock().expect("timeout lock");
+            let timeout = *self.read_timeout.lock().expect("timeout lock");
             match self.begin(buf.as_mut_ptr(), buf.len(), false, timeout) {
                 Ok(n) => Ok(n),
                 // The other end hung up: `read_exact` turns this into the UnexpectedEof.
@@ -290,7 +292,8 @@ mod windows {
 
     impl Write for Stream {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.begin(buf.as_ptr().cast_mut(), buf.len(), true, None)
+            let timeout = *self.write_timeout.lock().expect("timeout lock");
+            self.begin(buf.as_ptr().cast_mut(), buf.len(), true, timeout)
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -300,7 +303,12 @@ mod windows {
 
     impl Stream {
         pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-            *self.timeout.lock().expect("timeout lock") = timeout;
+            *self.read_timeout.lock().expect("timeout lock") = timeout;
+            Ok(())
+        }
+
+        pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+            *self.write_timeout.lock().expect("timeout lock") = timeout;
             Ok(())
         }
     }
