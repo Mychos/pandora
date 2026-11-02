@@ -10,6 +10,9 @@
 # Ubuntu 22.04. Windows is a portable zip, macOS a universal unsigned .dmg and
 # .zip, Android an arm64 release APK signed with the release key, which a tag
 # without is refused for (see `android/app/build.gradle` and the keystore step).
+# A tag is also refused for a repository the updater does not ask
+# (`src/features/update/model.rs`, `REPO`): an app finds its releases in exactly
+# one place, and one published anywhere else is a download nobody looks for.
 name: release
 
 on:
@@ -56,6 +59,8 @@ jobs:
           PANDORA_KEYSTORE_PASSWORD: ${{ secrets.PANDORA_KEYSTORE_PASSWORD }}
           PANDORA_KEY_ALIAS: ${{ secrets.PANDORA_KEY_ALIAS }}
           PANDORA_KEY_PASSWORD: ${{ secrets.PANDORA_KEY_PASSWORD }}
+          PANDORA_MINISIGN_PUBLIC_KEY: ${{ vars.PANDORA_MINISIGN_PUBLIC_KEY }}
+          PANDORA_MINISIGN_SECRET_KEY: ${{ secrets.PANDORA_MINISIGN_SECRET_KEY }}
         run: |
           set -euo pipefail
 
@@ -82,6 +87,16 @@ jobs:
             exit 1
           fi
 
+          # The updater asks GitHub for one repository, and it is the constant below.
+          # A tag published anywhere else is a download no build will ever find, so the
+          # run stops here instead of after every platform has built.
+          updater=$(sed -n 's/^pub const REPO: &str = "\(.*\)";/\1/p' src/features/update/model.rs | head -1)
+          test -n "$updater"
+          if [ -n "$REQUESTED_TAG" ] && [ "$GITHUB_REPOSITORY" != "$updater" ]; then
+            echo "::error::releasing $REQUESTED_TAG from $GITHUB_REPOSITORY publishes where no build looks: the updater asks $updater" >&2
+            exit 1
+          fi
+
           # A published release is the only one worth the keys, and the APK is
           # signed with them or not at all: checked here, where it costs five
           # minutes, instead of after the build that would have to be thrown away.
@@ -93,6 +108,14 @@ jobs:
             done
             if [ -n "$missing" ]; then
               echo "::error::releasing $REQUESTED_TAG needs the Android signing key as repository secrets, and these are missing:$missing" >&2
+              exit 1
+            fi
+
+            # A published build carries `PANDORA_MINISIGN_PUBLIC_KEY` and refuses a
+            # release whose SHA256SUMS is unsigned: without the secret, every one of
+            # them would decline the download this run is about to publish.
+            if [ -n "${PANDORA_MINISIGN_PUBLIC_KEY:-}" ] && [ -z "${PANDORA_MINISIGN_SECRET_KEY:-}" ]; then
+              echo "::error::releasing $REQUESTED_TAG needs PANDORA_MINISIGN_SECRET_KEY: the builds carry PANDORA_MINISIGN_PUBLIC_KEY and refuse an unsigned SHA256SUMS" >&2
               exit 1
             fi
           fi

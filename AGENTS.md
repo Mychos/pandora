@@ -114,6 +114,17 @@ only builds artifacts; with it, it publishes that tag. The version comes from
 `Cargo.toml`, and the workflow refuses a tag or Android `appVersion` that
 disagrees.
 
+Two more refusals, both in `meta`, before anything is built:
+
+- **The repository.** A release is published in `update::model::REPO` and nowhere
+  else. Every build asks that one repository for a newer version, so a tag pushed
+  to a fork is a download nobody's app will ever look for; `meta` reads the
+  constant and stops the run when `GITHUB_REPOSITORY` is something else.
+- **The signature.** A build carrying `PANDORA_MINISIGN_PUBLIC_KEY` refuses a
+  release whose `SHA256SUMS` is unsigned, so a tag needs
+  `PANDORA_MINISIGN_SECRET_KEY` whenever that variable is set. The alternative is
+  publishing a download every properly built app declines.
+
 To cut a release, bump `version` in `Cargo.toml` and `appVersion` in
 `android/app/build.gradle` (its `versionCode` is derived from that name, so it is
 not a second thing to remember), commit, and push the tag:
