@@ -15,14 +15,15 @@ pub fn challenge(box_id: &str) -> Vec<u8> {
     Sha256::digest(box_id.as_bytes()).to_vec()
 }
 
-/// Whether this host can talk USB at all, asked once. The crate's `Yubico::new` unwraps
-/// its context, and a container or a runner with no usbfs panics instead of answering —
-/// which, asked by a frame that draws the settings page, would take the frame with it.
-/// A host without USB is a host without a key, and the answer does not change.
+/// Whether this host can talk USB at all, asked once. The crate that owns the key opens
+/// its context with an `unwrap`, so a container or a runner without usbfs panics rather
+/// than answering; asking rusb the same question first is what keeps that a "no key"
+/// instead of a frame that dies mid-settings. Whether the host has usbfs does not change
+/// while the process runs, so the answer is remembered.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn usb() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(|| std::panic::catch_unwind(yubikey_hmac_otp::Yubico::new).is_ok())
+    *AVAILABLE.get_or_init(|| rusb::Context::new().is_ok())
 }
 
 /// Whether a key is plugged in. Looks at the bus and never waits for a touch, so it is
@@ -30,13 +31,23 @@ fn usb() -> bool {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn present() -> bool {
     use yubikey_hmac_otp::Yubico;
-    if !usb() {
-        return false;
+    /// A frame that draws the settings page asks here, and walking the bus per frame is
+    /// not something a window can do: a plugged key is still noticed a moment later.
+    const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, bool)>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().expect("yubikey cache");
+    if let Some((at, present)) = *last {
+        if at.elapsed() < TTL {
+            return present;
+        }
     }
-    Yubico::new()
-        .find_all_yubikeys()
-        .map(|keys| !keys.is_empty())
-        .unwrap_or(false)
+    let present = usb()
+        && Yubico::new()
+            .find_all_yubikeys()
+            .map(|keys| !keys.is_empty())
+            .unwrap_or(false);
+    *last = Some((std::time::Instant::now(), present));
+    present
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]

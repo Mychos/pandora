@@ -113,9 +113,11 @@ rodio = { version = "0.23", default-features = false, features = [
 ] }
 
 # The YubiKey's HMAC-SHA1 challenge-response, desktop only: it needs USB HID, and a
-# phone does not have a port for one.
+# phone does not have a port for one. `rusb` is asked whether this host has USB at all,
+# because the crate above answers that question with an `unwrap`.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 yubikey-hmac-otp = "0.10"
+rusb = "0.9"
 
 # Desktop only: the native file picker (xdg-desktop-portal on Linux, so no GTK)
 # and the clipboard egui copies through — the app reads it back so the countdown
