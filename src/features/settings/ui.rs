@@ -521,13 +521,13 @@ fn recovery_card(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-/// The SSH agent: the switch, where its socket is, and the keys the user allows. A key
+/// The SSH agent: the switch, where its channel is, and the keys the user allows. A key
 /// is made here or read from an OpenSSH file the user picks, never through a general
 /// private-key parser: `agent::import_openssh` is the one format this box reads.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn agent_card(ui: &mut egui::Ui, _app: &mut App) {
-    // OpenSSH on Windows listens on a named pipe this build does not speak, so there is
-    // nothing for a switch to start. Saying so beats a card that silently is not there.
+    // This platform has no local channel at all, so there is nothing for a switch to
+    // start. Saying so beats a card that silently is not there.
     card(ui, "SSH agent", |ui| {
         theme::hint(
             ui,
@@ -536,7 +536,7 @@ fn agent_card(ui: &mut egui::Ui, _app: &mut App) {
     });
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn agent_card(ui: &mut egui::Ui, app: &mut App) {
     card(ui, "SSH agent", |ui| {
         let mut on = app.prefs.ssh_agent;
@@ -545,7 +545,9 @@ fn agent_card(ui: &mut egui::Ui, app: &mut App) {
             prefs::save(&app.prefs);
         }
         ui.add_space(HINT);
-        let socket = crate::features::agent::socket_path(&app.prefs.ssh_socket);
+        let socket = crate::shared::socket::display(&crate::features::agent::socket_path(
+            &app.prefs.ssh_socket,
+        ));
         theme::hint(
             ui,
             &tf(
@@ -556,7 +558,7 @@ fn agent_card(ui: &mut egui::Ui, app: &mut App) {
         ui.add_space(HINT);
         theme::hint(
             ui,
-            t("only the keys you allow are listed and sign; the socket is 0600 and answers only while a box is unlocked"),
+            t("only the keys you allow are listed and sign; the channel is private and answers only while a box is unlocked"),
         );
         ui.add_space(ACT);
 

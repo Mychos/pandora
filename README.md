@@ -61,7 +61,7 @@ any of them does it — that is taste, and it changes with every release.
 | Passkeys | Chrome 129+ only | Yes, through the browser `~` | Yes | Yes | Yes |
 | TOTP | Yes, in the box | Yes | ~ paid plans | Yes | ~ paid plans |
 | Attachments | Yes, no local ceiling | Yes, in the file | ~ paid plans | ~ paid plans | ~ paid plans |
-| SSH agent | Yes, Unix only | Yes | ~ | Yes | No |
+| SSH agent | Yes, on the three desktops | Yes | ~ | Yes | No |
 | Sharing | One sealed file, no collaboration | The file itself | Organisations | Vaults, families, teams | Vault sharing |
 | Import / export | CSV and 1pux in, CSV out | CSV in and out | Many in, JSON or CSV out | 1pux and CSV | Many in, CSV or JSON out |
 | Teams | No | No | Yes | Yes | Yes |
@@ -155,10 +155,11 @@ through Save. Both are plaintext and both warn you first.
 
 ### Around the box
 
-- Ed25519 keys kept **in the box**, never as files, served to `ssh` and `git` on a Unix
-  socket the user turns on in Settings → box → SSH agent.
-- Only the keys marked **allowed** are listed and only they sign; the socket is `0600`
-  and answers only while a box is unlocked — locking it empties the agent.
+- Ed25519 keys kept **in the box**, never as files, served to `ssh` and `git` on a
+  local channel the user turns on in Settings → box → SSH agent.
+- Only the keys marked **allowed** are listed and only they sign; the channel is
+  user-private — a `0600` socket, a named pipe on Windows — and answers only while a
+  box is unlocked, since locking it empties the agent.
 - A key is made here, or imported from an unencrypted OpenSSH ed25519 private key file
   on the desktop. An encrypted key file is not imported.
 
@@ -201,6 +202,13 @@ On macOS, a launch agent does the same, and `SSH_AUTH_SOCK` goes into the shell 
 ```sh
 launchctl load ~/Library/LaunchAgents/dev.pandora.app.plist
 export SSH_AUTH_SOCK="$HOME/Library/Application Support/pandora/agent.sock"
+```
+
+On Windows the channel is a named pipe, and the settings card prints the exact name to
+point at — the digest is there so two users never share one pipe:
+
+```bat
+set SSH_AUTH_SOCK=\\.\pipe\pandora-agent-<digest>
 ```
 
 ### Around the box

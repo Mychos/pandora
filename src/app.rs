@@ -252,8 +252,8 @@ pub struct App {
     /// The open document preview: the audio player and the rendered PDF page.
     /// Both stop when the entry they belong to is no longer selected.
     pub preview: crate::features::drive::preview::Preview,
-    /// The SSH agent: the box's allowed keys on a socket, empty while locked.
-    #[cfg(unix)]
+    /// The SSH agent: the box's allowed keys on a channel, empty while locked.
+    #[cfg(any(unix, windows))]
     pub agent: crate::features::agent::Agent,
     /// The share dialog: one record sealed out, or one file opened in.
     pub share: crate::features::share::Share,
@@ -362,7 +362,7 @@ impl App {
             generate: GenerateForm::default(),
             preview: crate::features::drive::preview::Preview::default(),
             find: crate::features::find::model::Find::default(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             agent: crate::features::agent::Agent::default(),
             share: crate::features::share::Share::default(),
             health: crate::features::health::Check::default(),
@@ -953,7 +953,7 @@ impl App {
             generate: GenerateForm::default(),
             preview: crate::features::drive::preview::Preview::default(),
             find: crate::features::find::model::Find::default(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             agent: crate::features::agent::Agent::default(),
             share: crate::features::share::Share::default(),
             health: crate::features::health::Check::default(),

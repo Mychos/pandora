@@ -1,27 +1,28 @@
-//! The SSH agent: the box's Ed25519 keys, offered on a Unix socket so `git push` and
+//! The SSH agent: the box's Ed25519 keys, offered on a local channel so `git push` and
 //! `ssh` can use them without the key ever existing as a file.
 //!
 //! Only the keys the user marked `allowed` are listed and only they sign. Nothing is
 //! served while the box is locked: the snapshot the listener reads is emptied when the
 //! session goes, so a request that arrives after a lock is answered with a failure.
 //!
-//! The socket is the whole access control, exactly as it is for `ssh-agent`: it is
-//! created 0600 inside the user's runtime directory, so only processes running as that
-//! user can reach it.
+//! The channel is the whole access control, exactly as it is for `ssh-agent`: it is
+//! user-private by construction — a 0600 socket in the user's runtime directory, a
+//! named pipe whose DACL is the creator's — so only processes running as that user can
+//! reach it.
 
+use crate::shared::socket::{Listener, Stream};
 use crate::vault::model::{SshKey, Vault};
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// Where the socket lives: the runtime dir when the session has one, else beside the
-/// box's own files. A path the user typed wins over both.
+/// box's own files. A path the user typed wins over both. On Windows the path names a
+/// pipe, and [`crate::shared::socket::display`] says which one.
 pub fn socket_path(chosen: &str) -> PathBuf {
     if !chosen.trim().is_empty() {
         return PathBuf::from(chosen.trim());
@@ -81,17 +82,11 @@ impl Agent {
         if self.running() {
             return Ok(());
         }
-        if let Some(dir) = socket.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
-        }
-        let _ = std::fs::remove_file(&socket);
-        let listener =
-            UnixListener::bind(&socket).map_err(|e| format!("cannot bind {socket:?}: {e}"))?;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("cannot protect {socket:?}: {e}"))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| format!("cannot listen: {e}"))?;
+        let Some(listener) =
+            Listener::bind_at(&socket).map_err(|e| format!("cannot bind {socket:?}: {e}"))?
+        else {
+            return Err(format!("another agent already answers on {socket:?}"));
+        };
 
         let keys = self.keys.clone();
         let stop = self.stop.clone();
@@ -99,13 +94,14 @@ impl Agent {
         let path = socket.clone();
         self.thread = Some(std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
+                match listener.accept_timeout(Duration::from_millis(50)) {
+                    Ok(Some(stream)) => {
                         let keys = keys.clone();
                         std::thread::spawn(move || {
                             let _ = serve(stream, &keys);
                         });
                     }
+                    Ok(None) => {}
                     Err(_) => std::thread::sleep(Duration::from_millis(50)),
                 }
             }
@@ -183,7 +179,7 @@ impl Drop for Agent {
 
 /// One connection: requests until the client hangs up. A locked box is a failure, and a
 /// request nobody understands is one too — never a guess.
-fn serve(mut stream: UnixStream, keys: &Keys) -> std::io::Result<()> {
+fn serve(mut stream: Stream, keys: &Keys) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     while let Some(request) = read_message(&mut stream)? {
@@ -411,7 +407,7 @@ fn take_string<'a>(data: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
     Some(bytes)
 }
 
-fn read_message(stream: &mut UnixStream) -> std::io::Result<Option<Vec<u8>>> {
+fn read_message(stream: &mut Stream) -> std::io::Result<Option<Vec<u8>>> {
     let mut len = [0u8; 4];
     match stream.read_exact(&mut len) {
         Ok(()) => {}
@@ -436,7 +432,7 @@ fn read_message(stream: &mut UnixStream) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(body))
 }
 
-fn write_message(stream: &mut UnixStream, body: &[u8]) -> std::io::Result<()> {
+fn write_message(stream: &mut Stream, body: &[u8]) -> std::io::Result<()> {
     stream.write_all(&(body.len() as u32).to_be_bytes())?;
     stream.write_all(body)?;
     stream.flush()
@@ -454,6 +450,7 @@ mod tests {
     use super::*;
     use crate::vault::model::now_secs;
     use ed25519_dalek::Verifier;
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream as Pair;
 
     fn key(allowed: bool) -> SshKey {
@@ -538,6 +535,7 @@ mod tests {
 
     /// The whole way round a socket: the protocol's framing, a real connection, and the
     /// key's line as `authorized_keys` would carry it.
+    #[cfg(unix)]
     #[test]
     fn the_socket_answers_the_agent_protocol() {
         let key = key(true);
@@ -584,11 +582,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pandora-agent-{}", std::process::id()));
         let socket = dir.join("agent.sock");
         agent.start(socket.clone()).unwrap();
-        let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "only the user can reach the agent");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "only the user can reach the agent");
+        }
         assert!(agent.running());
         agent.stop();
-        assert!(!socket.exists(), "and the socket is gone");
+        assert!(
+            crate::shared::socket::connect_at(&socket).is_err(),
+            "and the socket is gone"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

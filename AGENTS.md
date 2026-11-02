@@ -238,7 +238,8 @@ the modules the panel's own pixel grid smudges. It runs on its own thread, one f
 a time, so the preview never waits for a read.
 
 **Beside the box, on the same key.** Three features keep secrets that are not records:
-`features/agent` serves the box's Ed25519 keys on a 0600 Unix socket (only the keys
+`features/agent` serves the box's Ed25519 keys on a user-private local channel — a 0600
+socket, a named pipe on Windows, both owned by `shared::socket` (only the keys
 marked `allowed`, only while a box is unlocked — `Agent::poll` empties the snapshot the
 moment the session goes), `features/share` seals one record for somebody else
 (`vault::share`, age-shaped: X25519 to a key or Argon2id to a passphrase, header in the

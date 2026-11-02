@@ -408,7 +408,7 @@
   "on — another app's login form fills from this box while it is open here, and the copy goes as soon as it locks": "sí — el formulario de otra app se rellena desde esta caja mientras esté abierta aquí, y la copia desaparece en cuanto se bloquea",
   "only a five-character hash prefix is sent, never a password or an address": "solo se envía un prefijo de cinco caracteres del hash, nunca la contraseña ni una dirección",
   "only the copies saved on this computer — sign in to see the whole repo": "Solo se ven las copias guardadas en este equipo — inicia sesión para ver todo el repositorio",
-  "only the keys you allow are listed and sign; the socket is 0600 and answers only while a box is unlocked": "solo se listan y firman las claves que permitas; el socket es 0600 y solo responde con una caja desbloqueada",
+  "only the keys you allow are listed and sign; the channel is private and answers only while a box is unlocked": "solo se listan y firman las claves que permitas; el canal es privado y solo responde con una caja desbloqueada",
   "open": "abrir",
   "open Files to drop files": "abre Archivos para soltar archivos",
   "open a box to manage its keys": "abre una caja para gestionar sus claves",

@@ -1,4 +1,4 @@
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod agent;
 pub mod auth;
 pub mod autotype;

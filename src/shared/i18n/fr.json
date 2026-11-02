@@ -394,7 +394,7 @@
   "on — another app's login form fills from this box while it is open here, and the copy goes as soon as it locks": "activé — le formulaire de connexion d'une autre application se remplit depuis ce coffre tant qu'il est ouvert ici, et la copie disparaît dès qu'il se verrouille",
   "only a five-character hash prefix is sent, never a password or an address": "seul un préfixe de hachage de cinq caractères est envoyé, jamais un mot de passe ni une adresse",
   "only the copies saved on this computer — sign in to see the whole repo": "seulement les copies enregistrées sur cet ordinateur — connectez-vous pour voir tout le dépôt",
-  "only the keys you allow are listed and sign; the socket is 0600 and answers only while a box is unlocked": "seules les clés que vous autorisez sont listées et signent ; la socket est en 0600 et ne répond que tant qu'un coffre est déverrouillé",
+  "only the keys you allow are listed and sign; the channel is private and answers only while a box is unlocked": "seules les clés que vous autorisez sont listées et signent ; le canal est privé et ne répond que tant qu'un coffre est déverrouillé",
   "open": "ouvrir",
   "open Files to drop files": "ouvrez Fichiers pour déposer des fichiers",
   "open a box to manage its keys": "ouvrez un coffre pour gérer ses clés",

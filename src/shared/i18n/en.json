@@ -406,7 +406,7 @@
   "on — another app's login form fills from this box while it is open here, and the copy goes as soon as it locks": "on — another app's login form fills from this box while it is open here, and the copy goes as soon as it locks",
   "only a five-character hash prefix is sent, never a password or an address": "only a five-character hash prefix is sent, never a password or an address",
   "only the copies saved on this computer — sign in to see the whole repo": "only the copies saved on this computer — sign in to see the whole repo",
-  "only the keys you allow are listed and sign; the socket is 0600 and answers only while a box is unlocked": "only the keys you allow are listed and sign; the socket is 0600 and answers only while a box is unlocked",
+  "only the keys you allow are listed and sign; the channel is private and answers only while a box is unlocked": "only the keys you allow are listed and sign; the channel is private and answers only while a box is unlocked",
   "open": "open",
   "open Files to drop files": "open Files to drop files",
   "open a box to manage its keys": "open a box to manage its keys",
