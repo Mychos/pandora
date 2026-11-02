@@ -55,9 +55,15 @@ pass() {
     export APPIMAGETOOL
   fi
   CARGO_TARGET_DIR="$work/build/target" scripts/appimage.sh > "$work/$name.log" 2>&1
-  if [ ! -x "$tool" ]; then
+  # With a tool already named by the caller or a previous pass, `appimage.sh` used it
+  # and fetched nothing: there is nothing here to copy, and an empty copy is not a tool.
+  if [ -z "${APPIMAGETOOL:-}" ]; then
     local fetched
     fetched=$(find "$work/build/target/appimage/tools" -maxdepth 1 -name 'appimagetool-*.AppImage' -print -quit)
+    if [ -z "$fetched" ]; then
+      echo "repro: pass $name fetched no appimagetool — see $work/$name.log" >&2
+      exit 1
+    fi
     cp "$fetched" "$tool"
   fi
   local image
