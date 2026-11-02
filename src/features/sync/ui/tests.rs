@@ -79,9 +79,12 @@ fn temp_page_shots() {
                 private: false,
             })
             .collect();
+        // A working copy nobody else names: two tests that share one folder in the
+        // shared data dir delete each other's files between a `create_dir_all` and
+        // the write that follows it.
         let carbon = Source {
             kind: GITHUB.to_owned(),
-            target: "uriach/carbon".to_owned(),
+            target: "uriach/carbon-shots".to_owned(),
         };
         app.prefs.sources = vec![carbon.clone()];
         let dir = store::source_dir(&carbon.kind, &carbon.target);
