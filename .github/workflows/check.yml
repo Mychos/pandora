@@ -28,12 +28,12 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: "1.99.0"
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # `rust-toolchain.toml` names the compiler and its components; `rustup` reads it,
+      # so no workflow repeats the version.
+      - name: rust
+        run: rustup toolchain install --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       # The audio preview links against ALSA, and the windowing backends look
       # their libraries up through pkg-config.
       - name: system libraries
@@ -50,33 +50,29 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      # `rustup` itself, not the action: this runner handed that one an empty
-      # `toolchain` input whatever the workflow said. `rust-toolchain.toml` already
-      # pins the version the step installs.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # `rustup` itself: this runner handed the toolchain action an empty `toolchain`
+      # input whatever the workflow said, and the file names the compiler anyway.
       - name: rust
         shell: bash
-        run: |
-          rustup toolchain install 1.99.0 --profile minimal --no-self-update
-          rustup default 1.99.0
-      - uses: Swatinem/rust-cache@v2
+        run: rustup toolchain install --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: typecheck every target
         run: cargo check --all-targets
-      # The pipe tests: bind, a second listener declining, a message both ways,
-      # and a read that has to time out instead of parking the app.
-      - name: bridge over a named pipe
-        run: cargo test --lib bridge
+      # The whole suite, not only the pipe: Windows is a shipped platform, and the
+      # parsers, the box format and the matching rules are the same code there.
+      - name: tests
+        run: cargo test
 
   # macOS only compiles here: the suite and the lints run on Linux, but this
   # is where the target-specific windowing and idle branches are seen by rustc.
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: "1.99.0"
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: rust
+        run: rustup toolchain install --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: typecheck every target
         run: cargo check --all-targets
 
@@ -86,9 +82,11 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       # The prebuilt binary: building `cargo-audit` itself wants cmake and a C
       # toolchain for `aws-lc-sys`, which is a minute of CI for nothing.
-      - uses: taiki-e/install-action@cargo-audit
+      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422
+        with:
+          tool: cargo-audit
       - name: advisories in the lock file
         run: cargo audit

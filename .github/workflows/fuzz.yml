@@ -34,19 +34,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      # Fuzzing needs nightly and `libfuzzer-sys` wants a C++ toolchain. The same
-      # version `fuzz/rust-toolchain.toml` pins, named here because the toolchain is
-      # installed before anything enters that directory.
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # Fuzzing needs nightly and `libfuzzer-sys` wants a C++ toolchain.
+      # `fuzz/rust-toolchain.toml` names the nightly, and `rustup` reads it from there,
+      # so the version is written down once.
+      - name: rust
+        working-directory: fuzz
+        run: rustup toolchain install --profile minimal --no-self-update
+      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422
         with:
-          toolchain: nightly-2026-10-21
-      - uses: taiki-e/install-action@cargo-fuzz
+          tool: cargo-fuzz
       # The prebuilt binary is what usually lands; a run where the installer found
       # nothing to place leaves the subcommand missing, so it is built as a fallback.
       - name: cargo-fuzz
         run: cargo fuzz --version || cargo install cargo-fuzz --locked
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: fuzz
       # The box crate links ALSA and the windowing backends even under a fuzzer.
