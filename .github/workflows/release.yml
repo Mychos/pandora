@@ -367,7 +367,7 @@ jobs:
             exit 1
           fi
 
-          keystore="$PWD/android/pandora-release.jks"
+          keystore="${RUNNER_TEMP}/pandora-release.jks"
           printf '%s' "$PANDORA_KEYSTORE_BASE64" | base64 -d > "$keystore"
           chmod 600 "$keystore"
 
