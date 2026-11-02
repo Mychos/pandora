@@ -8,7 +8,7 @@ plugins {
 //
 // shortcut: two digits per part, so 0.99.99 is the ceiling — widen the strides
 // when a third digit is ever needed.
-def appVersion = "0.2.0"
+def appVersion = "0.0.0"
 def digits = appVersion.tokenize('.').collect { it.toInteger() }
 assert digits.size() == 3, "the app version must be MAJOR.MINOR.PATCH: $appVersion"
 def appCode = digits[0] * 10000 + digits[1] * 100 + digits[2]
