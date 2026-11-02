@@ -24,6 +24,13 @@ cargo test create_open_roundtrip # single test by name
 cargo fmt
 cargo clippy
 
+# The Windows half, typechecked here: `check` never links, so the C compiler the
+# yubikey crate asks for can be a no-op and a mingw toolchain is not needed. This
+# catches what `check.yml` would otherwise only report ten minutes later — running
+# the pipe tests still takes a Windows runner.
+CC_x86_64_pc_windows_gnu=/bin/true AR_x86_64_pc_windows_gnu=/bin/true \
+  cargo check --target x86_64-pc-windows-gnu --all-targets
+
 # Linux AppImage; needs the ALSA headers above. `release.yml` builds every
 # platform and attaches the artifacts to a `vX.Y.Z` release.
 scripts/appimage.sh
