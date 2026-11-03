@@ -3474,7 +3474,7 @@ dependencies = [
 
 [[package]]
 name = "pandora"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "android-activity",
  "android_logger",

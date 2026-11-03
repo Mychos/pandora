@@ -1,6 +1,6 @@
 [package]
 name = "pandora"
-version = "0.0.1"
+version = "0.0.0"
 edition = "2021"
 # What the pinned toolchain builds: `rust-toolchain.toml` is the exact compiler, this
 # is the oldest one the crate claims to work with.
