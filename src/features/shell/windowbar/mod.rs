@@ -827,6 +827,7 @@ fn pin(ui: &mut Ui, app: &mut App) {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn controls(ui: &mut Ui, ctx: &Context) {
     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
     if control(ui, Glyph::Close, theme::palette().error).clicked() {

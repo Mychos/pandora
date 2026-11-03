@@ -395,8 +395,11 @@ impl App {
             resize_until: None,
             #[cfg(not(target_os = "android"))]
             last_size: egui::Vec2::ZERO,
+            #[cfg(not(target_os = "android"))]
             cover_shown: false,
+            #[cfg(not(target_os = "android"))]
             cover_focused: false,
+            #[cfg(not(target_os = "android"))]
             cover_lift: None,
             #[cfg(not(target_os = "android"))]
             pinned: None,
@@ -1042,8 +1045,11 @@ impl App {
             resize_until: None,
             #[cfg(not(target_os = "android"))]
             last_size: egui::Vec2::ZERO,
+            #[cfg(not(target_os = "android"))]
             cover_shown: false,
+            #[cfg(not(target_os = "android"))]
             cover_focused: false,
+            #[cfg(not(target_os = "android"))]
             cover_lift: None,
             #[cfg(not(target_os = "android"))]
             pinned: None,
