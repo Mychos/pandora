@@ -30,7 +30,11 @@ export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/n
 target_abs=$(realpath -m "$target")
 repo=$(pwd)
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
-export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$target_abs=/build/target --remap-path-prefix=$repo=/build/pandora --remap-path-prefix=$cargo_home=/build/cargo"
+# `--icf=all` is the phone's flag that also pays on the desktop: folding identical
+# functions takes the stripped ELF from 26.6 MB to 26.0 MB. It lives here and not in
+# `Cargo.toml` because the linker flags are the build script's business, and
+# `.cargo/config.toml` is untracked.
+export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,--icf=all --remap-path-prefix=$target_abs=/build/target --remap-path-prefix=$repo=/build/pandora --remap-path-prefix=$cargo_home=/build/cargo"
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 test -n "$version"
