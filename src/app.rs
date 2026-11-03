@@ -288,6 +288,19 @@ pub struct App {
     /// Last viewport size, so a resize can be detected without a winit event.
     #[cfg(not(target_os = "android"))]
     last_size: egui::Vec2,
+    /// The curtain was drawn in the frame before, so the frame that brings the focus
+    /// back knows it has to hold for a moment.
+    #[cfg(not(target_os = "android"))]
+    cover_shown: bool,
+    /// The focus as the frame before saw it: the hold starts on the frame it comes
+    /// back, not on every frame it stays.
+    #[cfg(not(target_os = "android"))]
+    cover_focused: bool,
+    /// When the curtain may lift again. Focus and the click that asked for it can
+    /// arrive in different frames, so the curtain outlives both instead of guessing
+    /// which one carried the click.
+    #[cfg(not(target_os = "android"))]
+    cover_lift: Option<std::time::Instant>,
     /// The window level this frame already asked for, so the same command is not sent
     /// sixty times a second.
     #[cfg(not(target_os = "android"))]
@@ -382,6 +395,9 @@ impl App {
             resize_until: None,
             #[cfg(not(target_os = "android"))]
             last_size: egui::Vec2::ZERO,
+            cover_shown: false,
+            cover_focused: false,
+            cover_lift: None,
             #[cfg(not(target_os = "android"))]
             pinned: None,
             #[cfg(not(target_os = "android"))]
@@ -821,9 +837,41 @@ impl App {
         // A window nobody is looking at shows only the logo: the app keeps ticking
         // above, but no screen, status or modal paints through it.
         #[cfg(not(target_os = "android"))]
-        if self.prefs.hide_unfocused && !self.shell.moving() && !ctx.input(|i| i.focused) {
-            crate::features::shell::cover::show(&ctx, self);
-            return;
+        {
+            /// How long the curtain outlives the focus coming back. Longer than any
+            /// compositor takes to hand over the click that asked for it.
+            const HOLD: std::time::Duration = std::time::Duration::from_millis(60);
+            /// How often a covered window wakes up. Without it the app sleeps until the
+            /// next input event, and the curtain outlives the focus by however long the
+            /// user takes to move the mouse.
+            const WAKE: std::time::Duration = std::time::Duration::from_millis(16);
+            let now = std::time::Instant::now();
+            let focused = ctx.input(|i| i.focused);
+            let moving = self.shell.moving();
+            let waiting = self.cover_lift.is_some_and(|at| at > now);
+            // The focus comes back to a window that was covered: hold the curtain for
+            // the click that is on its way, wherever the compositor put it in the
+            // stream. Once per return — arming it every frame would never lift it.
+            if focused && !self.cover_focused && self.cover_shown && !waiting && !moving {
+                self.cover_lift = Some(now + HOLD);
+                ctx.request_repaint_after(HOLD);
+            }
+            self.cover_focused = focused;
+            let holding = self.cover_lift.is_some_and(|at| at > now);
+            if focused && !holding {
+                self.cover_lift = None;
+            }
+            let covering = self.prefs.hide_unfocused && !moving && (!focused || holding);
+            self.cover_shown = covering;
+            if covering {
+                if crate::features::shell::cover::show(&ctx, self) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                // A covered window still asks to be woken: the curtain lifts on a clock,
+                // and a window that sleeps until the next mouse move never sees it.
+                ctx.request_repaint_after(WAKE);
+                return;
+            }
         }
         // The bar runs everywhere; only a desktop has edges, on the bar's layer so a
         // modal cannot cover them.
@@ -994,6 +1042,9 @@ impl App {
             resize_until: None,
             #[cfg(not(target_os = "android"))]
             last_size: egui::Vec2::ZERO,
+            cover_shown: false,
+            cover_focused: false,
+            cover_lift: None,
             #[cfg(not(target_os = "android"))]
             pinned: None,
             #[cfg(not(target_os = "android"))]
