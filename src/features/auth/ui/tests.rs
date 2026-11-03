@@ -1088,3 +1088,30 @@ fn the_unlock_button_holds_the_spinner() {
         .any(|fill| fill == theme::ACCENT);
     assert!(accent, "the accent fill is not faded while busy");
 }
+
+/// Typing the box's name proposes the file's: the folder stays where it was and
+/// only the file's own name is replaced.
+#[test]
+fn the_box_name_proposes_the_file_name() {
+    let ctx = egui::Context::default();
+    theme::apply(&ctx);
+    let mut app = App::blank(&ctx);
+    app.screen = Screen::Welcome;
+    app.auth.welcome.name.clear();
+    app.auth.welcome.path = "/tmp/vault.pandora".to_owned();
+
+    let name = egui::Id::new("welcome-name");
+    ctx.memory_mut(|mem| mem.request_focus(name));
+    frame(
+        &mut app,
+        &ctx,
+        egui::vec2(1000.0, 700.0),
+        vec![egui::Event::Text("Casa de Ana".to_owned())],
+    );
+
+    assert_eq!(app.auth.welcome.name, "Casa de Ana");
+    assert_eq!(
+        app.auth.welcome.path, "/tmp/casa-de-ana.pandora",
+        "the file takes the box's name, the folder does not move"
+    );
+}

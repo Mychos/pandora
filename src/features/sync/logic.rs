@@ -112,21 +112,6 @@ fn box_path(source: &Source, file: &str) -> Option<(String, PathBuf)> {
 
 /// A box name turned into a file name: whatever a path cannot carry becomes `-`.
 /// A name that reduces to nothing is refused.
-fn box_file(name: &str) -> Option<String> {
-    let cleaned: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let cleaned = cleaned.trim().trim_matches('.').to_owned();
-    (!cleaned.is_empty()).then(|| format!("{cleaned}.{}", store::EXT))
-}
-
 /// The working copies a source already has on disk, for listing a repo while offline.
 pub(crate) fn cached(source: &Source) -> Vec<String> {
     list_dir(&store::source_dir(&source.kind, &source.target))
@@ -645,7 +630,7 @@ impl App {
         if name.is_empty() {
             return self.shell.fail("give your box a name");
         }
-        let Some(file) = box_file(&name) else {
+        let Some(file) = store::file_name(&name) else {
             return self.shell.fail("that name cannot be a file name");
         };
         self.auth.welcome.path = store::source_dir(&source.kind, &source.target)
@@ -2078,12 +2063,10 @@ mod tests {
 
     #[test]
     fn a_box_name_becomes_a_file_name_inside_the_folder() {
-        assert_eq!(box_file("Work").unwrap(), "Work.pandora");
-        assert_eq!(box_file("My Box").unwrap(), "My Box.pandora");
-        let hostile = box_file("../../etc/passwd").unwrap();
+        assert_eq!(store::file_name("My Box").unwrap(), "my-box.pandora");
+        let hostile = store::file_name("../../etc/passwd").unwrap();
         assert!(!hostile.contains('/'), "{hostile} kept a separator");
-        assert!(box_file("   ").is_none());
-        assert!(box_file("...").is_none());
+        assert!(store::file_name("   ").is_none());
     }
 
     /// A repo never listed still shows what the disk holds: only `.pandora` files.

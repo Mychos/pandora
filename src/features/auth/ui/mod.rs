@@ -236,13 +236,23 @@ pub fn welcome(ui: &mut egui::Ui, app: &mut App) {
                         theme::card(ui, "", |ui| {
                             let mut submit = false;
                             ui.add_enabled_ui(!busy, |ui| {
-                                ui.add(
-                                    TextEdit::singleline(&mut app.auth.welcome.name)
-                                        .hint_text(t("box name"))
-                                        .desired_width(f32::INFINITY)
-                                        .margin(m),
-                                );
+                                if ui
+                                    .add(
+                                        TextEdit::singleline(&mut app.auth.welcome.name)
+                                            .id(egui::Id::new("welcome-name"))
+                                            .hint_text(t("box name"))
+                                            .desired_width(f32::INFINITY)
+                                            .margin(m),
+                                    )
+                                    .changed()
+                                {
+                                    app.auth.welcome.follow();
+                                }
                                 ui.add_space(12.0);
+                                // The path is the user's the moment it differs from what
+                                // the name proposed: a destination typed or picked by hand
+                                // outranks anything derived.
+                                let proposed = app.auth.welcome.path.clone();
                                 file_field(
                                     ui,
                                     &mut app.ask,
@@ -252,6 +262,9 @@ pub fn welcome(ui: &mut egui::Ui, app: &mut App) {
                                     "box file",
                                     true,
                                 );
+                                if app.auth.welcome.path != proposed {
+                                    app.auth.welcome.path_locked = true;
+                                }
                                 #[cfg(target_os = "android")]
                                 {
                                     if theme::secondary_button(

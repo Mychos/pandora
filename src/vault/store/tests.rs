@@ -1096,3 +1096,27 @@ fn a_copy_that_does_not_open_never_replaces_the_box() {
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&dst);
 }
+
+/// A box's name becomes the file it is kept in, and a name with nothing in it
+/// proposes nothing rather than a `vault.pandora` nobody typed.
+#[test]
+fn a_box_name_becomes_a_file_name() {
+    assert_eq!(file_name("My Box").as_deref(), Some("my-box.pandora"));
+    assert_eq!(
+        file_name("  Café  de  Ana ").as_deref(),
+        Some("café-de-ana.pandora"),
+        "a path is UTF-8: the letter the user typed is the letter that is kept"
+    );
+    assert_eq!(file_name("a--b").as_deref(), Some("a-b.pandora"));
+    assert_eq!(
+        file_name("100% Ácido").as_deref(),
+        Some("100-ácido.pandora")
+    );
+    assert_eq!(
+        file_name("../../etc/passwd").as_deref(),
+        Some("etc-passwd.pandora"),
+        "no separator survives, so a name cannot leave its folder"
+    );
+    assert!(file_name("   ").is_none());
+    assert!(file_name("...").is_none());
+}

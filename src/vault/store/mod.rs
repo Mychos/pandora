@@ -128,6 +128,27 @@ pub fn default_path() -> PathBuf {
     data_dir().join(format!("vault.{EXT}"))
 }
 
+/// A box's name as the name of its file: lowercase, one dash between words, and
+/// every letter that carries an accent kept, because a path is UTF-8 and `café`
+/// is what the user typed. `None` when nothing survives, so the caller decides
+/// what to say instead of a `vault.pandora` appearing behind its back.
+pub fn file_name(name: &str) -> Option<String> {
+    let mut out = String::with_capacity(name.len());
+    let mut gap = false;
+    for c in name.chars().flat_map(char::to_lowercase) {
+        if c.is_alphanumeric() {
+            if gap && !out.is_empty() {
+                out.push('-');
+            }
+            gap = false;
+            out.push(c);
+        } else {
+            gap = true;
+        }
+    }
+    (!out.is_empty()).then(|| format!("{out}.{EXT}"))
+}
+
 /// Where every working copy lives.
 pub fn sources_dir() -> PathBuf {
     data_dir().join("sources")

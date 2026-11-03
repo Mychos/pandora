@@ -246,6 +246,9 @@ impl App {
             }
             Ok(OpOutcome::Destination(uri)) => {
                 self.auth.welcome.path = uri;
+                // A destination picked on the phone is the user's own, not a name
+                // this form may go on rewriting.
+                self.auth.welcome.path_locked = true;
                 self.shell
                     .set_status("destination chosen — create the box", StatusKind::Info);
             }

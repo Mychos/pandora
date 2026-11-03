@@ -93,10 +93,32 @@ pub(crate) fn push(dir: &Path, path: &Path) {
 pub struct WelcomeForm {
     pub name: String,
     pub path: String,
+    /// The user wrote the file's path, or picked one: from then on the box's name
+    /// proposes nothing, because a destination chosen by hand is the user's.
+    pub path_locked: bool,
     pub password: String,
     pub confirm: String,
     /// Optional second factor: a file mixed into the KDF.
     pub keyfile: String,
+}
+
+impl WelcomeForm {
+    /// The file follows the box's name while the path is nobody's yet. Only the
+    /// file's own name is replaced: the folder the user is creating in stays.
+    pub fn follow(&mut self) {
+        if self.path_locked {
+            return;
+        }
+        let Some(file) = crate::vault::store::file_name(&self.name) else {
+            return;
+        };
+        let dir = Path::new(&self.path)
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(crate::vault::store::data_dir);
+        self.path = dir.join(file).display().to_string();
+    }
 }
 
 #[derive(Default)]
@@ -319,4 +341,39 @@ mod tests {
         assert_eq!(read(&dir).len(), KEEP);
         assert_eq!(labels(&read(&dir))[0], format!("f{}", KEEP + 2));
     }
+}
+
+/// The file follows the box's name while nobody has touched the path; a path the
+/// user wrote is theirs, and the folder stays whatever it was.
+#[test]
+fn the_file_follows_the_box_name_until_the_path_is_the_users() {
+    let mut form = WelcomeForm {
+        name: "Casa de Ana".to_owned(),
+        path: "/tmp/vault.pandora".to_owned(),
+        ..Default::default()
+    };
+    form.follow();
+    assert_eq!(
+        form.path, "/tmp/casa-de-ana.pandora",
+        "the folder stays and the file takes the name"
+    );
+
+    form.path_locked = true;
+    form.name = "Otra".to_owned();
+    form.follow();
+    assert_eq!(
+        form.path, "/tmp/casa-de-ana.pandora",
+        "a path the user owns is not rewritten"
+    );
+
+    let mut unnamed = WelcomeForm {
+        name: "···".to_owned(),
+        path: "/tmp/vault.pandora".to_owned(),
+        ..Default::default()
+    };
+    unnamed.follow();
+    assert_eq!(
+        unnamed.path, "/tmp/vault.pandora",
+        "a name with nothing in it proposes nothing"
+    );
 }
