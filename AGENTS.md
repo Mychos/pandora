@@ -628,6 +628,12 @@ thing that should come back out of a log or a panel.
 - No OS title bar: the shell paints the drag region, window buttons and resize edges.
   Invisible interactive regions must use the `Sense::CLICK`/`Sense::DRAG` consts, not
   `click()`/`drag()`, or they become dead tab stops.
+- The pin on the strip (`windowbar::pin`) keeps `prefs.on_top`, and `App::level` sends
+  the one `WindowLevel` command the frame disagrees with, so a window pinned last time
+  opens pinned. Wayland has no client-side always-on-top — winit's answer there is an
+  empty function — so the pin reads `WAYLAND_DISPLAY`, which `main.rs` drops under
+  `PANDORA_X11=1`, and a session that cannot pin answers the click with a status
+  instead of turning.
 - A hand-painted control owes `theme::focus` for its ring and `resp.widget_info` for
   the screen reader's name.
 - egui honours `Visuals::interact_cursor` on its own `Button` and nowhere else, so

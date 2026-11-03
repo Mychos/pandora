@@ -447,6 +447,8 @@ Releases — workflow, artifacts, the Android signing key, `act` — are in
 - GitHub caps a blob at 100 MB, so a box with a huge attachment may not fit there;
   the folder mirror has no such ceiling. Local storage has none at all.
 - A keyfile box cannot be opened from the browser.
+- Wayland lets no app sit above the others, so the window's pin is refused there and
+  says so; `PANDORA_X11=1` is the way to get a window that stays on top.
 - No video preview, no server-side sync, no plugin API.
 - The format is not frozen: this version writes v5 and still opens v4, and a future
   version may add fields (they must be optional).

@@ -1007,3 +1007,125 @@ fn resize_zones_are_positive_and_inside_the_window() {
         assert!(screen.contains_rect(rect), "{dir:?} escapes the window");
     }
 }
+
+/// The session's display is the environment's, and every test here shares one process:
+/// these two take turns and hand the variable back the way they found it.
+struct Session {
+    _turn: std::sync::MutexGuard<'static, ()>,
+    saved: Option<std::ffi::OsString>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        match &self.saved {
+            Some(name) => std::env::set_var("WAYLAND_DISPLAY", name),
+            None => std::env::remove_var("WAYLAND_DISPLAY"),
+        }
+    }
+}
+
+fn session(wayland: Option<&str>) -> Session {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let saved = std::env::var_os("WAYLAND_DISPLAY");
+    match wayland {
+        Some(name) => std::env::set_var("WAYLAND_DISPLAY", name),
+        None => std::env::remove_var("WAYLAND_DISPLAY"),
+    }
+    Session { _turn: turn, saved }
+}
+
+/// The frame its events landed in, so a test can read what the bar asked the window for.
+fn event_frame(
+    ctx: &egui::Context,
+    app: &mut App,
+    size: egui::Vec2,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
+    let mut settle = ctx.run_ui(shot::input(size, Vec::new()), |ui| show(ui, app));
+    settle.textures_delta.clear();
+    let mut out = ctx.run_ui(shot::input(size, events), |ui| show(ui, app));
+    out.textures_delta.clear();
+    out
+}
+
+/// Every level the bar asked the window for in that frame.
+fn levels(out: &egui::FullOutput) -> Vec<egui::WindowLevel> {
+    out.viewport_output
+        .values()
+        .flat_map(|v| v.commands.iter())
+        .filter_map(|c| match c {
+            egui::ViewportCommand::WindowLevel(level) => Some(*level),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The pin carries no text, so it is reached by the id its own slot wears.
+fn pin_at(ctx: &egui::Context, app: &mut App) -> egui::Pos2 {
+    frame(ctx, app, vec![]); // the pass that paints it is the one that registers it
+    ctx.read_response(Id::new("pandora-pin"))
+        .expect("the pin is on the bar")
+        .rect
+        .center()
+}
+
+#[test]
+fn the_pin_puts_the_window_on_top() {
+    let _session = session(None);
+    let ctx = egui::Context::default();
+    theme::apply(&ctx);
+    let mut app = App::blank(&ctx);
+    let size = vec2(1000.0, 700.0);
+    let at = pin_at(&ctx, &mut app);
+
+    event_frame(
+        &ctx,
+        &mut app,
+        size,
+        vec![egui::Event::PointerMoved(at), shot::press(at, true)],
+    );
+    let out = event_frame(&ctx, &mut app, size, vec![shot::press(at, false)]);
+
+    assert!(app.prefs.on_top, "a click must pin the window");
+    assert_eq!(
+        levels(&out),
+        vec![egui::WindowLevel::AlwaysOnTop],
+        "the bar must ask the window for the top level"
+    );
+}
+
+#[test]
+fn the_pin_says_why_a_wayland_session_cannot_pin() {
+    // Wayland gives a client no way to sit above the others, so the click changes
+    // nothing and answers instead of leaving the mark a button that does nothing.
+    let _session = session(Some("wayland-0"));
+    let ctx = egui::Context::default();
+    theme::apply(&ctx);
+    let mut app = App::blank(&ctx);
+    let size = vec2(1000.0, 700.0);
+    let at = pin_at(&ctx, &mut app);
+
+    event_frame(
+        &ctx,
+        &mut app,
+        size,
+        vec![egui::Event::PointerMoved(at), shot::press(at, true)],
+    );
+    let out = event_frame(&ctx, &mut app, size, vec![shot::press(at, false)]);
+
+    assert!(!app.prefs.on_top, "nothing is pinned where it cannot be");
+    assert!(
+        levels(&out).is_empty(),
+        "no level is asked of a compositor that would drop it"
+    );
+    let status = app.shell.status.as_ref().expect("the click must answer");
+    assert!(
+        status.kind == StatusKind::Info,
+        "a limitation is not a failure"
+    );
+    assert_eq!(
+        status.text,
+        "this session does not let an app stay on top: start it with PANDORA_X11=1"
+    );
+}

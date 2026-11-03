@@ -288,6 +288,10 @@ pub struct App {
     /// Last viewport size, so a resize can be detected without a winit event.
     #[cfg(not(target_os = "android"))]
     last_size: egui::Vec2,
+    /// The window level this frame already asked for, so the same command is not sent
+    /// sixty times a second.
+    #[cfg(not(target_os = "android"))]
+    pinned: Option<egui::WindowLevel>,
     /// Whether this process draws through wgpu; the swapchain knob is a wgpu API.
     #[cfg(not(target_os = "android"))]
     wgpu: bool,
@@ -379,6 +383,8 @@ impl App {
             #[cfg(not(target_os = "android"))]
             last_size: egui::Vec2::ZERO,
             #[cfg(not(target_os = "android"))]
+            pinned: None,
+            #[cfg(not(target_os = "android"))]
             wgpu: cc.wgpu_render_state.is_some(),
             #[cfg(not(target_os = "android"))]
             handle,
@@ -400,6 +406,22 @@ impl App {
     #[cfg(not(target_os = "android"))]
     pub fn capture(&self) {
         crate::shared::capture::apply(self.handle.as_ref(), self.prefs.allow_capture);
+    }
+
+    /// Keep the window on the level `prefs.on_top` asks for. Asked for every frame it
+    /// disagrees with the last one sent, because a command sent before the surface
+    /// exists is dropped, and a window the user pinned last time opens pinned.
+    #[cfg(not(target_os = "android"))]
+    pub fn level(&mut self, ctx: &egui::Context) {
+        let level = if self.prefs.on_top {
+            egui::WindowLevel::AlwaysOnTop
+        } else {
+            egui::WindowLevel::Normal
+        };
+        if self.pinned != Some(level) {
+            self.pinned = Some(level);
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+        }
     }
 
     /// Lock every vault and land on Unlock; unsaved edits are written first.
@@ -887,6 +909,8 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        #[cfg(not(target_os = "android"))]
+        self.level(ui.ctx());
         // A resize raises the swapchain to two frames of room, then back to one; wgpu only.
         #[cfg(not(target_os = "android"))]
         {
@@ -970,6 +994,8 @@ impl App {
             resize_until: None,
             #[cfg(not(target_os = "android"))]
             last_size: egui::Vec2::ZERO,
+            #[cfg(not(target_os = "android"))]
+            pinned: None,
             #[cfg(not(target_os = "android"))]
             wgpu: true,
             #[cfg(not(target_os = "android"))]

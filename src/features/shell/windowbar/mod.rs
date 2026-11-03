@@ -3,7 +3,7 @@
 
 #[cfg(not(target_os = "android"))]
 use crate::app::Session;
-use crate::app::{App, Screen, Tab};
+use crate::app::{App, Screen, StatusKind, Tab};
 use crate::shared::theme;
 use crate::shared::ui::{chrome, responsive};
 /// The pointer state a native move or resize takes with it, which every desktop has.
@@ -261,6 +261,9 @@ fn bar(ui: &mut Ui, app: &mut App) {
                 {
                     let ctx = ui.ctx().clone();
                     controls(ui, &ctx);
+                    // Right to left, so added after: the pin sits at the window's edge,
+                    // to the left of minimise, and never past close.
+                    pin(ui, app);
                 }
                 ui.add_space(tail(&ctx));
                 // Right to left, so the gear is the rightmost.
@@ -748,7 +751,86 @@ fn browsers(ui: &mut Ui, app: &mut App) {
     }
 }
 
+/// The pin: this window above every other, for a box consulted while something else
+/// is being filled in. Remembered, because a window the user pinned once is a window
+/// they expect pinned the next time.
 #[cfg(not(target_os = "android"))]
+fn pin(ui: &mut Ui, app: &mut App) {
+    let on = app.prefs.on_top;
+    // Wayland gives a client no way to sit above the others, and winit answers that
+    // request there with an empty function. `main.rs` dropped `WAYLAND_DISPLAY` when
+    // the session was forced onto X11, so this reads the backend the window really has.
+    #[cfg(target_os = "linux")]
+    let stuck = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+    #[cfg(not(target_os = "linux"))]
+    let stuck = false;
+    let (rect, _) = ui.allocate_exact_size(vec2(CONTROL, ui.available_height()), Sense::HOVER);
+    let resp = ui.interact(rect, Id::new("pandora-pin"), Sense::click());
+    let tooltip = if stuck {
+        "this session does not let an app stay on top: start it with PANDORA_X11=1"
+    } else if on {
+        "stop keeping this window on top"
+    } else {
+        "keep this window on top"
+    };
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            true,
+            crate::shared::i18n::t(tooltip),
+        )
+    });
+    // The mark leans while the window is like every other and stands up when it is
+    // pinned, the way Jota's does; the colour follows the same reading.
+    let turned = ui.ctx().animate_bool_with_time(
+        Id::new("pandora-pin"),
+        on && !stuck,
+        ui.style().animation_time,
+    );
+    let colour = if stuck {
+        theme::palette().faint
+    } else {
+        theme::palette().muted.lerp_to_gamma(theme::ACCENT, turned)
+    };
+    if resp.hovered() || resp.has_focus() {
+        ui.painter().rect_filled(
+            Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - 1.0)),
+            CornerRadius::ZERO,
+            theme::palette().hover,
+        );
+    }
+    // Painted, not placed: the window controls beside it are vectors, and a 14pt
+    // sprite between them reads as a smudge whatever the filter.
+    let angle = 25f32.to_radians() * (1.0 - turned);
+    let lean = egui::emath::Rot2::from_angle(angle);
+    let centre = rect.center() + vec2(0.0, turned * 1.5);
+    let at = |x: f32, y: f32| centre + lean * vec2(x, y);
+    let ink = egui::Stroke::new(1.3, colour);
+    let painter = ui.painter();
+    painter.add(egui::Shape::convex_polygon(
+        vec![at(-3.0, -7.0), at(3.0, -7.0), at(4.2, 0.0), at(-4.2, 0.0)],
+        Color32::TRANSPARENT,
+        ink,
+    ));
+    painter.line_segment([at(-5.2, 0.0), at(5.2, 0.0)], ink);
+    painter.line_segment([at(0.0, 0.0), at(0.0, 6.6)], ink);
+    let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+    if resp.clicked() {
+        // A session that cannot pin still answers the click: a dimmed mark that says
+        // nothing back is a button the user keeps pressing.
+        if stuck {
+            app.shell.set_status(
+                "this session does not let an app stay on top: start it with PANDORA_X11=1",
+                StatusKind::Info,
+            );
+        } else {
+            app.prefs.on_top = !on;
+            crate::features::settings::model::save(&app.prefs);
+            app.level(ui.ctx());
+        }
+    }
+}
+
 fn controls(ui: &mut Ui, ctx: &Context) {
     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
     if control(ui, Glyph::Close, theme::palette().error).clicked() {

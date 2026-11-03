@@ -103,6 +103,10 @@ pub struct Prefs {
     /// share or a look over a shoulder is most likely while the user is elsewhere.
     #[serde(skip_serializing_if = "is_true")]
     pub hide_unfocused: bool,
+    /// Whether the window stays above every other. Off by default: a window that
+    /// cannot be covered is one the user has to remember to unpin.
+    #[serde(skip_serializing_if = "is_false")]
+    pub on_top: bool,
     /// How the passwords pane last drew a box, and what it grouped by, so a fresh
     /// unlock lands where the user left off instead of asking again.
     pub view: View,
@@ -230,6 +234,7 @@ impl Default for Prefs {
             lang: Lang::En,
             theme: crate::shared::theme::Scheme::Dark,
             update_check: true,
+            on_top: false,
             ssh_agent: false,
             ssh_socket: String::new(),
             breach_check: false,
