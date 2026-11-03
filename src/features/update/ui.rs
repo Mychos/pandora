@@ -1,11 +1,10 @@
 //! The strip a new release wears, and the settings row that can turn the check off.
 
 use crate::app::App;
-use crate::features::shell::screen::notice;
 use crate::features::update::model::{State, Update};
 use crate::shared::i18n::{t, tf};
 use crate::shared::theme;
-use egui::Ui;
+use egui::{RichText, Ui};
 
 /// Draw the strip for a release the user has not dismissed. Nothing is drawn when
 /// a check found none, or when the one it found is the one they already said
@@ -24,27 +23,49 @@ pub fn strip(ui: &mut Ui, app: &mut App) {
         None if downloading => t("updating…").to_owned(),
         None => tf("{version} is out", &[("version", &info.latest)]),
     };
+    // The mark says what the click does: fetch the release, or open its page.
+    let mark = if info.installable {
+        theme::Icon::Download
+    } else {
+        theme::Icon::Globe
+    };
 
     let mut install = false;
     let mut page = false;
     let mut later = false;
-    notice(ui, "update", &message, |ui| {
-        if downloading {
-            return;
-        }
-        // A build from a package manager cannot replace its own file: the only
-        // honest offer is the page the release is on.
-        if info.installable {
-            if ui.button(t("Update")).clicked() {
-                install = true;
-            }
-        } else if ui.button(t("Open release page")).clicked() {
-            page = true;
-        }
-        if ui.button(t("Later")).clicked() {
-            later = true;
-        }
-    });
+    egui::Panel::top("update")
+        .frame(
+            egui::Frame::NONE
+                .fill(theme::palette().elev)
+                .inner_margin(egui::Margin::symmetric(18, 8)),
+        )
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(image) = app.icons.image(mark, 15.0, theme::ACCENT) {
+                    ui.add(image);
+                }
+                ui.add(
+                    egui::Label::new(RichText::new(message).color(theme::palette().text)).wrap(),
+                );
+                if downloading {
+                    return;
+                }
+                // The bar reads left to right like a sentence, and the ways out sit at
+                // its end: the one the user came for, then the one that closes it.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if action(ui, &app.icons, "Later", false) {
+                        later = true;
+                    }
+                    if info.installable {
+                        if action(ui, &app.icons, "Update", true) {
+                            install = true;
+                        }
+                    } else if action(ui, &app.icons, "Open release page", true) {
+                        page = true;
+                    }
+                });
+            });
+        });
 
     if install {
         app.install_update(ui.ctx());
@@ -57,6 +78,31 @@ pub fn strip(ui: &mut Ui, app: &mut App) {
         app.prefs.skip = info.latest;
         crate::features::settings::model::save(&app.prefs);
     }
+}
+
+/// A button that takes the room of its label, not the room of the row: the theme's
+/// own take the whole width, which a form wants and a bar cannot give twice. No mark
+/// of its own: the bar already carries the one that says what a release is.
+fn action(ui: &mut Ui, icons: &theme::Icons, text: &str, primary: bool) -> bool {
+    let palette = theme::palette();
+    let (fill, ink) = if primary {
+        (theme::ACCENT, palette.paper)
+    } else {
+        (egui::Color32::TRANSPARENT, palette.text)
+    };
+    let atoms = icons.trailing(None, 13.0, ink, RichText::new(t(text)).strong().color(ink));
+    let stroke = if primary {
+        egui::Stroke::NONE
+    } else {
+        theme::stroke(palette.hair, 1.0)
+    };
+    ui.add(
+        egui::Button::new(atoms)
+            .fill(fill)
+            .stroke(stroke)
+            .min_size(egui::vec2(0.0, 30.0)),
+    )
+    .clicked()
 }
 
 /// The version line's own door in the settings: look now, and the switch that

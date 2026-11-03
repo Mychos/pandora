@@ -98,12 +98,6 @@ fn banner(ui: &mut Ui, id: &'static str, message: &'static str, actions: impl Fn
     );
 }
 
-/// The same strip for a notice in another colour, whose text is already built: a
-/// version and a percentage are not catalog entries.
-pub(crate) fn notice(ui: &mut Ui, id: &'static str, text: &str, actions: impl FnOnce(&mut Ui)) {
-    strip(ui, id, text, theme::palette().note, actions);
-}
-
 fn strip(ui: &mut Ui, id: &'static str, text: &str, color: Color32, actions: impl FnOnce(&mut Ui)) {
     egui::Panel::top(id)
         .frame(
