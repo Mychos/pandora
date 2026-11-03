@@ -799,21 +799,17 @@ fn pin(ui: &mut Ui, app: &mut App) {
             theme::palette().hover,
         );
     }
-    // Painted, not placed: the window controls beside it are vectors, and a 14pt
-    // sprite between them reads as a smudge whatever the filter.
+    // Jota's mark, at the bar's own size: the pin leans while the window is one more
+    // and stands up when it is pinned. `Image::rotate` turns the mesh, not the texture,
+    // so the glyph keeps its shape.
+    let mark = 12.0;
     let angle = 25f32.to_radians() * (1.0 - turned);
-    let lean = egui::emath::Rot2::from_angle(angle);
     let centre = rect.center() + vec2(0.0, turned * 1.5);
-    let at = |x: f32, y: f32| centre + lean * vec2(x, y);
-    let ink = egui::Stroke::new(1.3, colour);
-    let painter = ui.painter();
-    painter.add(egui::Shape::convex_polygon(
-        vec![at(-3.0, -7.0), at(3.0, -7.0), at(4.2, 0.0), at(-4.2, 0.0)],
-        Color32::TRANSPARENT,
-        ink,
-    ));
-    painter.line_segment([at(-5.2, 0.0), at(5.2, 0.0)], ink);
-    painter.line_segment([at(0.0, 0.0), at(0.0, 6.6)], ink);
+    if let Some(image) = app.icons.image(theme::Icon::Pin, mark, colour) {
+        image
+            .rotate(angle, vec2(0.5, 0.5))
+            .paint_at(ui, Rect::from_center_size(centre, vec2(mark, mark)));
+    }
     let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
     if resp.clicked() {
         // A session that cannot pin still answers the click: a dimmed mark that says

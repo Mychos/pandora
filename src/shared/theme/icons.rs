@@ -53,6 +53,7 @@ pub enum Icon {
     Forward,
     Volume,
     Mute,
+    Pin,
 }
 
 const ICON_FILES: &[(Icon, &str)] = &[
@@ -103,6 +104,7 @@ const ICON_FILES: &[(Icon, &str)] = &[
     (Icon::Forward, "fast-forward"),
     (Icon::Volume, "volume-2"),
     (Icon::Mute, "volume-x"),
+    (Icon::Pin, "pin"),
 ];
 
 /// 28 px under a pointer; a phone asks for [`responsive::target`] instead.
@@ -364,6 +366,7 @@ fn load_sprite(name: &str) -> Result<egui::ColorImage, image::ImageError> {
         "fast-forward" => include_bytes!("../../../assets/icons/fast-forward.png"),
         "volume-2" => include_bytes!("../../../assets/icons/volume-2.png"),
         "volume-x" => include_bytes!("../../../assets/icons/volume-x.png"),
+        "pin" => include_bytes!("../../../assets/icons/pin.png"),
         _ => return Ok(egui::ColorImage::new([1, 1], vec![Color32::TRANSPARENT])),
     };
     decode(bytes)
