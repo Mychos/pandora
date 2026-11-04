@@ -115,9 +115,15 @@ rodio = { version = "0.23", default-features = false, features = [
 # The YubiKey's HMAC-SHA1 challenge-response, desktop only: it needs USB HID, and a
 # phone does not have a port for one. `rusb` is asked whether this host has USB at all,
 # because the crate above answers that question with an `unwrap`.
+#
+# `vendored`: libusb is compiled in and linked statically. Without it the build script
+# links whatever pkg-config finds, and a macOS runner that has Homebrew's libusb puts
+# `/opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib` in the bundle's load commands — a
+# dmg that dies on launch on every Mac without that formula. The AppImage had the same
+# hole and papered over it by copying the `.so` beside the binary.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 yubikey-hmac-otp = "0.10"
-rusb = "0.9"
+rusb = { version = "0.9", features = ["vendored"] }
 
 # Desktop only: the native file picker (xdg-desktop-portal on Linux, so no GTK)
 # and the clipboard egui copies through — the app reads it back so the countdown

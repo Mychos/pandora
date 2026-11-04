@@ -61,10 +61,12 @@ mkdir -p "$appdir/usr/bin" "$appdir/usr/lib" \
 cargo build --release --locked
 install -m 0755 "$target/release/pandora" "$appdir/usr/bin/pandora"
 
-# Besides glibc, the binary asks for two libraries: ALSA (the audio preview) and
-# libusb (the YubiKey's HMAC exchange). Both are bundled, so the AppImage opens on a
-# host without either; ALSA's plugins are still loaded from the host.
-for soname in libasound.so.2 libusb-1.0.so.0; do
+# Besides glibc, the binary asks for one library: ALSA (the audio preview). It is
+# bundled, so the AppImage opens on a host without it; ALSA's plugins are still loaded
+# from the host. libusb is not here: it is compiled into the binary (`rusb`'s
+# `vendored` feature), because a `.so` beside it is exactly the sort of thing a shipped
+# app should not need.
+for soname in libasound.so.2; do
   found=$(ldd "$target/release/pandora" | awk -v wanted="$soname" '$1 == wanted { print $3; exit }')
   if [ -n "$found" ] && [ -f "$found" ]; then
     cp -L "$found" "$appdir/usr/lib/$soname"
