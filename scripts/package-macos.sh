@@ -3,9 +3,16 @@
 #
 #   scripts/package-macos.sh
 #
-# macOS only: `lipo`, `codesign`, `hdiutil` and `ditto` are the platform's own.
-# The bundle is ad-hoc signed, not notarized — Gatekeeper still asks the user to
-# confirm the first launch.
+# macOS only: `lipo`, `codesign`, `hdiutil`, `ditto` and `xcrun` are the platform's own.
+#
+# Signing is optional, and its absence is not silent. With
+# `PANDORA_APPLE_CERT_P12` (base64 of a Developer ID Application .p12),
+# `PANDORA_APPLE_CERT_PASSWORD`, `PANDORA_APPLE_ID`, `PANDORA_APPLE_TEAM_ID` and
+# `PANDORA_APPLE_APP_PASSWORD` the bundle is signed, notarized and stapled — the only
+# way a download opens on the first double-click on a Mac that never saw the app.
+# Without them it is ad-hoc signed: fine on the machine that built it, and a
+# right-click → Open everywhere else, because Gatekeeper quarantines what a browser
+# downloaded. `release.yml` passes the five secrets when they exist.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -32,6 +39,27 @@ lipo -create \
   target/x86_64-apple-darwin/release/pandora \
   -output "$app/Contents/MacOS/pandora"
 chmod 0755 "$app/Contents/MacOS/pandora"
+
+# A universal build is two builds lipo'd together, and a missing slice only shows up
+# on the Mac it cannot start on.
+for arch in arm64 x86_64; do
+  case " $(lipo -archs "$app/Contents/MacOS/pandora") " in
+    *" $arch "*) ;;
+    *)
+      echo "error: the binary has no $arch slice" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# A bundle that asks for something in a Homebrew prefix opens on the machine that built
+# it and dies on the user's. libusb is the one that bit (the YubiKey, now vendored), so
+# the check is on the whole binary rather than on one dylib.
+if otool -L "$app/Contents/MacOS/pandora" | grep -Eq '/(opt/homebrew|usr/local)/'; then
+  echo "error: the binary loads a library from a local prefix" >&2
+  otool -L "$app/Contents/MacOS/pandora" >&2
+  exit 1
+fi
 
 install -m 0644 assets/app/macos/pandora.icns \
   "$app/Contents/Resources/pandora.icns"
@@ -77,13 +105,106 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 
 xattr -cr "$app"
-codesign --force --deep --sign - "$app"
+
+# The Developer ID lives in a keychain of its own, made from the secret and deleted
+# again, so nothing is imported into the runner's login keychain.
+keychain=""
+work=""
+cleanup() {
+  [ -z "$work" ] || rm -rf "$work"
+  [ -z "$keychain" ] || security delete-keychain "$keychain" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+signing=""
+if [ -n "${PANDORA_APPLE_CERT_P12:-}" ]; then
+  work=$(mktemp -d)
+  keychain="$work/pandora-signing.keychain-db"
+  password=$(uuidgen)
+  security create-keychain -p "$password" "$keychain"
+  security set-keychain-settings -lut 3600 "$keychain"
+  security unlock-keychain -p "$password" "$keychain"
+  printf '%s' "$PANDORA_APPLE_CERT_P12" \
+    | openssl base64 -d -A -out "$work/cert.p12"
+  security import "$work/cert.p12" -k "$keychain" \
+    -P "${PANDORA_APPLE_CERT_PASSWORD:?}" -T /usr/bin/codesign >/dev/null
+  security set-key-partition-list -S apple-tool:,apple:,codesign: \
+    -k "$password" "$keychain" >/dev/null
+  signing=$(security find-identity -v -p codesigning "$keychain" \
+    | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
+  if [ -z "$signing" ]; then
+    echo "error: PANDORA_APPLE_CERT_P12 holds no Developer ID Application identity" >&2
+    exit 1
+  fi
+fi
+
+if [ -n "$signing" ]; then
+  codesign --force --timestamp --options runtime \
+    --keychain "$keychain" --sign "$signing" "$app"
+else
+  codesign --force --sign - "$app"
+fi
+
+notarizable=no
+if [ -n "$signing" ]; then
+  if [ -n "${PANDORA_APPLE_ID:-}" ]; then
+    notarizable=yes
+  else
+    echo "warning: signed with the Developer ID but not notarized: a download will still be refused" >&2
+  fi
+fi
+
+notarize() {
+  xcrun notarytool submit "$1" \
+    --apple-id "${PANDORA_APPLE_ID:?}" \
+    --team-id "${PANDORA_APPLE_TEAM_ID:?}" \
+    --password "${PANDORA_APPLE_APP_PASSWORD:?}" \
+    --wait
+}
+
+# The app is notarized before the image is built, so both carry a stapled ticket: the
+# one in the .app covers a copy dragged out of the image, the one in the .dmg covers the
+# image itself.
+if [ "$notarizable" = yes ]; then
+  [ -n "$work" ] || work=$(mktemp -d)
+  ditto -c -k --keepParent "$app" "$work/app.zip"
+  notarize "$work/app.zip"
+  xcrun stapler staple "$app"
+fi
 
 dmg="$dist/Pandora-$version-macos-universal.dmg"
 zip="$dist/Pandora-$version-macos-universal.zip"
 rm -f "$dmg" "$zip"
-hdiutil create -volname "Pandora" -srcfolder "$app" -ov -format UDZO "$dmg"
+
+# A volume with the app and a way to install it: dragging onto a folder in Finder is
+# how a Mac user installs an app, and an image with only the app in it reads as one
+# that has to be copied by hand.
+stage="$dist/.dmg"
+rm -rf "$stage"
+mkdir -p "$stage"
+cp -R "$app" "$stage/"
+ln -s /Applications "$stage/Applications"
+hdiutil create -volname "Pandora" -srcfolder "$stage" -ov -format UDZO "$dmg"
+rm -rf "$stage"
+
+if [ -n "$signing" ]; then
+  codesign --force --timestamp --keychain "$keychain" --sign "$signing" "$dmg"
+  if [ "$notarizable" = yes ]; then
+    notarize "$dmg"
+    xcrun stapler staple "$dmg"
+  fi
+fi
+
 ditto -c -k --keepParent "$app" "$zip"
+
+# What the user's launch actually asks: a valid signature, both slices, and — when the
+# secrets were there — the two assessments Gatekeeper runs.
+codesign --verify --strict --verbose=2 "$app"
+hdiutil verify "$dmg" >/dev/null
+if [ "$notarizable" = yes ]; then
+  spctl --assess --type execute -vv "$app"
+  spctl --assess --type open --context context:primary-signature -vv "$dmg"
+fi
 
 ls -lh "$dmg" "$zip"
 shasum -a 256 "$dmg" "$zip"

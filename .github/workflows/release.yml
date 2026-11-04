@@ -61,6 +61,7 @@ jobs:
           PANDORA_KEY_PASSWORD: ${{ secrets.PANDORA_KEY_PASSWORD }}
           PANDORA_MINISIGN_PUBLIC_KEY: ${{ vars.PANDORA_MINISIGN_PUBLIC_KEY }}
           PANDORA_MINISIGN_SECRET_KEY: ${{ secrets.PANDORA_MINISIGN_SECRET_KEY }}
+          PANDORA_APPLE_CERT_P12: ${{ secrets.PANDORA_APPLE_CERT_P12 }}
         run: |
           set -euo pipefail
 
@@ -117,6 +118,13 @@ jobs:
             if [ -n "${PANDORA_MINISIGN_PUBLIC_KEY:-}" ] && [ -z "${PANDORA_MINISIGN_SECRET_KEY:-}" ]; then
               echo "::error::releasing $REQUESTED_TAG needs PANDORA_MINISIGN_SECRET_KEY: the builds carry PANDORA_MINISIGN_PUBLIC_KEY and refuse an unsigned SHA256SUMS" >&2
               exit 1
+            fi
+
+            # Not fatal — an ad-hoc build is usable with a right-click — but a tag
+            # without it publishes the one artifact that does not open on a first
+            # double-click, and nothing else in the run says so.
+            if [ -z "${PANDORA_APPLE_CERT_P12:-}" ]; then
+              echo "::warning::releasing $REQUESTED_TAG without PANDORA_APPLE_CERT_P12: the macOS dmg will be ad-hoc signed and Gatekeeper will ask for right-click → Open"
             fi
           fi
 
@@ -305,11 +313,23 @@ jobs:
           # The public half of the release key, compiled in so the updater can check
           # what it downloads. A repository variable, not a secret.
           PANDORA_MINISIGN_PUBLIC_KEY: ${{ vars.PANDORA_MINISIGN_PUBLIC_KEY }}
+          # Gatekeeper: a download a browser quarantined only opens on a double-click
+          # when the bundle is Developer ID signed, notarized and stapled. Without
+          # these the script falls back to an ad-hoc signature, which is a
+          # right-click → Open on every Mac that did not build it.
+          PANDORA_APPLE_CERT_P12: ${{ secrets.PANDORA_APPLE_CERT_P12 }}
+          PANDORA_APPLE_CERT_PASSWORD: ${{ secrets.PANDORA_APPLE_CERT_PASSWORD }}
+          PANDORA_APPLE_ID: ${{ secrets.PANDORA_APPLE_ID }}
+          PANDORA_APPLE_TEAM_ID: ${{ secrets.PANDORA_APPLE_TEAM_ID }}
+          PANDORA_APPLE_APP_PASSWORD: ${{ secrets.PANDORA_APPLE_APP_PASSWORD }}
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
           if [ -z "${PANDORA_GITHUB_CLIENT_ID:-}" ]; then
             unset PANDORA_GITHUB_CLIENT_ID
             echo "::warning::PANDORA_GITHUB_CLIENT_ID is not set; this build refuses GitHub sign-in"
+          fi
+          if [ -z "${PANDORA_APPLE_CERT_P12:-}" ]; then
+            echo "::warning::PANDORA_APPLE_CERT_P12 is not set; the .app is ad-hoc signed, so a downloaded copy needs right-click → Open"
           fi
           scripts/package-macos.sh
 

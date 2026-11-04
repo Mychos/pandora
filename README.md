@@ -319,7 +319,10 @@ icons under `assets/app/linux/`; `scripts/appimage.sh` and `scripts/package-maco
 package a release build.
 
 Prebuilt: AppImage on Linux, portable zip and bare `.exe` on Windows, universal
-`.dmg`/`.zip` on macOS. The in-app updater installs them.
+`.dmg`/`.zip` on macOS. The in-app updater installs them. A macOS bundle is only
+notarized when the release carries the Developer ID secrets (`PANDORA_APPLE_CERT_P12`
+and the four that go with it); built without them it is ad-hoc signed, which runs as
+soon as it is compiled and asks for right-click → Open when it arrives as a download.
 
 **Android.** SDK, NDK and a JDK 17–25:
 

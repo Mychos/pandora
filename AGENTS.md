@@ -99,11 +99,27 @@ XDG_RUNTIME_DIR=/tmp/pandora-bench \
 | --- | --- |
 | Linux | `Pandora-<version>-x86_64.AppImage` |
 | Windows | `Pandora-<version>-windows-x86_64.zip` (portable, unsigned) and the bare `.exe` the in-app update replaces |
-| macOS | `Pandora-<version>-macos-universal.dmg` and `.zip` (ad-hoc signed, not notarized) |
+| macOS | `Pandora-<version>-macos-universal.dmg` and `.zip` (Developer ID signed, notarized and stapled when the Apple secrets are set; ad-hoc otherwise) |
 | Android | `Pandora-<version>-android-arm64.apk` (signed with the release key) |
 
 The Linux job runs on Ubuntu 22.04 on purpose: the AppImage inherits the runner's
 glibc floor, and 2.35 still opens on Debian 12 and Ubuntu 22.04.
+
+**A macOS bundle carries everything it needs.** The binary loads nothing from
+`/opt/homebrew` or `/usr/local` — `package-macos.sh` refuses a build that does, which is
+how the YubiKey's libusb was caught: `rusb` is built with `vendored`, so libusb is
+compiled in rather than found with pkg-config on whichever machine built it. Both slices
+are checked with `lipo -archs` and the signature with `codesign --verify` before the
+artifacts are written. Gatekeeper is the other half: a quarantined download opens on a
+double-click only when the bundle is Developer ID signed, notarized and stapled, so
+`package-macos.sh` imports `PANDORA_APPLE_CERT_P12` into a throwaway keychain, signs with
+the hardened runtime and a timestamp, notarizes the app, staples it, then builds the dmg
+(and signs, notarizes and staples that) before the zip is made from the stapled app.
+The other four secrets are `PANDORA_APPLE_CERT_PASSWORD`, `PANDORA_APPLE_ID`,
+`PANDORA_APPLE_TEAM_ID` and `PANDORA_APPLE_APP_PASSWORD`. A run without them still
+builds — ad-hoc signed, which is the right-click → Open every Mac before this needed —
+and `meta` warns about it on a tag, because a published dmg nobody can open on a click
+is a release with a hole in it.
 
 A `vX.Y.Z` tag runs every job and publishes the artifacts plus `SHA256SUMS` as a
 GitHub Release. The Linux job also builds the AppImage a second time from a clean tree
