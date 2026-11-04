@@ -961,7 +961,15 @@ fn open(ui: &egui::Ui, app: &mut App, path: &Path) {
     app.auth.unlock_path = path.display().to_string();
     app.auth.unlock_keyfile.clear();
     app.screen = Screen::Unlock;
-    ui.memory_mut(|mem| mem.request_focus(auth::password_id()));
+    // A box with a seal opens with the reader, not with the form: on a phone the
+    // finger is already there, and raising the password field under the system's
+    // prompt asks for a field the user is not looking at. Backing out of the prompt
+    // leaves the form exactly as it was, ready to be typed into.
+    if auth::sealed(app) {
+        app.unlock_biometric();
+    } else {
+        ui.memory_mut(|mem| mem.request_focus(auth::password_id()));
+    }
 }
 
 /// A full-width quiet button; the caller hands label and mark, sprite or brand.

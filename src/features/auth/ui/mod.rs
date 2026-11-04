@@ -467,8 +467,9 @@ pub fn unlock(ui: &mut egui::Ui, app: &mut App) {
         });
 }
 
-/// Is this box set up to open with the device's reader?
-fn sealed(app: &App) -> bool {
+/// Is this box set up to open with the device's reader? The unlock form offers the
+/// button on the same answer the picker uses to go straight to the prompt.
+pub(crate) fn sealed(app: &App) -> bool {
     let path = app.auth.unlock_path.trim();
     !path.is_empty()
         && crate::features::auth::biometric::available()
