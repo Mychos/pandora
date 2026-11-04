@@ -190,10 +190,8 @@ fn the_machine_view_lists_local_files_and_leaves_working_copies_alone() {
     fs::write(&outside, b"locked").unwrap();
 
     app.auth.recents = vec![
-        crate::features::auth::model::Recent { path: inside },
-        crate::features::auth::model::Recent {
-            path: outside.clone(),
-        },
+        crate::features::auth::model::Recent::at(inside),
+        crate::features::auth::model::Recent::at(outside.clone()),
     ];
 
     let words = texts(&frame(&mut app, &ctx, Vec::new()));
@@ -221,9 +219,11 @@ fn the_local_list_keeps_the_bar_gutter_beside_its_buttons() {
     let mut app = App::blank(&ctx);
     app.screen = Screen::Sources;
     app.auth.side = Some(Side::Machine);
-    app.auth.recents.push(crate::features::auth::model::Recent {
-        path: PathBuf::from("/tmp/local-box.pandora"),
-    });
+    app.auth
+        .recents
+        .push(crate::features::auth::model::Recent::at(PathBuf::from(
+            "/tmp/local-box.pandora",
+        )));
 
     let shapes = frame(&mut app, &ctx, Vec::new());
     let row_name = rect_of(&shapes, "local-box");
@@ -560,8 +560,8 @@ fn a_working_copy_sits_in_the_recents_beside_a_local_file() {
     assert_eq!(app.source_of(&outside), None);
 
     app.auth.recents = vec![
-        crate::features::auth::model::Recent { path: inside },
-        crate::features::auth::model::Recent { path: outside },
+        crate::features::auth::model::Recent::at(inside),
+        crate::features::auth::model::Recent::at(outside),
     ];
     let listed: Vec<_> = app.auth.recents.iter().map(|r| r.label()).collect();
     assert_eq!(
@@ -583,10 +583,8 @@ fn a_copy_carries_the_github_mark_before_its_source_is_known() {
     let inside = store::source_dir(&source.kind, &source.target).join("work.pandora");
     let outside = PathBuf::from("/tmp/plain.pandora");
     app.auth.recents = vec![
-        crate::features::auth::model::Recent {
-            path: inside.clone(),
-        },
-        crate::features::auth::model::Recent { path: outside },
+        crate::features::auth::model::Recent::at(inside.clone()),
+        crate::features::auth::model::Recent::at(outside),
     ];
 
     // The folder says the copy is a repo's even with no source in the prefs.
@@ -1228,8 +1226,10 @@ fn the_recents_card_keeps_the_floor_gap_of_the_local_view() {
     let mut app = App::blank(&ctx);
     app.screen = Screen::Sources;
     app.auth.recents = (0..12)
-        .map(|i| crate::features::auth::model::Recent {
-            path: PathBuf::from(format!("/tmp/floor{i}.pandora")),
+        .map(|i| {
+            crate::features::auth::model::Recent::at(PathBuf::from(format!(
+                "/tmp/floor{i}.pandora"
+            )))
         })
         .collect();
 

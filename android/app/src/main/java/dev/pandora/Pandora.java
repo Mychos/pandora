@@ -136,6 +136,14 @@ public final class Pandora {
 
     private static volatile String picked;
 
+    /**
+     * Where the last pick came from, as `uri\nstamp`: the document the copy was made
+     * from and when that document last said it changed. A copy with no origin can
+     * never be told apart from the newest version, which is how a phone goes on
+     * opening a box the desk replaced weeks ago.
+     */
+    private static volatile String pickedOrigin;
+
     /** The same latch for the folder picker: a tree, not a copied file. */
     private static volatile CountDownLatch choosing;
 
@@ -598,6 +606,7 @@ public final class Pandora {
         CountDownLatch done = new CountDownLatch(1);
         picking = done;
         picked = null;
+        pickedOrigin = null;
         failure = null;
         current.runOnUiThread(() -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
@@ -938,12 +947,44 @@ public final class Pandora {
         }
         try {
             if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
-                picked = importTo(data.getData());
+                Uri uri = data.getData();
+                picked = importTo(uri);
+                // The grant has to outlive the process: without it nothing can ask the
+                // document later whether it moved on.
+                currentPersist(uri);
+                pickedOrigin = originOf(uri);
             }
         } catch (Exception e) {
             failure = "the picked file could not be copied: " + e;
         }
         waiting.countDown();
+    }
+
+    /** Where the last pick came from and when it changed, once: the caller consumes it. */
+    static String pickedOrigin() {
+        String it = pickedOrigin;
+        pickedOrigin = null;
+        return it;
+    }
+
+    /** When a document says it last changed; null when the provider will not say. */
+    static String documentModified(String uri) {
+        Activity current = activity;
+        if (current == null || uri == null) {
+            return null;
+        }
+        long at = modified(current, Uri.parse(uri));
+        return at < 0 ? null : Long.toString(at);
+    }
+
+    /** A picked document's origin, as the field above spells it: `uri\nstamp`. */
+    private static String originOf(Uri uri) {
+        Activity current = activity;
+        if (current == null || uri == null) {
+            return null;
+        }
+        long at = modified(current, uri);
+        return at < 0 ? null : uri + "\n" + at;
     }
 
     private static void createPicked(int resultCode, Intent data) {

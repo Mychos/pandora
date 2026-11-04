@@ -295,6 +295,23 @@ fn press(input: &mut egui::InputState, key: egui::Key) {
     });
 }
 
+/// Where the file the picker last brought in came from, and when that document last
+/// said it changed: the copy on this phone is only ever as new as that answer.
+/// `None` for a build that hands over no origin, or a provider that will not say.
+pub fn picked_origin() -> Result<Option<(String, u64)>, String> {
+    let Some(text) = text("pickedOrigin")? else {
+        return Ok(None);
+    };
+    let (uri, stamp) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+    Ok(stamp.parse().ok().map(|stamp| (uri.to_owned(), stamp)))
+}
+
+/// When a document says it last changed, in the provider's own milliseconds. `None`
+/// when it will not answer — no network is not the same as unchanged.
+pub fn document_modified(uri: &str) -> Result<Option<u64>, String> {
+    Ok(text_with("documentModified", uri)?.and_then(|it| it.parse().ok()))
+}
+
 /// Read a single document by its content uri.
 pub fn document_read(uri: &str) -> Result<Option<Vec<u8>>, String> {
     bytes_with("documentRead", uri)

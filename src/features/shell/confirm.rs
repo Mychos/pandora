@@ -397,7 +397,7 @@ mod tests {
         let mut app = open(&ctx);
         let path = app.boxes.session.as_ref().unwrap().path.clone();
         std::fs::write(&path, b"box").unwrap();
-        app.auth.recents = vec![Recent { path: path.clone() }];
+        app.auth.recents = vec![Recent::at(path.clone())];
 
         let (title, body) = describe(&app, &Confirm::Box);
         assert_eq!(title, "Delete box file?");

@@ -12,15 +12,34 @@ use crate::vault::store::Credentials;
 
 const KEEP: usize = 12;
 
+/// Where a phone's copy of a box came from: the document the picker handed over, and
+/// when that document last said it changed. A platform that can open a file in place
+/// needs neither — there is nothing stale to compare.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Origin {
+    pub uri: String,
+    /// Milliseconds since the epoch, in the provider's own stamp.
+    pub stamp: u64,
+}
+
 /// A box the user has unlocked at least once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recent {
     /// Where it is. The list is the way back into a box, so it has to point at the
     /// file; what it never carries is the box's own name.
     pub path: PathBuf,
+    /// Set only for a copy a picker made: a box this machine owns is never stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
 }
 
 impl Recent {
+    /// A box this machine owns: no copy behind it, so nothing can ever be older
+    /// than anything.
+    pub fn at(path: PathBuf) -> Self {
+        Self { path, origin: None }
+    }
+
     /// What the row says: the file's own name, without the extension. The name the
     /// box goes under is inside the box, and this list sits outside every box with
     /// nothing encrypted in it — so it does not repeat it.
@@ -42,9 +61,12 @@ pub fn load() -> Vec<Recent> {
     read(&dir())
 }
 
-pub fn remember(path: &Path) -> Vec<Recent> {
+pub fn remember(path: &Path, origin: Option<Origin>) -> Vec<Recent> {
     let dir = dir();
-    push(&dir, path);
+    match origin {
+        Some(origin) => push_from(&dir, path, origin),
+        None => push(&dir, path),
+    }
     read(&dir)
 }
 
@@ -72,12 +94,29 @@ fn read(dir: &Path) -> Vec<Recent> {
 /// `pub(crate)` so the contract test can write this file beside the other two and
 /// check what none of them may say.
 pub(crate) fn push(dir: &Path, path: &Path) {
+    write(dir, path, None);
+}
+
+/// The same row, carrying where the copy came from: a phone's copy is the only one
+/// that can outlive the document it was made from.
+pub(crate) fn push_from(dir: &Path, path: &Path, origin: Origin) {
+    write(dir, path, Some(origin));
+}
+
+fn write(dir: &Path, path: &Path, origin: Option<Origin>) {
     let mut entries = read(dir);
+    // A pick says where the copy now comes from; every other open says nothing about
+    // that, and must not forget it — the second unlock of a copy is the same copy.
+    let before = entries
+        .iter()
+        .find(|e| e.path == path)
+        .and_then(|e| e.origin.clone());
     entries.retain(|e| e.path != path);
     entries.insert(
         0,
         Recent {
             path: path.to_path_buf(),
+            origin: origin.or(before),
         },
     );
     entries.truncate(KEEP);
@@ -159,6 +198,8 @@ pub enum OpKind {
     Seal,
     /// Picking a box file on a platform whose picker is not a window.
     Pick,
+    /// Asking the document a phone's copy came from whether it moved on since.
+    Stale,
 }
 
 #[allow(clippy::large_enum_variant)] // the vault rides out of the worker once and is taken, not kept
@@ -169,13 +210,17 @@ pub enum OpOutcome {
     PasswordChanged(PathBuf, Credentials, bool),
     /// The box was re-derived with the key mixed in, or without it. The flag is which.
     KeyChanged(PathBuf, Credentials, bool),
-    /// The box file the picker brought in, to be filled into the form.
-    Picked(PathBuf),
+    /// The box file the picker brought in, to be filled into the form, and where
+    /// that copy came from when the platform had to make one.
+    Picked(PathBuf, Option<Origin>),
     /// A destination uri the picker chose for a new box.
     Destination(String),
     /// The reader kept the open box's key. Backing out of the prompt is not this:
     /// it is a cancelled operation, and nothing is said about it.
     Kept,
+    /// The document a phone's copy came from, and when it says it last changed:
+    /// the stamp the copy was taken at, and the answer, if the provider gave one.
+    Stale(u64, Option<u64>),
 }
 
 pub struct Op {
@@ -244,6 +289,9 @@ pub struct Auth {
     pub key: KeyForm,
     pub op: Option<Op>,
     pub login: Option<Login>,
+    /// The origin of the box the picker just brought in, waiting for the unlock
+    /// that will put it in the recents beside the path it belongs to.
+    pub picked: Option<(PathBuf, Origin)>,
 }
 
 #[cfg(test)]
@@ -323,6 +371,53 @@ mod tests {
         push(&dir, &p);
         let text = fs::read_to_string(file(&dir)).unwrap();
         assert!(!text.contains("Divorce"), "and the name left: {text}");
+    }
+
+    /// The row remembers the document a phone's copy came from, so a later open can
+    /// say whether that document moved on; and it keeps that memory when the same
+    /// copy is opened again, which says nothing about where it came from.
+    #[test]
+    fn a_picked_copy_remembers_its_document_until_it_is_picked_again() {
+        let dir = tmp("origin");
+        let p = touch(&dir, "personal.box");
+        let origin = |stamp: u64| Origin {
+            uri: "content://docs/personal".to_owned(),
+            stamp,
+        };
+
+        push_from(&dir, &p, origin(1_700_000_000_000));
+        assert_eq!(
+            read(&dir)[0].origin.as_ref().map(|o| o.stamp),
+            Some(1_700_000_000_000),
+            "the stamp the copy was taken at travels with the row"
+        );
+
+        push(&dir, &p);
+        assert!(
+            read(&dir)[0].origin.is_some(),
+            "unlocking the copy again does not forget its document"
+        );
+
+        push_from(&dir, &p, origin(1_800_000_000_000));
+        assert_eq!(
+            read(&dir)[0].origin.as_ref().map(|o| o.stamp),
+            Some(1_800_000_000_000),
+            "a new pick is a new copy, and a new stamp"
+        );
+    }
+
+    /// A row with no copy behind it never grows one: this machine's own file has
+    /// nothing older to be behind.
+    #[test]
+    fn a_local_box_carries_no_origin() {
+        let dir = tmp("plain");
+        let p = touch(&dir, "work.box");
+        push(&dir, &p);
+        assert!(read(&dir)[0].origin.is_none());
+        assert!(
+            !fs::read_to_string(file(&dir)).unwrap().contains("origin"),
+            "and the field is not even written"
+        );
     }
 
     #[test]

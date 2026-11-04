@@ -152,7 +152,15 @@ impl App {
                 {
                     prefs::save(&self.prefs);
                 }
-                self.auth.recents = crate::features::auth::model::remember(&path);
+                // A copy the picker made remembers the document it came from, so a
+                // later open can say whether that document moved on.
+                let origin = self
+                    .auth
+                    .picked
+                    .take()
+                    .filter(|(at, _)| *at == path)
+                    .map(|(_, origin)| origin);
+                self.auth.recents = crate::features::auth::model::remember(&path, origin);
                 // A password that just worked is the moment to keep the key for
                 // the device's reader, before it moves into the session.
                 if op.kind != OpKind::Biometric {
@@ -168,6 +176,18 @@ impl App {
                 }
                 if op.kind == OpKind::Create {
                     self.shell.set_status("box created", StatusKind::Saved);
+                }
+                #[cfg(target_os = "android")]
+                self.ask_origin(&path);
+            }
+            Ok(OpOutcome::Stale(taken, now)) => {
+                if now.is_some_and(|now| now != taken) {
+                    self.shell.set_status(
+                        crate::shared::i18n::t(
+                            "this copy is older than the document it came from — open the file again to bring the new one in",
+                        ),
+                        StatusKind::Error,
+                    );
                 }
             }
             Ok(OpOutcome::PasswordChanged(path, creds, erase_remote)) => {
@@ -237,7 +257,8 @@ impl App {
                     }
                 }
             }
-            Ok(OpOutcome::Picked(path)) => {
+            Ok(OpOutcome::Picked(path, origin)) => {
+                self.auth.picked = origin.map(|origin| (path.clone(), origin));
                 self.auth.unlock_path = path.display().to_string();
                 self.shell.set_status(
                     "box file imported — enter its master password",
@@ -338,6 +359,29 @@ impl App {
         );
     }
 
+    /// The copy on this phone is only as new as the document it came from: ask that
+    /// document — on a worker, a provider is a network — and say what it answers. A
+    /// box this machine owns has no origin, so this costs nothing.
+    #[cfg(target_os = "android")]
+    fn ask_origin(&mut self, path: &Path) {
+        let Some(origin) = self
+            .auth
+            .recents
+            .iter()
+            .find(|r| r.path == path)
+            .and_then(|r| r.origin.clone())
+        else {
+            return;
+        };
+        if self.auth.op.is_some() {
+            return;
+        }
+        self.auth.task(OpKind::Stale, move || {
+            let now = crate::shared::android::document_modified(&origin.uri)?;
+            Ok(OpOutcome::Stale(origin.stamp, now))
+        });
+    }
+
     /// Bring a box file in from the phone's own storage. Android's picker belongs
     /// to the activity, not to a window, so it cannot run inside a frame.
     #[cfg(target_os = "android")]
@@ -346,7 +390,8 @@ impl App {
             return;
         }
         self.auth.task(OpKind::Pick, || {
-            crate::features::auth::pick::import().map(OpOutcome::Picked)
+            crate::features::auth::pick::import()
+                .map(|(path, origin)| OpOutcome::Picked(path, origin))
         });
     }
 

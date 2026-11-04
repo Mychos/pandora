@@ -228,9 +228,7 @@ fn previously_opened_boxes_are_listed() {
     let mut app = unlock_app(&ctx);
     app.screen = Screen::Sources;
     app.auth.side = Some(Side::Recents);
-    app.auth.recents = vec![Recent {
-        path: PathBuf::from("/tmp/work.box"),
-    }];
+    app.auth.recents = vec![Recent::at(PathBuf::from("/tmp/work.box"))];
     let shapes = shapes(&mut app, &ctx);
     hint(&shapes, "work");
     hint(&shapes, "/tmp/work.box");
@@ -245,12 +243,8 @@ fn the_search_hides_boxes_that_do_not_match() {
     app.screen = Screen::Sources;
     app.auth.side = Some(Side::Recents);
     app.auth.recents = vec![
-        Recent {
-            path: PathBuf::from("/tmp/work.box"),
-        },
-        Recent {
-            path: PathBuf::from("/tmp/home.box"),
-        },
+        Recent::at(PathBuf::from("/tmp/work.box")),
+        Recent::at(PathBuf::from("/tmp/home.box")),
     ];
     app.auth.recent_search = "work".to_owned();
     let shapes = shapes(&mut app, &ctx);
@@ -267,9 +261,7 @@ fn the_scroll_bar_shows_a_handle_that_turns_accent() {
     app.screen = Screen::Sources;
     app.auth.side = Some(Side::Recents);
     app.auth.recents = (0..12)
-        .map(|i| Recent {
-            path: PathBuf::from(format!("/tmp/box{i}.pandora")),
-        })
+        .map(|i| Recent::at(PathBuf::from(format!("/tmp/box{i}.pandora"))))
         .collect();
 
     let bar = |shapes: &[egui::epaint::ClippedShape], fill| {
@@ -333,12 +325,8 @@ fn the_recents_carry_every_source_with_its_own_mark() {
     };
     app.prefs.sources = vec![work.clone()];
     app.auth.recents = vec![
-        Recent {
-            path: crate::vault::store::source_dir(&work.kind, &work.target).join("bank.pandora"),
-        },
-        Recent {
-            path: PathBuf::from("/tmp/plain.pandora"),
-        },
+        Recent::at(crate::vault::store::source_dir(&work.kind, &work.target).join("bank.pandora")),
+        Recent::at(PathBuf::from("/tmp/plain.pandora")),
     ];
 
     let shapes = shapes_at(&mut app, &ctx, egui::vec2(1000.0, 1600.0));
@@ -353,9 +341,7 @@ fn the_picker_switches_between_the_three_views() {
     theme::apply(&ctx);
     let mut app = unlock_app(&ctx);
     app.screen = Screen::Sources;
-    app.auth.recents = vec![Recent {
-        path: PathBuf::from("/tmp/plain.pandora"),
-    }];
+    app.auth.recents = vec![Recent::at(PathBuf::from("/tmp/plain.pandora"))];
     let work = Source {
         kind: GITHUB.to_owned(),
         target: "octocat/work".to_owned(),
@@ -687,9 +673,7 @@ fn the_app_lands_on_the_sources() {
         Screen::Sources,
         "with nothing to reopen"
     );
-    app.auth.recents = vec![Recent {
-        path: PathBuf::from("/tmp/work.box"),
-    }];
+    app.auth.recents = vec![Recent::at(PathBuf::from("/tmp/work.box"))];
     assert_eq!(app.auth.landing(), Screen::Sources, "with recents");
 }
 
@@ -700,9 +684,7 @@ fn back_returns_to_the_screen_left_behind() {
     app.record_place();
     assert!(!app.can_back(), "home has nowhere to go back to");
 
-    app.auth.recents = vec![Recent {
-        path: PathBuf::from("/tmp/work.box"),
-    }];
+    app.auth.recents = vec![Recent::at(PathBuf::from("/tmp/work.box"))];
     app.screen = Screen::Sources;
     app.record_place();
     app.back();
@@ -725,9 +707,7 @@ fn the_recents_card_never_overflows_a_short_window() {
     app.screen = Screen::Sources;
     app.auth.side = Some(Side::Recents);
     app.auth.recents = (0..12)
-        .map(|i| Recent {
-            path: PathBuf::from(format!("/tmp/box{i}.box")),
-        })
+        .map(|i| Recent::at(PathBuf::from(format!("/tmp/box{i}.box"))))
         .collect();
 
     let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(380.0, 520.0));
@@ -839,9 +819,7 @@ fn the_auth_forms_fit_a_narrow_window() {
     let ctx = egui::Context::default();
     theme::apply(&ctx);
     let mut app = unlock_app(&ctx);
-    app.auth.recents = vec![Recent {
-        path: PathBuf::from("/tmp/work.box"),
-    }];
+    app.auth.recents = vec![Recent::at(PathBuf::from("/tmp/work.box"))];
 
     let gutter = 12.0;
     for size in [
@@ -972,9 +950,7 @@ fn the_auth_screens_share_one_top_anchor() {
     theme::apply(&ctx);
     let size = egui::vec2(1000.0, 700.0);
     let mut app = unlock_app(&ctx);
-    app.auth.recents = vec![Recent {
-        path: PathBuf::from("/tmp/work.box"),
-    }];
+    app.auth.recents = vec![Recent::at(PathBuf::from("/tmp/work.box"))];
 
     let wordmark = "Save your secrets inside Pandora’s box";
     let mut at = |screen: Screen| {
@@ -998,9 +974,7 @@ fn the_sources_screen_picks_a_view_under_its_wordmark() {
     let size = egui::vec2(1000.0, 700.0);
     let mut app = unlock_app(&ctx);
     app.screen = Screen::Sources;
-    app.auth.recents = vec![Recent {
-        path: PathBuf::from("/tmp/work.box"),
-    }];
+    app.auth.recents = vec![Recent::at(PathBuf::from("/tmp/work.box"))];
 
     let shapes = shapes_at(&mut app, &ctx, size);
     hint(&shapes, "Save your secrets inside Pandora’s box");
