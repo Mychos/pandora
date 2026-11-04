@@ -1312,15 +1312,7 @@ fn browser(ui: &mut egui::Ui, app: &mut App) {
         );
         ui.add_space(HINT);
         theme::hint(ui, &let_in(app.prefs.browsers.len()));
-        ui.add_space(HINT);
-        theme::hint(ui, t(passkey_browser()));
     });
-}
-
-/// Where passkeys are used, in one line: the box holds them, and only the browser
-/// with a provider API can ask for one.
-fn passkey_browser() -> &'static str {
-    "passkeys live in this box and only the extension on Chrome 129+ can use them — Firefox has no passkey provider API"
 }
 
 /// What a tick alone cannot say: off and on paint the same box, and the difference

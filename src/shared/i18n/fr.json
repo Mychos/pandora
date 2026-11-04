@@ -406,7 +406,6 @@
   "overwrote the on-disk version": "version sur le disque remplacée",
   "page": "page",
   "pandora: box synced": "pandora : coffre synchronisé",
-  "passkeys live in this box and only the extension on Chrome 129+ can use them — Firefox has no passkey provider API": "les clés d'accès vivent dans ce coffre et seule l'extension sur Chrome 129+ peut les utiliser — Firefox n'a pas d'API de fournisseur de clés d'accès",
   "passphrase": "phrase secrète",
   "passphrase (or seal to a key below)": "phrase secrète (ou scellez avec une clé ci-dessous)",
   "password": "mot de passe",

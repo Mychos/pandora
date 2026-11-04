@@ -432,12 +432,14 @@ mount and never saw this.
 The browser names the caller: Chromium puts the extension origin in the host's `argv[1]`,
 Firefox the add-on id in `argv[2]`, and the host passes it along as `caller` because the
 app cannot see the browser's process table. A caller the user has not approved waits on a
-modal, remembered in `Prefs::browsers`, and gives up after 30 s. Three requests never
-leave the host — `list_boxes` and `unlock`, because opening a box is the window's job,
-and `launch`, which is only `host::launch` starting the app when nothing is listening so
-the panel that asked can wait on `status` instead of sending the user to another window
-and making them click again. `Prefs::unlock_from_browser`, off by default, is the only
-thing that lets a browser open a box itself. Reads are answered by `bridge::serve`, shared by both peers; writes change the
+modal, remembered in `Prefs::browsers`, and gives up after 30 s. Two requests never
+leave the host: `unlock`, because opening a box is the window's job, and `launch`, which
+is only `host::launch` starting the app when nothing is listening so the panel that asked
+can wait on `status` instead of sending the user to another window and making them click
+again. `list_boxes` is relayed when the app is listening — the boxes a browser may read
+are the ones the app has open — and only falls back to the recents when nothing answers.
+`Prefs::unlock_from_browser`, off by default, is the only thing that lets a browser open
+a box itself. Reads are answered by `bridge::serve`, shared by both peers; writes change the
 app's live session and mark it dirty, so **the app is the only writer** and there is no
 mtime conflict to detect. The channel is protected by being user-private — the socket
 by its mode and directory, the pipe by `PIPE_REJECT_REMOTE_CLIENTS` and the creator's

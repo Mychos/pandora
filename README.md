@@ -58,7 +58,6 @@ any of them does it — that is taste, and it changes with every release.
 | Platforms | Linux, macOS, Windows, Android; no iOS | Linux, macOS, Windows; no iOS | All, iOS included | All, iOS included | All, iOS included |
 | Desktop autofill | Extension, and auto-type for the rest | Extension, and auto-type | Extension | Extension and app | Extension |
 | Android autofill | WebViews only | No app | Native apps and browsers | Native apps and browsers | Native apps and browsers |
-| Passkeys | Chrome 129+ only | Yes, through the browser `~` | Yes | Yes | Yes |
 | TOTP | Yes, in the box | Yes | ~ paid plans | Yes | ~ paid plans |
 | Attachments | Yes, no local ceiling | Yes, in the file | ~ paid plans | ~ paid plans | ~ paid plans |
 | SSH agent | Yes, on the three desktops | Yes | ~ | Yes | No |
@@ -130,15 +129,6 @@ through Save. Both are plaintext and both warn you first.
   `{WAIT 250}`, with `{USERNAME}{TAB}{PASSWORD}{ENTER}` as the default.
 - It types with what the session already has — `xdotool` on X11, `wtype` or `ydotool` on
   Wayland — and says so when none of them is installed instead of doing nothing.
-
-### Passkeys
-
-- A passkey lives in the box like everything else: the private key, the credential id
-  and the handle are payload fields. The extension on **Chrome 129+** creates and uses
-  them; no browser sees a key.
-- The credential is bound to its origin (`rpIdHash`), an assertion needs the box
-  unlocked, and the attestation is `none`. Firefox has no provider API, so passkeys are
-  Chrome-only and the extension says so.
 
 ### Sealed shares
 
@@ -438,7 +428,6 @@ Releases — workflow, artifacts, the Android signing key, `act` — are in
 - Changing the master password drops the box's other factors — the YubiKey and the
   recovery code — because both are derived from the key being replaced. Re-enrol them
   after a change; the settings page says so.
-- A passkey cannot be shared, and only Chrome 129+ can use one.
 - Only the AppImage is checked byte for byte (`scripts/repro.sh`); Windows, macOS and
   the APK are not compared.
 - Android autofill answers for WebViews only: a native app has no URL, so no stored

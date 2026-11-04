@@ -420,7 +420,6 @@
   "overwrote the on-disk version": "Se sobrescribió la versión del disco",
   "page": "página",
   "pandora: box synced": "pandora: caja sincronizada",
-  "passkeys live in this box and only the extension on Chrome 129+ can use them — Firefox has no passkey provider API": "las passkeys viven en esta caja y solo la extensión en Chrome 129+ puede usarlas; Firefox no tiene API de proveedor de passkeys",
   "passphrase": "contraseña",
   "passphrase (or seal to a key below)": "contraseña (o séllalo con una clave abajo)",
   "password": "contraseña",

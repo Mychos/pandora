@@ -418,7 +418,6 @@
   "overwrote the on-disk version": "overwrote the on-disk version",
   "page": "page",
   "pandora: box synced": "pandora: box synced",
-  "passkeys live in this box and only the extension on Chrome 129+ can use them — Firefox has no passkey provider API": "passkeys live in this box and only the extension on Chrome 129+ can use them — Firefox has no passkey provider API",
   "passphrase": "passphrase",
   "passphrase (or seal to a key below)": "passphrase (or seal to a key below)",
   "password": "password",

@@ -131,32 +131,14 @@ button then reports that it could not start the app.
 
 A passkey is stored like the rest of the box: the private key, the credential id and
 the account handle are fields of the encrypted payload, in the same file, and nothing
-about them is written anywhere else.
+about them is written anywhere else. The credential is bound to its site (`rpIdHash`),
+it carries no note and no attachment, and the attestation is `none`.
 
-- **The key never leaves the host.** The extension has no crypto, no key and no seed.
-  It asks the native host for an assertion; the host signs and hands back
-  `authenticatorData` and a signature. An extension or a page that reads everything the
-  extension can see gets neither the key nor a way to make a signature it did not ask
-  for by picking a credential.
-- **The credential is bound to its origin.** The relying party id is part of what is
-  signed (`rpIdHash`), so an assertion made for `example.com` cannot be replayed at
-  another site, and the host refuses an id that belongs to a different site. Nothing
-  short of that binding is trusted: the `clientDataJSON` a page sends has to carry the
-  challenge the page asked about, and the signature covers both halves.
-- **One credential, one record.** A passkey is a record of the box, so it is in the
-  trash like anything else, and deleting it is reversible until the trash is emptied.
-  It carries no note and no attachment.
-- **What a relying party learns.** Nothing more than from any authenticator: the
-  credential id, the handle it gave at creation, a signature and a counter. The
-  attestation is `none` and the AAGUID is all zeroes, so it cannot be used to identify
-  this app or this device.
-- **The host must be able to read the box.** A signature only happens with the box
-  open (or opened by the host under `Prefs::unlock_from_browser`), and that unlocked
-  state is the user verification the credential claims. A browser that never reaches
-  the host gets `NotAllowedError`, not a key.
-- **Chrome only.** The provider API an extension needs exists in Chromium 129+ and
-  nowhere else; Firefox and other Gecko browsers have no equivalent, so no passkey is
-  ever offered there. The popup says so.
+Nothing offers one to a browser today. Chromium's `webAuthenticationProxy` is a
+remote-desktop interception API: attaching suspends the browser's own WebAuthn for
+every site instead of adding a provider beside it, and Gecko has no equivalent. The
+extension does not attach, so no page is ever handed a Pandora passkey; a passkey a
+site registered elsewhere is simply not offered by Pandora.
 
 ## Auto-type
 
