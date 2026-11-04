@@ -29,6 +29,7 @@ pub enum Reply {
     Meta {
         path: PathBuf,
         mtime: Option<SystemTime>,
+        print: Option<String>,
         slow: bool,
     },
     Load {
@@ -40,6 +41,7 @@ pub enum Reply {
         result: Result<(), String>,
         vault: Box<Vault>,
         mtime: Option<SystemTime>,
+        print: Option<String>,
     },
 }
 
@@ -60,8 +62,14 @@ impl Io {
                     Request::Meta { path } => {
                         let start = std::time::Instant::now();
                         let mtime = store::modified_time(&path);
+                        let print = store::prefix_digest(&path);
                         let slow = start.elapsed() > std::time::Duration::from_millis(50);
-                        let _ = reply_tx.send(Reply::Meta { path, mtime, slow });
+                        let _ = reply_tx.send(Reply::Meta {
+                            path,
+                            mtime,
+                            print,
+                            slow,
+                        });
                     }
                     Request::Load { path, creds } => {
                         let result = store::load(&path, &creds).map(Box::new);
@@ -75,11 +83,17 @@ impl Io {
                         } else {
                             None
                         };
+                        let print = if result.is_ok() {
+                            store::prefix_digest(&path)
+                        } else {
+                            None
+                        };
                         let _ = reply_tx.send(Reply::Save {
                             path,
                             result,
                             vault: Box::new(vault),
                             mtime,
+                            print,
                         });
                     }
                 }

@@ -83,9 +83,14 @@ pub struct Session {
     /// move — so the next tick writes it instead of waiting out the debounce.
     pub immediate: bool,
     pub last_edit: Option<Instant>,
+    /// What the file's header looked like at the last read or write: the fingerprint
+    /// that says whether somebody else wrote this box, without trusting a timestamp.
+    pub file_print: Option<String>,
+    /// The stamp the file last carried, kept as a record and nothing more: a cloud
+    /// mount freezes it and a sync service moves it without the bytes changing. What
+    /// decides is `file_print`.
     pub last_mtime: Option<SystemTime>,
     pub conflict: bool,
-    pub ignore_mtime: Option<SystemTime>,
     /// True when the vault lives on a slow (e.g. network) filesystem: external
     /// change polling is disabled to avoid useless work.
     pub remote_vault: bool,
@@ -176,6 +181,7 @@ impl Session {
     /// overrides them after.
     pub fn fresh(path: PathBuf, creds: Credentials, vault: Vault) -> Self {
         let saved = Some(Fingerprint::of(&vault));
+        let file_print = store::prefix_digest(&path);
         Self {
             path,
             creds,
@@ -185,9 +191,9 @@ impl Session {
             dirty: false,
             immediate: false,
             last_edit: None,
+            file_print,
             last_mtime: None,
             conflict: false,
-            ignore_mtime: None,
             remote_vault: false,
             meta_pending: false,
             load_pending: false,
@@ -273,7 +279,7 @@ impl Session {
     }
 
     /// A vault arrived from the file: what is on screen is now what the box holds,
-    /// with nothing pending. The modification time is read back, so the copy just
+    /// with nothing pending. The stamp and the print are read back, so the copy just
     /// loaded is not mistaken for another device's.
     pub fn settle(&mut self) {
         self.parked = false;
@@ -283,9 +289,15 @@ impl Session {
         self.immediate = false;
         self.last_edit = None;
         self.conflict = false;
-        self.ignore_mtime = None;
-        self.last_mtime = store::modified_time(&self.path);
+        self.seen();
         self.saved = Some(Fingerprint::of(&self.vault));
+    }
+
+    /// The file on disk is this session's copy again — a write of ours, or a version
+    /// just adopted from a mirror. The next comparison starts from these bytes.
+    pub fn seen(&mut self) {
+        self.last_mtime = store::modified_time(&self.path);
+        self.file_print = store::prefix_digest(&self.path);
     }
 
     /// Bring a parked tab back from its file. The key is the one the session

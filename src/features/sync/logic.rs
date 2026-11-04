@@ -1208,8 +1208,7 @@ impl App {
                             s.dirty = false;
                             s.last_edit = None;
                             s.conflict = false;
-                            s.ignore_mtime = None;
-                            s.last_mtime = store::modified_time(&s.path);
+                            s.seen();
                             if let Some(r) = &mut s.remote {
                                 r.sha = sha;
                             }
@@ -1386,8 +1385,7 @@ fn reconcile(s: &mut crate::app::Session, bytes: &[u8], sha: &str) -> Result<Rec
     s.dirty = false;
     s.last_edit = None;
     s.conflict = false;
-    s.ignore_mtime = None;
-    s.last_mtime = store::modified_time(&s.path);
+    s.seen();
     if let Some(remote) = &mut s.remote {
         remote.sha = sha.to_owned();
     }

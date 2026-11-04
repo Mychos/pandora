@@ -11,7 +11,7 @@ mod tests;
 
 pub use atomic::{
     clear_legacy_stash, clear_orphan_tmps, clear_staging, forget_stash, modified_time,
-    private_sink, stash, stash_path, write_atomic, write_private,
+    prefix_digest, private_sink, stash, stash_path, write_atomic, write_private,
 };
 pub use header::KdfHeader;
 pub use write::save;

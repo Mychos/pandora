@@ -150,3 +150,29 @@ pub(super) fn sync_dir(_dir: &Path) -> Result<(), String> {
 pub fn modified_time(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
+
+/// The header block as it stands on disk: the content fingerprint that says whether
+/// this is still the copy a session left. A modification time is what a cloud mount
+/// lies about — rclone freezes it for hours and a sync service moves it without the
+/// bytes changing — while these bytes carry a fresh nonce on every save, so another
+/// writer cannot land on the same one. Cheap: one 4 KiB read, not the whole box.
+pub fn prefix_digest(path: &Path) -> Option<String> {
+    use crate::vault::container::HEADER_BLOCK;
+    use std::io::Read;
+
+    let mut file = fs::File::open(path).ok()?;
+    let mut head = vec![0u8; HEADER_BLOCK];
+    let mut filled = 0;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(_) => return None,
+        }
+    }
+    if filled == 0 {
+        return None;
+    }
+    head.truncate(filled);
+    Some(crate::vault::crypto::digest(&head))
+}

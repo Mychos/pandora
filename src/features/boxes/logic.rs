@@ -337,27 +337,38 @@ impl Boxes {
         let replies = self.io.as_ref().map(|i| i.drain()).unwrap_or_default();
         for reply in replies {
             match reply {
-                Reply::Meta { path, mtime, slow } => {
+                Reply::Meta {
+                    path,
+                    mtime,
+                    print,
+                    slow,
+                } => {
                     let mut to_load: Option<(PathBuf, crate::vault::store::Credentials)> = None;
-                    if let Some(s) = self.session.as_mut() {
-                        if s.path == path {
-                            s.meta_pending = false;
-                            if slow {
-                                s.remote_vault = true;
+                    if let Some(s) = self.find(&path) {
+                        s.meta_pending = false;
+                        if slow {
+                            s.remote_vault = true;
+                        }
+                        // Content, not the clock: a cloud mount freezes its mtime for
+                        // hours and a sync service moves it without the bytes changing,
+                        // so a stamp that disagrees is a hint and nothing more. While a
+                        // save of ours is in flight the file may already be the new one,
+                        // and the reply that lands it is the one that knows the print.
+                        if !s.conflict
+                            && !s.remote_vault
+                            && !s.save_pending
+                            && print.is_some()
+                            && print != s.file_print
+                        {
+                            if s.dirty {
+                                s.conflict = true;
+                            } else {
+                                s.load_pending = true;
+                                to_load = Some((s.path.clone(), s.creds.clone()));
                             }
-                            if !s.conflict
-                                && !s.remote_vault
-                                && mtime.is_some()
-                                && mtime != s.last_mtime
-                                && s.ignore_mtime != mtime
-                            {
-                                if s.dirty {
-                                    s.conflict = true;
-                                } else {
-                                    s.load_pending = true;
-                                    to_load = Some((s.path.clone(), s.creds.clone()));
-                                }
-                            }
+                        } else if !s.save_pending && print == s.file_print {
+                            // The same bytes under a new stamp: nothing to load.
+                            s.last_mtime = mtime;
                         }
                     }
                     if let Some((p, c)) = to_load {
@@ -365,27 +376,27 @@ impl Boxes {
                     }
                 }
                 Reply::Load { path, result } => {
-                    if let Some(s) = self.session.as_mut() {
-                        if s.path == path {
-                            s.load_pending = false;
-                            match result {
-                                Ok(v) if *v == s.vault => {
-                                    s.last_mtime = store::modified_time(&s.path)
-                                }
-                                Ok(_) => {
-                                    s.conflict = true;
-                                    shell.set_status(
-                                        "box changed on disk — another device synced?".to_owned(),
-                                        StatusKind::Error,
-                                    );
-                                }
-                                Err(e) => {
-                                    s.conflict = true;
-                                    shell.set_status(
-                                        tf("disk box unreadable: {error}", &[("error", &e)]),
-                                        StatusKind::Error,
-                                    );
-                                }
+                    if let Some(s) = self.find(&path) {
+                        s.load_pending = false;
+                        match result {
+                            Ok(v) if *v == s.vault => {
+                                // Same box under the stamp: it was our own write, or a
+                                // copy that only changed its clock.
+                                s.seen();
+                            }
+                            Ok(_) => {
+                                s.conflict = true;
+                                shell.set_status(
+                                    "box changed on disk — another device synced?".to_owned(),
+                                    StatusKind::Error,
+                                );
+                            }
+                            Err(e) => {
+                                s.conflict = true;
+                                shell.set_status(
+                                    tf("disk box unreadable: {error}", &[("error", &e)]),
+                                    StatusKind::Error,
+                                );
                             }
                         }
                     }
@@ -395,39 +406,40 @@ impl Boxes {
                     result,
                     vault,
                     mtime,
+                    print,
                 } => {
-                    if let Some(s) = self.session.as_mut() {
-                        if s.path == path {
-                            s.save_pending = false;
-                            match result {
-                                Ok(()) => {
-                                    // The box is clean only when nothing changed while the
-                                    // save was out: `edit_version` moves on every edit and
-                                    // on the dispatch, so a later edit leaves the two
-                                    // apart, and that edit is still waiting for a write.
-                                    if s.edit_version == s.save_version {
-                                        s.dirty = false;
-                                        s.immediate = false;
-                                        s.last_edit = None;
-                                        s.saved = Some(
-                                            crate::features::sync::github::Fingerprint::of(&vault),
-                                        );
-                                    }
-                                    s.last_mtime = mtime;
-                                    s.ignore_mtime = None;
-                                    s.conflict = false;
-                                    // adopt seq/reader from saved vault without clobbering edits:
-                                    // only update vault if no edits happened during save
-                                    if s.edit_version == 0 {
-                                        // placeholder; handled below
-                                    }
-                                    // Always adopt reader/seq from worker result to stay consistent
-                                    s.vault.seq = vault.seq;
-                                    s.vault.reader = vault.reader;
+                    if let Some(s) = self.find(&path) {
+                        s.save_pending = false;
+                        match result {
+                            Ok(()) => {
+                                // The box is clean only when nothing changed while the
+                                // save was out: `edit_version` moves on every edit and
+                                // on the dispatch, so a later edit leaves the two
+                                // apart, and that edit is still waiting for a write.
+                                if s.edit_version == s.save_version {
+                                    s.dirty = false;
+                                    s.immediate = false;
+                                    s.last_edit = None;
+                                    s.saved = Some(crate::features::sync::github::Fingerprint::of(
+                                        &vault,
+                                    ));
                                 }
-                                Err(e) => {
-                                    shell.fail(tf("save failed: {error}", &[("error", &e)]));
-                                }
+                                s.last_mtime = mtime;
+                                s.file_print = print;
+                                s.conflict = false;
+                                // The reader and the generation are the file's, and only
+                                // the write that just landed knows them.
+                                s.vault.seq = vault.seq;
+                                s.vault.reader = vault.reader;
+                            }
+                            Err(e) => {
+                                // A write that failed is retried on the debounce, not on
+                                // every frame: a locked file (a sync service holding it,
+                                // say) must not turn the app into a loop that re-encrypts
+                                // the whole box sixty times a second.
+                                s.immediate = false;
+                                s.last_edit = Some(std::time::Instant::now());
+                                shell.fail(tf("save failed: {error}", &[("error", &e)]));
                             }
                         }
                     }
@@ -583,8 +595,7 @@ fn write(s: &mut Session, shell: &mut Shell, forced: bool) -> bool {
             s.immediate = false;
             s.last_edit = None;
             s.saved = Some(crate::features::sync::github::Fingerprint::of(&s.vault));
-            s.last_mtime = store::modified_time(&s.path);
-            s.ignore_mtime = None;
+            s.seen();
             s.conflict = false;
             true
         }
@@ -604,11 +615,14 @@ fn write_if_dirty(s: &mut Session, shell: &mut Shell) {
     }
 }
 
-/// Did something else write this box's file since the session last saw it? The
-/// one change the user already answered for does not count.
+/// Did something else write this box's file since the session last saw it?
+///
+/// The file's own bytes answer it, not its stamp: on a cloud mount the stamp is
+/// frozen (rclone reported yesterday's hour for a file written a minute ago) and on
+/// a synced folder it moves without the content doing the same. A stamp is a hint at
+/// best; reading the header back is one 4 KiB read and cannot be wrong.
 fn superseded(s: &Session) -> bool {
-    store::modified_time(&s.path)
-        .is_some_and(|m| Some(m) != s.last_mtime && s.ignore_mtime != Some(m))
+    store::prefix_digest(&s.path).is_some_and(|print| Some(print) != s.file_print)
 }
 
 impl Boxes {
@@ -667,11 +681,14 @@ impl Boxes {
         s.editing_entry = None;
     }
 
+    /// "Keep editing": the version on disk is one the user has now seen and turned
+    /// down, so the next write is allowed to replace it. Saying that in the same terms
+    /// the guard asks the question — the file's own bytes — is what makes it stick.
     pub fn conflict_keep_mine(&mut self) {
         let Some(s) = &mut self.session else {
             return;
         };
-        s.ignore_mtime = store::modified_time(&s.path);
+        s.seen();
         s.conflict = false;
     }
 }
@@ -823,7 +840,57 @@ mod tests {
         assert_eq!(s.vault.name, name, "the local box is still here to choose");
     }
 
-    /// No `.bak` is left beside the vault: stash lives in the data dir.
+    /// A box on a cloud mount: rclone reported the same hour for a file written a
+    /// minute before, so the stamp disagrees with the clock in both directions. What
+    /// the file holds is the only thing that decides whether somebody else wrote it.
+    #[test]
+    fn a_mount_whose_clock_lies_does_not_stop_a_save() {
+        let mut app = opened(&unique());
+        let path = app.boxes.session.as_ref().unwrap().path.clone();
+        let before = store::prefix_digest(&path).unwrap();
+
+        {
+            let s = app.boxes.session.as_mut().unwrap();
+            s.vault.logins.push(Login::new(1));
+            s.mark_dirty();
+            // The stamp stays where the mount left it: yesterday's hour.
+            s.last_mtime = Some(std::time::UNIX_EPOCH);
+        }
+        app.boxes.persist(&mut app.shell);
+
+        let s = app.boxes.session.as_ref().unwrap();
+        assert!(!s.conflict, "a stamp that lies is not another writer");
+        assert!(!s.dirty, "the edit is written");
+        assert_eq!(
+            store::load(&path, &s.creds).unwrap().logins.len(),
+            1,
+            "and it reached the file"
+        );
+        assert_ne!(
+            store::prefix_digest(&path).unwrap(),
+            before,
+            "the file is a new version"
+        );
+    }
+
+    /// The other half: a mount that reports the same stamp it always does is blind to
+    /// another device. The bytes are not.
+    #[test]
+    fn another_devices_box_is_seen_even_when_the_stamp_does_not_move() {
+        let mut app = opened(&unique());
+        let path = app.boxes.session.as_ref().unwrap().path.clone();
+        another_device(&mut app);
+        // The mount hands back the stamp it has always handed back.
+        app.boxes.session.as_mut().unwrap().last_mtime = store::modified_time(&path);
+        app.boxes.watch = None;
+        app.boxes.tick(&mut app.shell);
+        app.boxes.wait_io(&mut app.shell);
+
+        let s = app.boxes.session.as_ref().unwrap();
+        assert!(s.conflict, "the other box asks the user, not the clock");
+        assert!(!s.dirty, "and nothing of ours was thrown away to find out");
+    }
+
     #[test]
     fn no_legacy_bak_is_left_beside_the_vault() {
         let name = unique();

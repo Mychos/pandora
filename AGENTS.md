@@ -586,7 +586,11 @@ an encrypted manifest at the end. Only v4 opens; an older container is refused.
   A write waits for a save already in flight (`Boxes::drain`), because the worker writes
   the file itself with an older snapshot and would otherwise land last. A save is skipped
   while a sync conflict is pending, and refuses when the file changed under it: external
-  edits are detected by file mtime, and a different box on disk asks the user instead of
+  edits are detected by the file's own bytes (`store::prefix_digest`, the 4 KiB header,
+  which carries a fresh nonce on every save), never by its mtime — a cloud mount freezes
+  the stamp for hours and a sync service moves it without the bytes changing, so the
+  stamp is a record and not a test. `Session::seen` is what re-bases that print after a
+  write, an adopt or a merge, and a different box on disk asks the user instead of
   replacing the vault. What is left is a `kill -9` or a power cut inside one debounce.
 
 ## Secrets
