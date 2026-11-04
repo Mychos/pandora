@@ -1,5 +1,5 @@
 use super::header::{header_block, read_header, KdfHeader, V4Header, MAX_P_COST};
-use super::write::{PAD_BLOCK, PAD_FLOOR};
+use super::write::{finalize, PAD_BLOCK, PAD_FLOOR};
 use super::*;
 use crate::vault::container::{CHUNK, HEADER_BLOCK};
 use crate::vault::matching::{Rule, Uri};
@@ -14,6 +14,51 @@ fn tmp_path(name: &str) -> PathBuf {
     ));
     let _ = fs::remove_file(&p);
     p
+}
+
+#[test]
+fn a_save_leaves_a_fresh_stamp_on_the_box() {
+    let p = tmp_path("stamp");
+    let creds = Credentials::rekey("test", None).unwrap();
+    let mut vault = Vault::new("Box");
+    save(&p, &mut vault, &creds).unwrap();
+
+    // The stamp a cloud mount hands back: the one the object already had, hours old.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(11 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(&p)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(old))
+        .unwrap();
+    let stale = modified_time(&p).unwrap();
+
+    save(&p, &mut vault, &creds).unwrap();
+
+    let fresh = modified_time(&p).unwrap();
+    assert!(fresh > stale, "the write moved the stamp forward");
+    assert!(
+        fresh.elapsed().unwrap() < std::time::Duration::from_secs(5),
+        "and it says now, so a client comparing stamps sees the change"
+    );
+}
+
+/// The one moment a save leaves the box absent is the fallback's delete: a move that
+/// fails after it must put the displaced version back, not leave the folder empty.
+#[test]
+fn a_finish_that_cannot_land_restores_the_seat() {
+    let p = tmp_path("finalize");
+    fs::write(&p, b"the box before the write").unwrap();
+    stash(&p);
+    let gone = p.with_extension("tmp-that-is-not-there");
+
+    let err = finalize(&gone, &p).unwrap_err();
+    assert!(err.contains("cannot finalize"), "{err}");
+    assert_eq!(
+        fs::read(&p).unwrap(),
+        b"the box before the write",
+        "the copy the write displaced came back"
+    );
 }
 
 #[test]

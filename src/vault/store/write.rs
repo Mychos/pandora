@@ -12,6 +12,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
 use zeroize::Zeroizing;
 
 /// Payload padded to 4096 and never below 64 KiB, so its size says little about
@@ -362,6 +363,46 @@ fn finish_staged(vault: &mut Vault, files: &mut Vec<StagedFile>, notes: &mut Vec
     }
 }
 
+/// Land the temp file on the box. The rename is the whole point — one atomic step, no
+/// instant where the file is half written — but a sync client can hold the box open
+/// (Drive and OneDrive on Windows refuse a rename over an open handle and allow a
+/// delete), so there is one fallback: remove, then move. It is the trade KeePassXC
+/// makes for the same folders; the stash holds the version being displaced, so a move
+/// that fails after the delete puts that version back instead of leaving the folder
+/// without a box.
+pub(super) fn finalize(tmp: &Path, path: &Path) -> Result<(), String> {
+    let first = match fs::rename(tmp, path) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    if fs::remove_file(path).is_err() {
+        return Err(format!("cannot finalize: {first}"));
+    }
+    match fs::rename(tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let backup = crate::vault::store::stash_path(path);
+            let _ = super::atomic::copy_private(&backup, path);
+            Err(format!("cannot finalize: {first}; then {e}"))
+        }
+    }
+}
+
+/// Say "now" out loud on the file that just landed.
+///
+/// A plain disk already leaves a fresh stamp on the temp file, so this changes
+/// nothing there. A cloud mount does not: rclone served an hour from eleven hours
+/// before for a box that had just been written, and the object it uploaded carried
+/// that same stale `modifiedTime` — so every client that decides "did this change?"
+/// by stamp and size (rclone itself, a Drive or OneDrive agent) sees a box that was
+/// never touched and never pulls it. Setting it explicitly is what makes the save
+/// travel to the other devices.
+fn touch(path: &Path) {
+    if let Ok(file) = fs::File::options().write(true).open(path) {
+        let _ = file.set_times(fs::FileTimes::new().set_modified(SystemTime::now()));
+    }
+}
+
 fn write_v4(
     path: &Path,
     vault: &mut Vault,
@@ -460,7 +501,8 @@ fn write_v4(
         out.sync_all().map_err(|e| format!("fsync: {e}"))?;
         drop(out);
         stash(path);
-        fs::rename(&tmp, path).map_err(|e| format!("cannot finalize: {e}"))?;
+        finalize(&tmp, path)?;
+        touch(path);
         let _ = sync_dir(dir);
         Ok(())
     })();
