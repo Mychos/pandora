@@ -543,6 +543,49 @@ fn the_folder_on_screen_is_the_whole_breadcrumb() {
     );
 }
 
+/// The phone's group row is taller than a pointer's, and the label has to sit in its
+/// middle: `Sides` lays its own band at the top of whatever rect it is given, so a row
+/// that is 42 tall with a band of one line reads as a label stuck to the ceiling.
+#[test]
+fn a_group_row_centres_its_label_on_a_phone() {
+    let ctx = egui::Context::default();
+    theme::apply(&ctx);
+    let mut app = demo(&ctx, Tab::Passwords, None);
+    app.boxes.session.as_mut().unwrap().view = View::Folders;
+    app.boxes.session.as_mut().unwrap().axis = Axis::User;
+
+    let shapes = shot::frame(&ctx, vec2(420.0, 780.0), vec![], |ui| main(ui, &mut app));
+    let tall = crate::shared::ui::responsive::row(&ctx);
+    let rows: Vec<Rect> = shapes
+        .iter()
+        .filter_map(|s| match &s.shape {
+            Shape::Rect(r)
+                if r.fill == theme::palette().panel && (r.rect.height() - tall).abs() < 0.5 =>
+            {
+                Some(r.rect)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows.len(), 3, "one row per generated folder: {rows:?}");
+
+    for row in &rows {
+        let block = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Text(t) if row.contains(s.shape.visual_bounding_rect().center()) => {
+                    Some(t.galley.rect.translate(t.pos.to_vec2()))
+                }
+                _ => None,
+            })
+            .fold(Rect::NOTHING, |acc, r| acc.union(r));
+        assert!(
+            (block.center().y - row.center().y).abs() <= 1.0,
+            "the label is off the row's middle: {block:?} in {row:?}"
+        );
+    }
+}
+
 /// A group row is one compact line and wears the pane's row treatment, the
 /// same surface and hairline the entry rows use.
 #[test]

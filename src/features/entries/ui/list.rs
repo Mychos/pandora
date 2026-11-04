@@ -647,6 +647,7 @@ fn tree_row(
                 ui.add_space(10.0);
             }
             egui::Sides::new()
+                .height(row)
                 .shrink_left()
                 .truncate()
                 .spacing(12.0)

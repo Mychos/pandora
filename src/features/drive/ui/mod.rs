@@ -715,38 +715,45 @@ fn tree_row(
                         ui.add(img);
                         ui.add_space(10.0);
                     }
-                    egui::Sides::new().shrink_left().truncate().show(
-                        ui,
-                        |ui| {
-                            ui.add(
-                                egui::Label::new(RichText::new(label).color(theme::palette().text))
+                    egui::Sides::new()
+                        .height(row)
+                        .shrink_left()
+                        .truncate()
+                        .show(
+                            ui,
+                            |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(label).color(theme::palette().text),
+                                    )
                                     .truncate(),
-                            );
-                        },
-                        |ui| {
-                            ui.add_space(TAIL);
-                            // The hint's ink rides a couple of pixels above a row's
-                            // middle; the count is set down so it reads centred
-                            // against the row, the mark and the label.
-                            let font = ui.style().text_styles[&egui::TextStyle::Small].clone();
-                            let galley = ui.fonts_mut(|fonts| {
-                                fonts.layout_no_wrap(
-                                    count.to_string(),
-                                    font,
-                                    theme::palette().faint,
-                                )
-                            });
-                            let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
-                            count_rect = Some(rect);
-                            ui.place(
-                                rect.translate(egui::vec2(0.0, 2.0)),
-                                egui::Label::new(egui::WidgetText::Galley(galley)),
-                            );
-                            // Room for the pencil, so it lands beside the count
-                            // instead of over it.
-                            ui.add_space(4.0 + EDIT);
-                        },
-                    );
+                                );
+                            },
+                            |ui| {
+                                ui.add_space(TAIL);
+                                // The hint's ink rides a couple of pixels above a row's
+                                // middle; the count is set down so it reads centred
+                                // against the row, the mark and the label.
+                                let font = ui.style().text_styles[&egui::TextStyle::Small].clone();
+                                let galley = ui.fonts_mut(|fonts| {
+                                    fonts.layout_no_wrap(
+                                        count.to_string(),
+                                        font,
+                                        theme::palette().faint,
+                                    )
+                                });
+                                let (rect, _) =
+                                    ui.allocate_exact_size(galley.size(), Sense::hover());
+                                count_rect = Some(rect);
+                                ui.place(
+                                    rect.translate(egui::vec2(0.0, 2.0)),
+                                    egui::Label::new(egui::WidgetText::Galley(galley)),
+                                );
+                                // Room for the pencil, so it lands beside the count
+                                // instead of over it.
+                                ui.add_space(4.0 + EDIT);
+                            },
+                        );
                 },
             );
         })
