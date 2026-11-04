@@ -100,6 +100,21 @@ pub fn land(app: &mut App, path: &Path, format: Option<import::Format>) {
             s.mark_now();
         }
     }
+    if placed.total() > 0 {
+        // The file is the box: an import that only lives in memory is one the user
+        // finds gone the next time the box opens. Written now, or said out loud.
+        app.boxes.persist(&mut app.shell);
+        if app.boxes.session.as_ref().is_some_and(|s| s.dirty) {
+            app.shell.set_status(
+                tf(
+                    "imported {total} into the box on screen, but its file is not written yet",
+                    &[("total", &placed.total())],
+                ),
+                StatusKind::Error,
+            );
+            return;
+        }
+    }
     app.shell.set_status(summary(&placed), StatusKind::Saved);
 }
 
@@ -163,10 +178,34 @@ mod tests {
         assert_eq!(v.otps.len(), 1);
         assert_eq!(v.drive.len(), 1, "and the note with it");
         assert!(
-            s.dirty,
-            "a landed import is an edit waiting for the autosave"
+            !s.dirty,
+            "a landed import is written before the status line says so"
         );
         assert!(s.selected.is_none(), "the box is not left on a record");
+    }
+
+    /// The file is the box: the moment the status line says "imported", the records
+    /// are on disk, without waiting for a tick that may never come.
+    #[test]
+    fn an_import_reaches_the_file_before_it_is_reported() {
+        use crate::vault::store;
+
+        let mut app = app();
+        let path = app.boxes.session.as_ref().unwrap().path.clone();
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/import-bitwarden.json");
+
+        land(&mut app, &fixture, Some(import::Format::Bitwarden));
+
+        let creds = app.boxes.session.as_ref().unwrap().creds.clone();
+        let on_disk = store::load(&path, &creds).unwrap();
+        assert_eq!(on_disk.logins.len(), 1, "the login is in the file");
+        assert_eq!(on_disk.otps.len(), 1);
+        assert_eq!(on_disk.drive.len(), 1);
+        assert!(
+            !app.boxes.session.as_ref().unwrap().dirty,
+            "and nothing is left waiting for an autosave"
+        );
     }
 
     #[test]

@@ -341,22 +341,35 @@ impl App {
         }
     }
 
-    /// Read the copy a phone's picker made and drop it whatever happened: the
-    /// plaintext must not outlive the box; not `cfg`'d so the round trip is testable.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    /// Read a CSV export and land its rows. Only a phone's picker leaves a copy of
+    /// the plaintext in a temp folder, and that copy is ours to drop; the desktop
+    /// reads the user's own file, which is not this app's to delete.
     pub(crate) fn import_copy(&mut self, path: &Path) {
         let read = self.read_csv(path);
+        #[cfg(target_os = "android")]
         let _ = std::fs::remove_file(path);
-        self.report(read);
+        // Rows that landed are written now: a status line is not a save.
+        if matches!(read, Ok((added, _)) if added > 0) {
+            self.boxes.persist(&mut self.shell);
+        }
+        // What the status line says next has to be about the file, not the screen: an
+        // import that only reached memory is one the user finds gone at the next open.
+        let unsaved = self.boxes.session.as_ref().is_some_and(|s| s.dirty);
+        self.report(read, unsaved);
     }
 
-    /// What an import says on the status line, on either platform.
-    fn report(&mut self, read: Result<(usize, usize), String>) {
+    /// What an import says on the status line, on either platform. `unsaved` is the
+    /// box still holding an edit its file does not have, and that is never "imported".
+    fn report(&mut self, read: Result<(usize, usize), String>, unsaved: bool) {
         match read {
             Ok((0, skipped)) => self.shell.set_status(
                 format!("nothing to import — {skipped} entries are already in the box"),
                 StatusKind::Info,
             ),
+            Ok((added, _)) if unsaved => self.shell.fail(crate::shared::i18n::tf(
+                "imported {total} into the box on screen, but its file is not written yet",
+                &[("total", &added)],
+            )),
             Ok((added, skipped)) => self.shell.set_status(
                 crate::shared::i18n::tf(
                     "imported {added} entries ({skipped} already there)",
@@ -822,8 +835,40 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// An import that only reached memory is one the user finds gone at the next
+    /// open, so the status line may not call it imported. Another writer moved the
+    /// box here, which is the one case the session refuses to write through.
+    #[test]
+    fn an_import_the_file_refused_is_never_called_imported() {
+        let mut app = app();
+        let path = std::env::temp_dir().join("pandora-import-unwritten.csv");
+        std::fs::write(
+            &path,
+            b"name,username,password,url,notes,folder,kind\n\
+              GitHub,octocat,hunter2,https://github.com,ssh key,,password\n",
+        )
+        .unwrap();
+        app.boxes.session.as_mut().unwrap().conflict = true;
+
+        app.import_copy(&path);
+
+        let said = app.shell.status.as_ref().unwrap();
+        assert!(
+            said.kind == StatusKind::Error,
+            "an unsaved import is an error, not a saved box: {:?}",
+            said.text
+        );
+        assert!(said.text.contains("not written"), "{:?}", said.text);
+        assert!(
+            app.boxes.session.as_ref().unwrap().dirty,
+            "the rows are still only on screen, and the box says so"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// A phone's picker leaves a copy behind, and the copy is ours to remove:
     /// the plaintext file must not outlive the import.
+    #[cfg(target_os = "android")]
     #[test]
     fn an_imported_copy_is_deleted_after_reading() {
         let path = std::env::temp_dir().join("pandora-import-copy.csv");
@@ -840,6 +885,7 @@ mod tests {
         assert!(!path.exists(), "the copy is gone once it is read");
     }
 
+    #[cfg(target_os = "android")]
     #[test]
     fn a_copy_that_is_too_big_is_removed_too() {
         let path = std::env::temp_dir().join("pandora-import-copy-big.csv");
