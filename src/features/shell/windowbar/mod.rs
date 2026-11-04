@@ -1,5 +1,6 @@
-//! Custom window chrome. Under a finger the bar keeps Back and the box actions, and
-//! the panes move to the app's floor over the phone's own navigation.
+//! Custom window chrome. Under a finger the bar keeps what belongs to the app — the
+//! tool and its settings — and the box takes the floor: its panes, its gear, its lock
+//! and Back, above the phone's own navigation.
 
 #[cfg(not(target_os = "android"))]
 use crate::app::Session;
@@ -255,6 +256,11 @@ fn bar(ui: &mut Ui, app: &mut App) {
                 ui.add_space(12.0);
                 strip_tabs(ui, app);
             }
+            // A thumb gets the tool up here with the app's own settings: the floor is
+            // the box's — its panes, its gear, its lock and Back.
+            if finger && tool(ui, app, theme::Edge::Floor) {
+                app.screen = Screen::Generate;
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // With no title bar these are the only way to control the window, so they never leave.
                 #[cfg(not(target_os = "android"))]
@@ -266,12 +272,8 @@ fn bar(ui: &mut Ui, app: &mut App) {
                     pin(ui, app);
                 }
                 ui.add_space(tail(&ctx));
-                // Right to left, so the gear is the rightmost.
-                if finger {
-                    settings_button(ui, app);
-                    lock_button(ui, app);
-                }
-                // The app's settings stand beside the box's; both are read before any box opens.
+                // A phone's bar keeps the app's own settings and nothing of the box:
+                // the gear, the lock and the panes live on the floor, where a thumb is.
                 crate::features::settings::ui::button(ui, app);
                 #[cfg(not(target_os = "android"))]
                 if !finger {
@@ -282,7 +284,7 @@ fn bar(ui: &mut Ui, app: &mut App) {
     });
 }
 
-/// The floor navigation: generator far left, the box's panes centred, Back far right;
+/// The floor navigation: the box's panes centred, its own gear and lock beside Back;
 /// same layer as the top area, so a modal cannot cover it.
 fn nav(ui: &mut Ui, app: &mut App) {
     let ctx = ui.ctx().clone();
@@ -295,22 +297,26 @@ fn nav(ui: &mut Ui, app: &mut App) {
         ui.horizontal_centered(|ui| {
             theme::flat(ui);
             ui.add_space(lead(&ctx));
-            // The generator reads nothing from a box, so it opens the floor and
-            // not the panes: a thumb finds it without hunting for the box first.
-            if tool(ui, app, theme::Edge::Ceiling) {
-                app.screen = Screen::Generate;
-            }
-            // The tool and the scan are not pages of the box: while either is
-            // the screen, the pane it was reached from keeps its tab but drops
+            // The box's gear opens the floor, on the hand's own side; the lock and Back
+            // close it, and the panes take what is left between them.
+            settings_button(ui, app);
+            ui.add_space(SPREAD);
             // The floor marks one place: the one the user is at.
             let live = app.screen == Screen::Main;
             let mut go = None;
             if let Some(s) = app.boxes.session.as_ref() {
                 let want = s.tab;
-                // The three panes are the bar's centre; generator left and Back right never shift them.
+                // The three panes take the room the ends leave, not the window's
+                // middle: a centred block would run into the gear on the narrowest
+                // phone.
                 let row = ui.max_rect();
+                let right = slot(&ctx) * 2.0 + SPREAD + tail(&ctx);
+                let room = Rect::from_min_max(
+                    pos2(ui.cursor().left(), row.min.y),
+                    pos2(row.max.x - right, row.max.y),
+                );
                 let panes = Rect::from_center_size(
-                    row.center(),
+                    room.center(),
                     vec2(slot(&ctx) * 3.0 + SPREAD * 2.0, row.height()),
                 );
                 let mut middle = ui.new_child(
@@ -339,7 +345,8 @@ fn nav(ui: &mut Ui, app: &mut App) {
                 app.boxes.pane(pane);
                 app.screen = Screen::Main;
             }
-            // Back sits at the far end, where a thumb finds it without crossing the panes.
+            // Right to left: Back at the far end, where a thumb finds it without
+            // crossing the panes, and the box's lock just inside it.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(tail(&ctx));
                 let can = app.can_back();
@@ -360,6 +367,8 @@ fn nav(ui: &mut Ui, app: &mut App) {
                 if can && back.clicked() {
                     app.back();
                 }
+                ui.add_space(SPREAD);
+                lock_button(ui, app);
             });
         });
     });
@@ -419,7 +428,7 @@ fn destination(
     .clicked()
 }
 
-/// The lock acts on the whole app, so a phone keeps it in reach at the top.
+/// The lock acts on the whole app, so the floor keeps it in reach of a thumb.
 fn lock_button(ui: &mut Ui, app: &mut App) {
     if app.boxes.session.is_none() {
         return;
@@ -433,7 +442,7 @@ fn lock_button(ui: &mut Ui, app: &mut App) {
         "Lock box",
         theme::palette().error,
         false,
-        theme::Edge::Floor,
+        theme::Edge::Ceiling,
     )
     .clicked()
     {
@@ -442,7 +451,7 @@ fn lock_button(ui: &mut Ui, app: &mut App) {
 }
 
 /// Box settings are a page of the open box, and the only way to it once the panes
-/// left the bar; app settings are the sliders beside it.
+/// left the floor; app settings are the sliders on the bar above.
 fn settings_button(ui: &mut Ui, app: &mut App) {
     if app.boxes.session.is_none() {
         return;
@@ -462,7 +471,7 @@ fn settings_button(ui: &mut Ui, app: &mut App) {
         crate::shared::i18n::t("Box settings"),
         theme::palette().muted,
         on,
-        theme::Edge::Floor,
+        theme::Edge::Ceiling,
     )
     .clicked()
     {

@@ -131,11 +131,11 @@ fn the_narrow_bar_puts_the_panes_on_the_floor() {
 
     let tool = ctx
         .read_response(Id::new("bar-generate"))
-        .expect("the generator opens the floor")
+        .expect("the generator is still in reach")
         .rect;
     assert!(
-        tool.min.x < 40.0,
-        "the generator is the leftmost of the floor: {tool:?}"
+        tool.max.y <= ceiling,
+        "the tool moved up with the app's own settings, off the floor: {tool:?}"
     );
     assert!(tool.height() >= 44.0, "too small for a thumb: {tool:?}");
 
@@ -144,7 +144,7 @@ fn the_narrow_bar_puts_the_panes_on_the_floor() {
             .unwrap_or_else(|| panic!("{label} is on the floor"))
             .rect
     };
-    let mut left = tool.max.x;
+    let mut left = 0.0;
     for label in ["Passwords", "Files", "Codes"] {
         let rect = slot(label);
         assert!(
@@ -157,7 +157,7 @@ fn the_narrow_bar_puts_the_panes_on_the_floor() {
         );
         assert!(
             rect.min.x >= left,
-            "{label} follows the generator and the pane before it: {rect:?}"
+            "{label} follows the pane before it: {rect:?}"
         );
         left = rect.max.x;
     }
@@ -201,8 +201,11 @@ fn the_narrow_bar_puts_the_panes_on_the_floor() {
     );
 }
 
+/// The floor is the box's: its gear on one end, its lock and Back on the other, and
+/// the three panes centred in the room they leave. The narrowest window the app allows
+/// is the one that decides whether all of it fits.
 #[test]
-fn the_narrow_floor_centres_the_panes_on_the_bar() {
+fn the_narrow_floor_holds_the_box_and_centres_its_panes() {
     for size in [vec2(420.0, 780.0), vec2(380.0, 780.0)] {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
@@ -212,6 +215,7 @@ fn the_narrow_floor_centres_the_panes_on_the_bar() {
         // Two frames, as above: the floor is placed on the first pass.
         frame_at(&ctx, &mut app, size, vec![]);
         frame_at(&ctx, &mut app, size, vec![]);
+        let ceiling = size.y - chrome::NAV;
 
         let slot = |label: &str| {
             ctx.read_response(Id::new(("nav", label)))
@@ -221,10 +225,6 @@ fn the_narrow_floor_centres_the_panes_on_the_bar() {
         let first = slot("Passwords");
         let last = slot("Codes");
         let span = Rect::from_min_max(first.min, last.max);
-        assert!(
-            (span.center().x - size.x * 0.5).abs() <= 1.0,
-            "the panes are not centred on the bar: {span:?} vs {size:?}"
-        );
         // Targets edge to edge are one wide target: a miss lands on its neighbour.
         for pair in [first, slot("Files"), last].windows(2) {
             let (left, right) = (pair[0], pair[1]);
@@ -235,17 +235,37 @@ fn the_narrow_floor_centres_the_panes_on_the_bar() {
             );
         }
 
-        let tool = ctx
-            .read_response(Id::new("bar-generate"))
-            .expect("the generator opens the floor")
-            .rect;
         let back = ctx
             .read_response(Id::new("nav-back"))
             .expect("Back closes the floor")
             .rect;
+        let gear = ctx
+            .read_response(Id::new("bar-settings"))
+            .expect("the box's gear is on the floor")
+            .rect;
+        let lock = ctx
+            .read_response(Id::new("bar-lock"))
+            .expect("the box's lock is on the floor")
+            .rect;
+        for (name, rect) in [("gear", gear), ("lock", lock)] {
+            assert!(
+                rect.min.y >= ceiling && rect.max.y <= size.y,
+                "the {name} is not on the floor: {rect:?}"
+            );
+            assert!(rect.height() >= 44.0, "the {name} is too small: {rect:?}");
+        }
         assert!(
-            span.min.x > tool.max.x && span.max.x < back.min.x,
-            "the centred panes do not clear the bar's ends: {span:?} {tool:?} {back:?}"
+            (gear.min.x - lead(&ctx)).abs() <= 1.0,
+            "the gear does not open the floor: {gear:?}"
+        );
+        assert!(
+            span.min.x > gear.max.x && span.max.x < lock.min.x && lock.max.x <= back.min.x,
+            "the floor reads gear, panes, lock, Back: {gear:?} {span:?} {lock:?} {back:?}"
+        );
+        let air = (span.min.x - gear.max.x - SPREAD) - (lock.min.x - span.max.x);
+        assert!(
+            air.abs() <= 1.0,
+            "the panes are off the middle of the room the ends leave: {air}"
         );
     }
 }
@@ -1128,4 +1148,24 @@ fn the_pin_says_why_a_wayland_session_cannot_pin() {
         status.text,
         "this session does not let an app stay on top: start it with PANDORA_X11=1"
     );
+}
+
+/// A debug probe, not a test: it draws the chrome at a phone's size and, when
+/// `PANDORA_SHOTS` names a folder, writes the pixels there. Run it with
+/// `PANDORA_SHOTS=/tmp/shots cargo test -- --ignored shoot_chrome`.
+#[test]
+#[ignore = "debug probe: writes a shot, asserts nothing"]
+fn shoot_chrome() {
+    for (name, size) in [
+        ("chrome-phone", vec2(420.0, 780.0)),
+        ("chrome-floor", vec2(380.0, 780.0)),
+    ] {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = App::blank(&ctx);
+        app.open("Work");
+        shot::png(&ctx, name, size.x as u32, size.y as u32, None, |ui| {
+            show(ui, &mut app)
+        });
+    }
 }
