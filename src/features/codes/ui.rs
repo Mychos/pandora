@@ -4,7 +4,7 @@
 
 use crate::app::{App, Confirm, Drag, Field, StatusKind};
 use crate::shared::theme;
-use crate::shared::ui::drop::{landing, mark, Landing};
+use crate::shared::ui::drop::{landing, mark, reorder, sense, Landing};
 use crate::shared::ui::entry as record;
 use crate::vault::model::{now_secs, Kind};
 use crate::vault::totp;
@@ -217,7 +217,7 @@ fn rows(ui: &mut Ui, app: &mut App) {
                 ui,
                 ui.id().with(("otp", it.id.as_str())),
                 ROW,
-                egui::Sense::click_and_drag(),
+                sense(ui.ctx()),
                 here,
                 it.name.as_str(),
                 |ui| {
@@ -329,7 +329,9 @@ fn rows(ui: &mut Ui, app: &mut App) {
                 }
             });
 
-            hit.clone().dnd_set_drag_payload(Drag::Entry(it.id.clone()));
+            if reorder(ui.ctx()) {
+                hit.clone().dnd_set_drag_payload(Drag::Entry(it.id.clone()));
+            }
             if hit.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             }

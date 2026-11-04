@@ -9,7 +9,7 @@ use crate::features::entries::tree;
 use crate::features::entries::ui::editor as entry;
 use crate::features::settings::model as prefs;
 use crate::shared::theme;
-use crate::shared::ui::drop::{landing, mark, Landing};
+use crate::shared::ui::drop::{landing, mark, reorder, sense, Landing};
 use crate::shared::ui::entry as record;
 use crate::shared::ui::responsive;
 use crate::vault::model::{Kind, Login, Vault};
@@ -474,7 +474,7 @@ fn rows(
                     theme::brand_of(it),
                     sel == Some(id),
                 );
-                if draggable {
+                if draggable && reorder(ui.ctx()) {
                     resp.clone()
                         .dnd_set_drag_payload(Drag::Entry(id.to_owned()));
                     // A row carried over another lands above or below it, and the
@@ -696,7 +696,7 @@ fn row(
         ui,
         ui.id().with(("row", id)),
         ROW_HEIGHT,
-        egui::Sense::click_and_drag(),
+        sense(ui.ctx()),
         selected,
         &label,
         |ui| {

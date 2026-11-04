@@ -11,7 +11,7 @@ use crate::features::boxes::model::NewFolder;
 use crate::features::drive::preview;
 use crate::features::drive::ui::menu as move_menu;
 use crate::shared::theme;
-use crate::shared::ui::drop::{landing, mark, Landing};
+use crate::shared::ui::drop::{landing, mark, reorder, sense, Landing};
 use crate::shared::ui::responsive;
 use crate::vault::model::{now_secs, Entry, Kind};
 use crate::vault::tree as folders;
@@ -754,7 +754,7 @@ fn tree_row(
         .rect;
 
     let resp = ui
-        .interact(rect, ui.id().with(("tree", id)), Sense::click_and_drag())
+        .interact(rect, ui.id().with(("tree", id)), sense(ui.ctx()))
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     resp.widget_info(|| {
         egui::WidgetInfo::selected(
@@ -768,8 +768,10 @@ fn tree_row(
     if resp.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
-    resp.clone()
-        .dnd_set_drag_payload(Drag::Folder(id.to_owned()));
+    if reorder(ui.ctx()) {
+        resp.clone()
+            .dnd_set_drag_payload(Drag::Folder(id.to_owned()));
+    }
 
     // Registered after the row overlay, so the chevron wins the click there.
     let mut toggled = false;
@@ -1016,7 +1018,9 @@ fn grid(ui: &mut Ui, app: &mut App) {
                         "",
                         sel.as_deref() == Some(id.as_str()),
                     );
-                    resp.clone().dnd_set_drag_payload(Drag::Folder(id.clone()));
+                    if reorder(ui.ctx()) {
+                        resp.clone().dnd_set_drag_payload(Drag::Folder(id.clone()));
+                    }
                     let act = folder_menu(icons, &resp);
                     // ✎ only once the card is hovered or selected — a plain click
                     // opens the folder, it does not open the editor.
@@ -1064,7 +1068,9 @@ fn grid(ui: &mut Ui, app: &mut App) {
                         sub,
                         sel.as_deref() == Some(id.as_str()),
                     );
-                    resp.clone().dnd_set_drag_payload(Drag::Entry(id.clone()));
+                    if reorder(ui.ctx()) {
+                        resp.clone().dnd_set_drag_payload(Drag::Entry(id.clone()));
+                    }
                     match entry_menu(icons, &resp, &tree, folder.clone(), *icon) {
                         Some(EntryAct::Open) => intent.open = Some(id.clone()),
                         Some(EntryAct::Move(dest)) => {
@@ -1139,7 +1145,7 @@ fn card(
     // Registered after the content: labels sense clicks and drags too (text
     // selection), and only the topmost widget wins.
     let resp = ui
-        .interact(rect, ui.id().with(("card", id)), Sense::click_and_drag())
+        .interact(rect, ui.id().with(("card", id)), sense(ui.ctx()))
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     let label = if sub.is_empty() {
         title.to_owned()
