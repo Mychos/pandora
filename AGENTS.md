@@ -49,18 +49,16 @@ act workflow_dispatch -W .github/workflows/release.yml -j linux \
   -P ubuntu-22.04=catthehacker/ubuntu:act-22.04 \
   -P ubuntu-latest=catthehacker/ubuntu:act-latest
 
-# Advisories in the dependency tree; a finding is a bump or a documented ignore. CI
-# runs it nightly rather than per push: what it reports changes with the calendar, not
-# with the diff.
+# Advisories in the dependency tree; a finding is a bump or a documented ignore. Not
+# in CI: what it reports changes with the calendar, not with the diff.
 cargo audit
 
 # The parsers that take bytes from a stranger. Nightly, with a C++ toolchain:
 # `libfuzzer-sys` and the sanitizer are not on stable, and `fuzz/rust-toolchain.toml`
-# pins which one. One target at a time. This is never a gate:
-# `.github/workflows/nightly.yml` runs the same loop on a schedule, carrying the corpus
-# from one run to the next, which is the only thing that makes a minute per target
-# worth it. `check.yml` is the same bargain: a pull request, a tag, or the daily run,
-# never a push to a branch.
+# pins which one. One target at a time. This is never a gate and nothing runs it on a
+# timer: keep `fuzz/corpus` between runs, which is the only thing that makes a minute
+# per target worth it. `check.yml` is the same bargain: a pull request, a tag, or a
+# hand-run, never a push to a branch.
 cd fuzz
 cargo fuzz run codec -- -max_total_time=60
 cargo fuzz run csv   -- -max_total_time=60

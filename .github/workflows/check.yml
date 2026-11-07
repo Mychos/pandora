@@ -9,15 +9,12 @@
 # and idle branches still have to be seen by rustc.
 name: check
 
-# Never on a push to a branch: a commit is verified by the daily run below, and a tag
-# is verified before anything ships. A pull request and a hand-run are the two moments
-# somebody is waiting on the answer.
+# Never on a push to a branch, and never on a timer: a pull request, a tag that is
+# about to ship, and a hand-run are the three moments somebody is waiting on the answer.
 on:
   pull_request:
   push:
     tags: ["v*"]
-  schedule:
-    - cron: "40 4 * * *"
   workflow_dispatch:
 
 # Two runs of the same ref are one question, and the answer to the first costs minutes.
